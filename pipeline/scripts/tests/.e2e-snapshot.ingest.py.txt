@@ -1,0 +1,21 @@
+=== wiki/entities/e2e-entity.md ===
+---
+type: Entity
+page_id: <PAGE_ID>
+aliases: [e2e-entity]
+tags: [concept, biology/cell]
+sources: [<SOURCE_ID>]
+last_ingested: <DATE>
+---
+# e2e-entity
+
+<!-- human-zone -->
+<!-- /human-zone -->
+
+<!-- llm-zone -->
+> [!AI] LLM Synthesis
+>
+> An end-to-end stub claim about e2e-entity [src:<SOURCE_ID>].
+<!-- /llm-zone -->
+=== .wiki/log.md (last line) ===
+<ADDED>  <SOURCE_ID>  pages: wiki/_index/biology__cell.md wiki/_index/concept.md wiki/entities/e2e-entity.md

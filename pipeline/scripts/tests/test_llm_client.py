@@ -1,0 +1,240 @@
+import importlib.util
+import os
+import stat
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("llm_client", ROOT / "scripts" / "llm_client.py")
+llm_client = importlib.util.module_from_spec(SPEC)
+sys.modules["llm_client"] = llm_client
+SPEC.loader.exec_module(llm_client)
+
+DERIVED_SPEC = importlib.util.spec_from_file_location("derived_lib", ROOT / "scripts" / "derived_lib.py")
+derived_lib = importlib.util.module_from_spec(DERIVED_SPEC)
+sys.modules["derived_lib"] = derived_lib
+DERIVED_SPEC.loader.exec_module(derived_lib)
+
+INGEST_SPEC = importlib.util.spec_from_file_location("ingest_mod", ROOT / "ingest.py")
+ingest_mod = importlib.util.module_from_spec(INGEST_SPEC)
+sys.modules["ingest_mod"] = ingest_mod
+INGEST_SPEC.loader.exec_module(ingest_mod)
+
+
+def write_executable(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _fake_codex(emit_events: bool = False) -> str:
+    """A stand-in `codex` that mirrors the real --json/-o contract: the final
+    message (what we treat as the diff) is written to the `-o <file>` path, and
+    with emit_events it streams a couple of JSONL events to stdout for the
+    progress reader. The written payload echoes argv + cwd so tests can assert on
+    the flags/working dir codex was launched with."""
+    events = ""
+    if emit_events:
+        events = (
+            "print(json.dumps({'type':'token_count',"
+            "'info':{'last_token_usage':{'input_tokens':84000}}}), flush=True)\n"
+            "print(json.dumps({'type':'message','role':'assistant',"
+            "'content':[{'type':'output_text','text':'writing pages'}]}), flush=True)\n"
+        )
+    return (
+        "#!/usr/bin/env python3\n"
+        "import os, sys, json\n"
+        "argv = sys.argv[1:]\n"
+        "out = argv[argv.index('-o') + 1] if '-o' in argv else None\n"
+        f"{events}"
+        "payload = ' '.join(argv) + '\\nCWD=' + os.getcwd()\n"
+        "open(out, 'w').write(payload) if out else sys.stdout.write(payload)\n"
+    )
+
+
+class LlmClientTests(unittest.TestCase):
+    def test_command_override_honors_base_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cmd"
+            cwd = Path(tmp) / "cwd"
+            base.mkdir()
+            cwd.mkdir()
+            write_executable(base / "stub.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf ok\n")
+            env = {
+                "LLM_CMD": "./stub.sh",
+                "PW_LLM_CMD_BASE_DIR": str(base),
+                "PATH": os.environ.get("PATH", ""),
+            }
+            with patch.dict(os.environ, env, clear=True), patch("os.getcwd", return_value=str(cwd)):
+                self.assertEqual(llm_client.complete_command("prompt", timeout=5), "ok")
+
+    def test_derived_lib_call_llm_honors_base_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cmd"
+            cwd = Path(tmp) / "cwd"
+            base.mkdir()
+            cwd.mkdir()
+            write_executable(base / "stub.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf ok\n")
+            env = {
+                "LLM_CMD": "./stub.sh",
+                "PW_LLM_CMD_BASE_DIR": str(base),
+                "PATH": os.environ.get("PATH", ""),
+            }
+            with patch.dict(os.environ, env, clear=True), patch("os.getcwd", return_value=str(cwd)):
+                self.assertEqual(derived_lib.call_llm("prompt", 5), "ok")
+
+    def test_ingest_llm_honors_base_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cmd"
+            cwd = Path(tmp) / "cwd"
+            base.mkdir()
+            cwd.mkdir()
+            write_executable(base / "stub.sh", "#!/usr/bin/env bash\ncat >/dev/null\nprintf ok\n")
+            env = {
+                "LLM_CMD": "./stub.sh",
+                "PW_LLM_CMD_BASE_DIR": str(base),
+                "PATH": os.environ.get("PATH", ""),
+            }
+            with patch.dict(os.environ, env, clear=True), patch("os.getcwd", return_value=str(cwd)):
+                self.assertEqual(ingest_mod.llm("prompt", soft=False), "ok")
+
+    def test_codex_provider_uses_direct_argv_without_shell_bridge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(llm_client.provider(), "codex")
+                # diff comes from the -o file, which echoes argv (prompt last)
+                self.assertIn("hello", llm_client.complete_command("hello", timeout=5))
+
+    def test_codex_uses_pw_llm_model_when_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_LLM_MODEL": "gpt-5-codex",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                out = llm_client.complete_command("hello", timeout=5)
+            self.assertIn("-m gpt-5-codex", out)  # model passed through
+            self.assertIn("hello", out)           # prompt passed through
+
+    def test_codex_reuses_seeded_workdir_without_deleting_it(self):
+        # When ingest seeds a workdir (candidate pages), codex must run there and
+        # the dir must SURVIVE the call (ingest owns cleanup) — the modify case.
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            seeded = Path(tmp) / "workset"
+            (seeded / "wiki" / "entities").mkdir(parents=True)
+            write_executable(bin_dir / "codex", _fake_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_WORKDIR": str(seeded),
+                "PW_CODEX_PROGRESS": "0",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                out = llm_client.complete_command("hello", timeout=5)
+            self.assertIn(f"-C {seeded}", out)
+            cwd = [l for l in out.splitlines() if l.startswith("CWD=")][0][4:]
+            self.assertEqual(os.path.realpath(cwd), os.path.realpath(seeded))  # ran in seeded dir
+            self.assertTrue(seeded.is_dir())       # NOT deleted by llm_client
+
+    def test_codex_streams_json_events_as_progress_and_diff_from_output_file(self):
+        # --json events on stdout become stderr heartbeats; the diff comes from -o.
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex(emit_events=True))
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            buf = io.StringIO()
+            with patch.dict(os.environ, env, clear=True), contextlib.redirect_stderr(buf):
+                out = llm_client.complete_command("hello", timeout=5)
+            progress = buf.getvalue()
+            self.assertIn("turn 1 · 84k", progress)   # token_count → heartbeat
+            self.assertIn("writing pages", progress)   # assistant message → heartbeat
+            self.assertIn("hello", out)                # diff still returned (from -o)
+
+    def test_codex_progress_line_reads_turn_ctx_message_and_tool(self):
+        state = {}
+        # window comes from task_started, then token_count reports per-turn ctx
+        self.assertIsNone(llm_client._codex_progress_line(
+            {"payload": {"type": "task_started", "model_context_window": 258400}}, state))
+        line = llm_client._codex_progress_line(
+            {"payload": {"type": "token_count",
+                         "info": {"last_token_usage": {"input_tokens": 84000}}}}, state)
+        self.assertEqual(line, "codex · turn 1 · 84k/258k ctx")
+        # assistant narrative
+        msg = llm_client._codex_progress_line(
+            {"payload": {"type": "message", "role": "assistant",
+                         "content": [{"type": "output_text",
+                                      "text": "creating  真核细胞.md\nlinking"}]}}, state)
+        self.assertIn("creating 真核细胞.md linking", msg)
+        self.assertIn("84k/258k ctx", msg)  # carries last-known ctx
+        # tool call: apply_patch add-file gets summarized
+        tool = llm_client._codex_progress_line(
+            {"payload": {"type": "custom_tool_call", "name": "apply_patch",
+                         "arguments": "*** Begin Patch\n*** Add File: wiki/entities/x.md\n+..."}}, state)
+        self.assertIn("apply_patch Add wiki/entities/x.md", tool)
+        # unknown event → no line
+        self.assertIsNone(llm_client._codex_progress_line({"payload": {"type": "noise"}}, state))
+
+    def test_codex_is_isolated_from_repo_with_writable_scratch(self):
+        # The overflow fix: codex runs in an empty scratch working root (-C) with
+        # a writable sandbox there, and NEVER read-only, so it can't burn context
+        # exploring the content repo or thrash on blocked scratch writes.
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                out = llm_client.complete_command("hello", timeout=5)
+            self.assertIn("--sandbox workspace-write", out)
+            self.assertNotIn("read-only", out)
+            self.assertIn("-C ", out)  # isolated working root passed
+            # codex ran with cwd == the scratch dir, not the content repo.
+            cwd = [ln for ln in out.splitlines() if ln.startswith("CWD=")][0][4:]
+            self.assertIn("pw-codex-", cwd)
+
+    def test_legacy_shell_bridge_is_treated_as_codex_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            env = {
+                "LLM_CMD": "../pipeline/scripts/llm-codex.sh",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(llm_client.command(), "")
+                self.assertEqual(llm_client.provider(), "codex")
+                self.assertIn("prompt", llm_client.complete_command("prompt", timeout=5))
+
+    def test_api_key_requires_explicit_enable(self):
+        with patch.dict(os.environ, {"PW_LLM_API_KEY": "unused"}, clear=True):
+            self.assertFalse(llm_client.configured())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,39 @@
+---
+import Base from '../../layouts/Base.astro';
+import { loadVault, sourceHasBlocks, sourceReaderHref } from '../../lib/vault.mjs';
+import type { SourceMeta } from '../../lib/vault.mjs';
+
+export async function getStaticPaths() {
+  const { sources } = loadVault();
+  return sources.map((s: SourceMeta) => ({ params: { id: s.id }, props: { source: s } }));
+}
+const { source } = Astro.props as { source: SourceMeta };
+const { pages } = loadVault();
+const readable = sourceHasBlocks(source.id);
+const readHref = sourceReaderHref(source.id);
+const citedBy = pages.filter((p) => (p.sources || []).includes(source.id))
+  .sort((a, b) => a.title.localeCompare(b.title, 'zh'));
+---
+<Base title={source.title} active="sources" crumbs={[{ label: 'Sources', href: '/sources' }, { label: source.title }]} rail={true}>
+  {readable && <a slot="topright" class="btn-accent" style="padding:6px 14px;text-decoration:none" href={readHref}>Read →</a>}
+  <article class="prose">
+    <div class="title-row">
+      <h1>{source.title}</h1>
+      <div class="metaline">Source · {source.origin_type} · <code>{source.id}</code></div>
+    </div>
+    <div class="card">
+      <h3>Provenance</h3>
+      <p class="small">This is an immutable ingested source. Every <a class="cite" href="#" onclick="return false">src</a> chip
+      in the wiki that resolves to <code>{source.id}</code> links back here.</p>
+      {source.origin_ref ? <p class="small muted">origin: {source.origin_ref}</p> : null}
+      {source.supersedes ? <p class="small muted">supersedes: {source.supersedes}</p> : null}
+    </div>
+    <h2>Cited by ({citedBy.length})</h2>
+    <ul class="pagelist">
+      {citedBy.map((p) => <li><a href={p.href}>{p.title} <span class="muted small">· {p.kind}</span></a></li>)}
+    </ul>
+  </article>
+  <Fragment slot="rail">
+    <div class="rail-block"><h4>Type</h4><span class="chip">{source.origin_type}</span></div>
+  </Fragment>
+</Base>

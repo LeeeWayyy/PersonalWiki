@@ -1,0 +1,73 @@
+---
+import Base from '../../../../../layouts/Base.astro';
+import SourceReader from '../../../../../components/SourceReader.astro';
+import { loadVault, blocksForSource, citationsForSource, cleanTitle as clean } from '../../../../../lib/vault.mjs';
+import {
+  chapterForSourceAnchor,
+  sourceReaderChapterHref,
+  sourceReaderSections,
+} from '../../../../../lib/source-reader-chapters.mjs';
+import type { SourceMeta, Citation } from '../../../../../lib/vault.mjs';
+
+export async function getStaticPaths() {
+  const { sources } = loadVault();
+  const paths = [];
+  for (const s of sources as SourceMeta[]) {
+    const fullDoc = blocksForSource(s.id);
+    const chapters = sourceReaderSections(fullDoc?.blocks || []);
+    for (const chapter of chapters) {
+      paths.push({
+        params: { id: s.id, chapter: chapter.id },
+        props: {
+          source: s,
+          doc: fullDoc ? { ...fullDoc, blocks: chapter.blocks } : null,
+          citations: citationsForSource(s.id),
+          chapters,
+          currentChapterId: chapter.id,
+          fullBlockCount: fullDoc?.blocks?.length || 0,
+        },
+      });
+    }
+  }
+  return paths;
+}
+const { source, doc, citations, chapters, currentChapterId, fullBlockCount } = Astro.props as {
+  source: SourceMeta;
+  doc: any;
+  citations: Citation[];
+  chapters: any[];
+  currentChapterId: string;
+  fullBlockCount: number;
+};
+const blocks = doc?.blocks ?? [];
+const currentChapter = chapters.find((chapter) => chapter.id === currentChapterId) || chapters[0];
+const chapterIndex = chapters.findIndex((chapter) => chapter.id === currentChapter.id);
+const prevChapter = chapterIndex > 0 ? chapters[chapterIndex - 1] : null;
+const nextChapter = chapterIndex >= 0 && chapterIndex < chapters.length - 1 ? chapters[chapterIndex + 1] : null;
+const chapterLinks = chapters.map((chapter) => ({
+  ...chapter,
+  href: sourceReaderChapterHref(source.id, chapter),
+}));
+const chapterCommands = chapterLinks.map((chapter) => ({ title: chapter.title, href: chapter.href }));
+const prevHref = prevChapter ? sourceReaderChapterHref(source.id, prevChapter) : '';
+const nextHref = nextChapter ? sourceReaderChapterHref(source.id, nextChapter) : '';
+const citationInCurrentChapter = (c: Citation) => {
+  if (!c.anchor) return true;
+  return chapterForSourceAnchor(chapters, c.anchor)?.id === currentChapter.id;
+};
+const currentCitations = (citations || []).filter(citationInCurrentChapter);
+const readerProps = {
+  source, blocks, citations: currentCitations, promoteFrom: citations, chapterLinks,
+  hasToc: true,
+  currentChapterId: currentChapter.id,
+  chapterTitle: currentChapter.title,
+  nav: { prevHref, nextHref, index: chapterIndex + 1, count: chapters.length },
+  detail: `${source.origin_type} · chapter ${chapterIndex + 1}/${chapters.length} · ${blocks.length}/${fullBlockCount} blocks`,
+  configExtras: { chapterCommands, chapterScoped: true },
+};
+---
+<Base title={clean(source.title)} active="sources" crumbs={[{ label: 'Sources', href: '/sources' }, { label: clean(source.title), href: `/sources/${source.id}` }, { label: 'Read' }]}>
+  {prevHref && <link slot="head" rel="prefetch" href={prevHref} />}
+  {nextHref && <link slot="head" rel="prefetch" href={nextHref} />}
+  <SourceReader {...readerProps} />
+</Base>

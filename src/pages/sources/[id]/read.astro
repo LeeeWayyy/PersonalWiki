@@ -1,0 +1,72 @@
+---
+import Base from '../../../layouts/Base.astro';
+import SourceReader from '../../../components/SourceReader.astro';
+import { loadVault, blocksForSource, citationsForSource, cleanTitle as clean } from '../../../lib/vault.mjs';
+import { sourceReaderChapterHref, sourceReaderSections } from '../../../lib/source-reader-chapters.mjs';
+import type { SourceMeta, Citation } from '../../../lib/vault.mjs';
+
+export async function getStaticPaths() {
+  const { sources } = loadVault();
+  return sources.map((s: SourceMeta) => {
+    const fullDoc = blocksForSource(s.id);
+    const chapters = sourceReaderSections(fullDoc?.blocks || []);
+    const redirectHref = chapters.length > 1 ? sourceReaderChapterHref(s.id, chapters[0]) : '';
+    return {
+      params: { id: s.id },
+      props: {
+        source: s,
+        doc: redirectHref ? null : fullDoc,
+        citations: redirectHref ? [] : citationsForSource(s.id),
+        chapters,
+        redirectHref,
+      },
+    };
+  });
+}
+const { source, doc, citations, chapters: sourceChapters, redirectHref } = Astro.props as {
+  source: SourceMeta;
+  doc: any;
+  citations: Citation[];
+  chapters: any[];
+  redirectHref: string;
+};
+const isChapterRedirect = !!redirectHref;
+const blocks = doc?.blocks ?? [];
+const chapters = sourceChapters?.length ? sourceChapters : sourceReaderSections(blocks);
+const chapterLinks = chapters.map((chapter) => ({
+  ...chapter,
+  href: sourceReaderChapterHref(source.id, chapter),
+}));
+const displayBlockCount = isChapterRedirect
+  ? chapters.reduce((sum, chapter) => sum + (chapter.block_count || 0), 0)
+  : blocks.length;
+const redirectTargets = chapterLinks.map((chapter) => ({
+  href: chapter.href,
+  title: chapter.title,
+  section: chapter.section,
+  section_id: chapter.section_id,
+  blocks: chapter.blocks.map((block: any) => ({ id: block.id })),
+}));
+const readerProps = {
+  source, blocks, citations, promoteFrom: citations, chapterLinks,
+  hasToc: chapterLinks.length > 1,
+  detail: `${source.origin_type} · ${chapterLinks.length} chapters · ${displayBlockCount} blocks`,
+  configExtras: { chapterScoped: false },
+};
+---
+<Base title={clean(source.title)} active="sources" crumbs={[{ label: 'Sources', href: '/sources' }, { label: clean(source.title), href: `/sources/${source.id}` }, { label: 'Read' }]}>
+  {isChapterRedirect ? (
+    <SourceReader {...readerProps}>
+      <div id="sr-read-redirect" class="card" data-href={redirectHref} data-chapters={JSON.stringify(redirectTargets)}>
+        <p class="muted">This source is split into chapters for faster reading.</p>
+        <p><a href={redirectHref}>Open first chapter</a></p>
+      </div>
+      <script>
+        import { bootSourceReaderRedirect } from '../../../scripts/source-reader-redirect.js';
+        bootSourceReaderRedirect();
+      </script>
+    </SourceReader>
+  ) : (
+    <SourceReader {...readerProps} />
+  )}
+</Base>

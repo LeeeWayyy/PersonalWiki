@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# content/ is gitignored (private vault), so the frontend jobs build against the
+# committed ci-fixtures/content instead.
+env:
+  PW_CONTENT_DIR: ${{ github.workspace }}/ci-fixtures/content
+
+jobs:
+  frontend:
+    name: Frontend (check + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Sync fixture vault
+        run: npm run sync
+      - name: Type + Astro check
+        run: npm run check
+      - name: Runtime external URL scan
+        run: npm run check:external
+      - name: Frontend unit tests
+        run: npm run test:unit
+      - name: Build static site
+        run: npm run build
+      - name: Whitespace / conflict-marker check
+        run: git diff --check HEAD
+
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install backend + test deps
+        run: pip install -r backend/requirements-dev.txt
+      - name: Compile-all
+        run: python -m compileall backend/app
+      - name: Full backend pytest suite
+        working-directory: backend
+        run: python -m pytest
+
+  pipeline:
+    name: Pipeline (Python + shell suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install uv (runs the scripts' inline deps)
+        uses: astral-sh/setup-uv@v6
+      - name: System tools
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: pyyaml for python3-invoked helpers
+        run: pip install pyyaml
+      - name: beautifulsoup4 for extract.py unit tests (mobi/epub dispatch)
+        run: pip install beautifulsoup4
+      - name: Run pipeline Python tests
+        run: python -m unittest discover -s pipeline/scripts/tests -p 'test_*.py'
+      - name: Run the pipeline shell suite
+        run: |
+          fail=0
+          for t in pipeline/scripts/tests/test_*.sh; do
+            echo "── $t"
+            bash "$t" || fail=1
+          done
+          exit $fail
+
+  audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=moderate

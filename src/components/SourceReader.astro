@@ -1,0 +1,248 @@
+---
+// Shared source-reader shell for /sources/[id]/read and /sources/[id]/read/[chapter].
+// Renders the header, prefs panel, chapter TOC, block stream, notes rail, cite
+// groups, and the selection/assist/command overlays. Pages pass what differs:
+// the detail line, chapter scoping, and (for the split-source landing page) a
+// default-slot body that replaces the reader (the chapter redirect card).
+import { cleanTitle as clean } from '../lib/vault.mjs';
+import type { SourceMeta, Citation } from '../lib/vault.mjs';
+import '../styles/source-reader.css';
+
+interface Props {
+  source: SourceMeta;
+  blocks: any[];
+  citations: Citation[];      // shown in the rail (chapter pages pass a chapter-scoped list)
+  promoteFrom: Citation[];    // full list — promote targets are source-wide
+  chapterLinks: any[];        // chapters + href
+  hasToc: boolean;
+  detail: string;             // sr-detail text in the header
+  currentChapterId?: string;  // marks the active TOC entry
+  chapterTitle?: string;      // subtitle under the source title (chapter pages)
+  nav?: { prevHref: string; nextHref: string; index: number; count: number };
+  configExtras?: Record<string, unknown>; // merged into data-source-reader
+}
+const {
+  source, blocks, citations, promoteFrom, chapterLinks, hasToc, detail,
+  currentChapterId = '', chapterTitle = '', nav = null, configExtras = {},
+} = Astro.props as Props;
+
+// group consecutive blocks by section for headings
+const sections: { section: string; blocks: any[] }[] = [];
+for (const b of blocks) {
+  if (!sections.length || sections[sections.length - 1].section !== b.section) sections.push({ section: b.section, blocks: [] });
+  sections[sections.length - 1].blocks.push(b);
+}
+// Group AI-citation backlinks by anchor (chapter), ordered to follow the reading
+// order of the sections, with un-anchored ("general") references last.
+const citeByAnchor = new Map<string, Citation[]>();
+for (const c of citations || []) {
+  const k = c.anchor || '';
+  if (!citeByAnchor.has(k)) citeByAnchor.set(k, []);
+  citeByAnchor.get(k)!.push(c);
+}
+const sectionOrder = sections.map((s) => s.section);
+const citeGroups = [...citeByAnchor.entries()].sort((a, b) => {
+  if (a[0] === '') return 1; if (b[0] === '') return -1;
+  const ia = sectionOrder.indexOf(a[0]), ib = sectionOrder.indexOf(b[0]);
+  return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+});
+// Wiki pages that cite this source — the "promote a note into the page" targets.
+const promoteTargets = [...new Map((promoteFrom || []).map((c) => [
+  c.wiki_href, { href: c.wiki_href, rel: c.wiki_href.replace(/^\/wiki\//, ''), title: clean(c.wiki_title) },
+])).values()];
+const readerConfig = { sourceId: source.id, sourceTitle: clean(source.title), promoteTargets, ...configExtras };
+// A default-slot body (the chapter-redirect card) replaces the reader entirely.
+const hasBody = !Astro.slots.has('default');
+---
+<div id="srcread" class={hasToc ? 'has-toc' : ''} data-source-reader={JSON.stringify(readerConfig)}>
+  <div class="sr-head">
+    <div class="sr-meta">
+      <span class="sr-kicker">Source · read</span>
+      <span class="sr-detail">{detail}</span>
+      <span id="sr-progress-text" class="sr-detail"></span>
+    </div>
+    {blocks.length ? (
+      <div class="sr-actions" aria-label="Reader controls">
+        <button class="sr-tool" type="button" data-act="resume" title="Resume reading">Resume</button>
+        <button class="sr-tool sr-page-tool" type="button" data-act="page-prev" aria-label="Previous page" title="Previous page">←</button>
+        <button class="sr-tool sr-page-tool" type="button" data-act="page-next" aria-label="Next page" title="Next page">→</button>
+        <button class="sr-tool" type="button" data-act="prefs" aria-controls="sr-prefs" aria-expanded="false" title="Reading preferences">Aa</button>
+        <button class="sr-tool" type="button" data-act="focus" aria-pressed="false" title="Focus mode">Focus</button>
+        <button class="sr-tool sr-notes-toggle" type="button" data-act="notes" aria-controls="sr-notes" aria-expanded="false" title="Notes">Notes</button>
+      </div>
+    ) : null}
+  </div>
+  <h1 class="sr-title">{clean(source.title)}</h1>
+  {chapterTitle && <div class="sr-chapter-title">{chapterTitle}</div>}
+
+  {!hasBody ? (
+    <slot />
+  ) : blocks.length ? (
+    <>
+    {nav && (
+      <div class="sr-chapter-nav" aria-label="Chapter navigation">
+        {nav.prevHref ? <a href={nav.prevHref}>← Previous</a> : <span></span>}
+        <span>{nav.index} / {nav.count}</span>
+        {nav.nextHref ? <a href={nav.nextHref}>Next →</a> : <span></span>}
+      </div>
+    )}
+    <div id="sr-progress" aria-hidden="true"><span></span></div>
+    <div id="sr-prefs" class="sr-prefs" popover="auto">
+      <div class="sr-pref-row">
+        <label for="sr-font-size">Size</label>
+        <input id="sr-font-size" type="range" min="16" max="24" step="1" data-pref="fontSize" />
+        <output data-out="fontSize"></output>
+      </div>
+      <div class="sr-pref-row">
+        <label for="sr-line-height">Line</label>
+        <input id="sr-line-height" type="range" min="1.65" max="2.25" step="0.05" data-pref="lineHeight" />
+        <output data-out="lineHeight"></output>
+      </div>
+      <div class="sr-pref-group" role="group" aria-label="Reading mode">
+        <span>Mode</span>
+        <button type="button" data-mode="scroll">Scroll</button>
+        <button type="button" data-mode="page">Page</button>
+      </div>
+      <div class="sr-pref-group" role="group" aria-label="Text width">
+        <span>Width</span>
+        <button type="button" data-width="34rem">Narrow</button>
+        <button type="button" data-width="42rem">Normal</button>
+        <button type="button" data-width="50rem">Wide</button>
+      </div>
+      <div class="sr-pref-group" role="group" aria-label="Font">
+        <span>Font</span>
+        <button type="button" data-font="serif">Serif</button>
+        <button type="button" data-font="sans">Sans</button>
+      </div>
+      <div class="sr-pref-group" role="group" aria-label="Theme">
+        <span>Theme</span>
+        <button type="button" data-theme="night">Dark</button>
+        <button type="button" data-theme="paper">Paper</button>
+        <button type="button" data-theme="sepia">Sepia</button>
+      </div>
+      <button class="sr-reset" type="button" data-act="prefs-reset">Reset</button>
+    </div>
+    <div id="sr-grid" class={hasToc ? 'has-toc' : ''}>
+      {hasToc ? (
+        <nav class="sr-toc" aria-label="Chapters">
+          <h4>Chapters</h4>
+          {chapterLinks.map((chapter) => (
+            <a href={chapter.href} class={chapter.id === currentChapterId ? 'on' : ''}>
+              <span>{chapter.title}</span>
+              <small>{chapter.block_count}</small>
+            </a>
+          ))}
+        </nav>
+      ) : null}
+      <div id="sr-doc">
+        {sections.map((sec) => (
+          <>
+            {sec.section && <div class="sec-h">{sec.section}</div>}
+            {sec.blocks.map((b: any) => (
+              b.type === 'heading'
+                ? (b.text !== b.section && <div class="sub-h" id={b.id} data-block={b.id} data-section={b.section_id} data-prev={b.prev} data-next={b.next} set:text={b.text}></div>)
+                : b.type === 'image'
+                  ? (
+                    <figure class="fig" id={b.id} data-block={b.id} data-section={b.section_id} data-prev={b.prev} data-next={b.next}>
+                      <div class="fig-imgwrap"><img src={b.src} alt={b.text} loading="lazy" /><button class="fig-add" title="Add a note to this figure">＋ note</button></div>
+                      {b.text && <figcaption>{b.text}</figcaption>}
+                    </figure>
+                  )
+                  : <p class="blk" id={b.id} data-block={b.id} data-section={b.section_id} data-prev={b.prev} data-next={b.next} set:text={b.text}></p>
+            ))}
+          </>
+        ))}
+      </div>
+      <aside id="sr-notes" class="rail" style="position:sticky;top:74px">
+        <div class="sr-rail-head">
+          <h4>Notes <span id="sr-count" style="color:var(--text-2)"></span></h4>
+          <button class="sr-drawer-close" type="button" data-act="notes-close">Close</button>
+        </div>
+        <div id="sr-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+          <button data-f="all" class="on">All</button>
+          <button data-f="note" style="color:var(--amber)">Notes</button>
+          <button data-f="question" style="color:var(--sage)">Questions</button>
+          <button data-f="important" style="color:var(--terra)">Important</button>
+        </div>
+        <div id="sr-list"></div>
+        <div id="sr-orphans"></div>
+        <p id="sr-status" class="small muted" style="margin-top:10px">·</p>
+
+        {citeGroups.length ? (
+          <div id="sr-cited" style="margin-top:20px">
+            <h4>Cited by the wiki <span style="color:var(--text-2)">({citations.length})</span></h4>
+            {citeGroups.map(([anchor, items], gi) => (
+              <details open={gi === 0}>
+                <summary>{anchor || 'General references'}<span class="n">{items.length}</span></summary>
+                {items.map((c) => (
+                  <div class="cite-card" data-anchor={anchor}>
+                    <div class="ex">{c.kind === 'ai' && <span class="ai">AI</span>} {c.excerpt}</div>
+                    <div class="src"><a href={c.wiki_href} title={c.wiki_title}>{clean(c.wiki_title)}</a>{anchor && <span class="loc">↩ locate</span>}</div>
+                  </div>
+                ))}
+              </details>
+            ))}
+          </div>
+        ) : null}
+      </aside>
+    </div>
+    <div id="sr-notes-shade"></div>
+    </>
+  ) : (
+    <>
+      <div class="card"><p class="muted">This source has no readable text yet. Documents (epub/pdf) become readable when local sync extracts <code>vault/.blocks/&lt;source_id&gt;.blocks.json</code>. Language sources are readable now.</p></div>
+      {citeGroups.length ? (
+        <div id="sr-cited" style="max-width:640px;margin-top:22px">
+          <h4>Cited by the wiki <span style="color:var(--text-2)">({citations.length})</span></h4>
+          {citeGroups.map(([anchor, items], gi) => (
+            <details open={gi === 0}>
+              <summary>{anchor || 'General references'}<span class="n">{items.length}</span></summary>
+              {items.map((c) => (
+                <div class="cite-card" style="cursor:default">
+                  <div class="ex">{c.kind === 'ai' && <span class="ai">AI</span>} {c.excerpt}</div>
+                  <div class="src"><a href={c.wiki_href} title={c.wiki_title}>{clean(c.wiki_title)}</a></div>
+                </div>
+              ))}
+            </details>
+          ))}
+        </div>
+      ) : null}
+    </>
+  )}
+</div>
+
+{hasBody && blocks.length ? (
+  <>
+  <div id="sr-pop" popover="auto">
+    <span class="dot" data-color="note" style="background:var(--amber)" title="Note"></span>
+    <span class="dot" data-color="question" style="background:var(--sage)" title="Question"></span>
+    <span class="dot" data-color="important" style="background:var(--terra)" title="Important"></span>
+    <span class="sep"></span>
+    <button data-act="comment">Comment</button>
+    <button data-act="ai">✦ AI</button>
+    <button data-act="copy">Copy</button>
+  </div>
+
+  <div id="sr-assist" popover="auto">
+    <div class="hd">
+      <span class="modes"><button data-m="explain" class="on">Explain</button><button data-m="summarize">Summarize</button><button data-m="define">Define</button></span>
+      <button class="x" title="Close">✕</button>
+    </div>
+    <div class="src-q"></div>
+    <div class="out"></div>
+    <div class="foot">✦ AI · results are not saved as notes</div>
+  </div>
+
+  <dialog id="sr-cmd">
+    <div class="cmd-box">
+      <input type="text" placeholder="Jump to chapter, note, filter, ask AI…" autocomplete="off" spellcheck="false" />
+      <div class="cmd-list"></div>
+    </div>
+  </dialog>
+
+  <script>
+    import { bootSourceReaderFromDom } from '../scripts/source-reader-client.js';
+    bootSourceReaderFromDom();
+  </script>
+  </>
+) : null}

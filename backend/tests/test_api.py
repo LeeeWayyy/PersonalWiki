@@ -1,0 +1,905 @@
+"""Route tests for the personal-wiki backend.
+
+Covers the health probe, fail-closed private-route auth, annotation CRUD,
+image-region round-trip, promote-to-human-zone (into the temp content git repo),
+study/job read auth, and the AI-assist / translate graceful-degradation paths
+(no LLM configured).
+"""
+import asyncio
+import json
+import os
+import shlex
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def test_health_ok(client):
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["auth"] is True
+    assert "content" in body  # regression: /health used to reference a removed attr
+
+
+def test_db_connection_pragmas_and_indexes():
+    from app import db
+
+    conn = db.connect()
+    try:
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+        indexes = {
+            r["name"]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_items_state_due" in indexes
+        assert "idx_reviews_item" in indexes
+    finally:
+        conn.close()
+
+
+def test_db_migrates_legacy_reviews_table_to_foreign_key(monkeypatch, tmp_path):
+    from app import db
+
+    legacy_db = tmp_path / "study.db"
+    raw = sqlite3.connect(legacy_db)
+    raw.executescript(
+        """
+        CREATE TABLE items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL DEFAULT 'word',
+          norm_key TEXT NOT NULL,
+          lemma TEXT NOT NULL,
+          reading TEXT,
+          pos TEXT,
+          gloss TEXT,
+          example TEXT,
+          source_id TEXT,
+          anchor TEXT,
+          status TEXT NOT NULL DEFAULT 'new',
+          stability REAL NOT NULL DEFAULT 0,
+          difficulty REAL NOT NULL DEFAULT 0,
+          state INTEGER NOT NULL DEFAULT 0,
+          reps INTEGER NOT NULL DEFAULT 0,
+          lapses INTEGER NOT NULL DEFAULT 0,
+          due TEXT,
+          last_review TEXT,
+          created TEXT NOT NULL
+        );
+        CREATE TABLE reviews (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          item_id INTEGER NOT NULL,
+          grade INTEGER NOT NULL,
+          reviewed TEXT NOT NULL,
+          interval INTEGER
+        );
+        INSERT INTO items(id,kind,norm_key,lemma,created,due)
+          VALUES(1,'word','word:legacy','legacy','2026-01-01T00:00:00Z','2026-01-02');
+        INSERT INTO reviews(id,item_id,grade,reviewed,interval)
+          VALUES(1,1,3,'2026-01-02T00:00:00Z',1),
+                (2,99,3,'2026-01-02T00:00:00Z',1);
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", legacy_db)
+
+    conn = db.connect()
+    try:
+        assert conn.execute("PRAGMA foreign_key_list(reviews)").fetchone() is not None
+        rows = conn.execute("SELECT item_id FROM reviews ORDER BY id").fetchall()
+        assert [r[0] for r in rows] == [1]
+        conn.execute("DELETE FROM items WHERE id=1")
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_private_routes_fail_closed_when_auth_token_unset(client, monkeypatch):
+    from app import settings
+
+    monkeypatch.setattr(settings, "AUTH_TOKEN", "")
+    assert client.get("/health").status_code == 200
+
+    cases = [
+        ("GET", "/health/llm", {}),
+        ("POST", "/ingest", {"json": {"url": "https://example.com"}}),
+        ("GET", "/jobs/missing", {}),
+        ("GET", "/jobs/missing/events", {}),
+        ("POST", "/jobs/missing/cancel", {}),
+        ("GET", "/preflight", {}),
+        ("POST", "/vocab", {"json": {"lemma": "mitochondria"}}),
+        ("PATCH", "/vocab/1", {"json": {"status": "known"}}),
+        ("GET", "/vocab", {}),
+        ("GET", "/review/queue", {}),
+        ("POST", "/review/1/grade", {"json": {"grade": 3}}),
+        ("GET", "/review/stats", {}),
+        ("GET", "/export", {}),
+        ("GET", "/annotations?source_id=S", {}),
+    ]
+    for method, path, kwargs in cases:
+        r = client.request(method, path, **kwargs)
+        assert r.status_code == 503, f"{method} {path}: {r.status_code} {r.text}"
+        assert "PW_AUTH_TOKEN" in r.text
+
+
+def test_private_routes_reject_missing_or_bad_token(client):
+    cases = [
+        ("GET", "/health/llm", {}),
+        ("POST", "/ingest", {"json": {"url": "https://example.com"}}),
+        ("GET", "/jobs/missing", {}),
+        ("GET", "/jobs/missing/events", {}),
+        ("POST", "/jobs/missing/cancel", {}),
+        ("GET", "/preflight", {}),
+        ("POST", "/vocab", {"json": {"lemma": "mitochondria"}}),
+        ("PATCH", "/vocab/1", {"json": {"status": "known"}}),
+        ("GET", "/vocab", {}),
+        ("GET", "/review/queue", {}),
+        ("POST", "/review/1/grade", {"json": {"grade": 3}}),
+        ("GET", "/review/stats", {}),
+        ("GET", "/export", {}),
+    ]
+    for method, path, kwargs in cases:
+        r = client.request(method, path, **kwargs)
+        assert r.status_code == 401, f"missing token accepted for {method} {path}"
+        r = client.request(method, path, headers={"X-Auth-Token": "wrong"}, **kwargs)
+        assert r.status_code == 401, f"wrong token accepted for {method} {path}"
+
+    assert client.get("/jobs/missing/events?token=wrong").status_code == 401
+
+
+def test_study_and_ingest_read_routes_accept_auth(client, auth, token):
+    r = client.post(
+        "/vocab",
+        json={"kind": "word", "lemma": "mitochondria", "gloss": "energy organelle"},
+        headers=auth,
+    )
+    assert r.status_code == 200
+
+    assert client.get("/vocab", headers=auth).status_code == 200
+    assert client.get("/review/queue", headers=auth).status_code == 200
+    assert client.get("/review/stats", headers=auth).status_code == 200
+    assert client.get("/export", headers=auth).status_code == 200
+    assert client.get("/preflight", headers=auth).status_code == 200
+
+    from app import ingest_runner as ir
+
+    job = ir.Job("authroutejob")
+    job.emit("hello from job")
+    job.emit("__END__")
+    ir.JOBS[job.id] = job
+    try:
+        status = client.get(f"/jobs/{job.id}", headers=auth)
+        assert status.status_code == 200
+        assert status.json()["lines"][0] == "hello from job"
+
+        event_by_header = client.get(f"/jobs/{job.id}/events", headers=auth)
+        assert event_by_header.status_code == 200
+        assert "hello from job" in event_by_header.text
+
+        event_by_query = client.get(f"/jobs/{job.id}/events?token={token}")
+        assert event_by_query.status_code == 401
+    finally:
+        ir.JOBS.pop(job.id, None)
+
+
+def test_build_argv_leaves_document_chaptering_to_ingest():
+    from app import ingest_runner as ir
+
+    def argv(target, **opts):
+        return ir._build_argv(target, opts or {})
+
+    # Document-vs-URL chaptering is decided by ingest.py, which can inspect the
+    # local file and shares the pipeline's format policy.
+    assert "--chapters" not in argv("/stage/book.epub")
+    assert "--chapters" not in argv("/stage/book.MOBI")
+    assert "--chapters" not in argv("/stage/book.azw3")
+    assert "--chapters" not in argv("/stage/paper.pdf")
+    assert "--chapters" not in argv("https://example.com/book.epub")
+    assert "--chapters" not in argv("/stage/book.epub", section_label="第1章")
+    assert argv("/stage/book.epub", kind="wiki")[-1] == "/stage/book.epub"
+
+
+def test_preflight_is_profile_aware_for_lang(client, auth, content_dir):
+    dirty = content_dir / "lang" / "scratch.tmp"
+    dirty.parent.mkdir(parents=True, exist_ok=True)
+    dirty.write_text("partial", encoding="utf-8")
+    try:
+        normal = client.get("/preflight?kind=auto", headers=auth)
+        assert normal.status_code == 200
+        assert dirty.relative_to(content_dir).as_posix() not in normal.json()["offending"]
+
+        lang = client.get("/preflight?kind=lang", headers=auth)
+        assert lang.status_code == 200
+        body = lang.json()
+        assert body["ok"] is False
+        assert "lang/scratch.tmp" in body["offending"]
+    finally:
+        dirty.unlink(missing_ok=True)
+
+
+def test_preflight_allows_untracked_taxonomy_scaffold(client, auth, content_dir):
+    # A run interrupted after ensure_wiki_scaffold leaves wiki/_taxonomy.md
+    # untracked; the backend pre-check must tolerate it (ingest.py commits it)
+    # while still blocking a genuine untracked page.
+    taxonomy = content_dir / "wiki" / "_taxonomy.md"
+    page = content_dir / "wiki" / "entities" / "Leftover.md"
+    taxonomy.write_text("# Taxonomy\n", encoding="utf-8")
+    try:
+        ok = client.get("/preflight", headers=auth).json()
+        assert ok["ok"] is True, ok
+        assert "wiki/_taxonomy.md" not in ok["offending"]
+
+        page.write_text("stray\n", encoding="utf-8")     # real leftover → must block
+        blocked = client.get("/preflight", headers=auth).json()
+        assert blocked["ok"] is False
+        assert "wiki/entities/Leftover.md" in blocked["offending"]
+        assert "wiki/_taxonomy.md" not in blocked["offending"]
+    finally:
+        taxonomy.unlink(missing_ok=True)
+        page.unlink(missing_ok=True)
+
+
+def test_preflight_blocks_on_git_status_failure(client, auth, monkeypatch):
+    from app import ingest_runner as ir
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args, 128, "", "fatal: unsafe repository")
+
+    monkeypatch.setattr(ir.subprocess, "run", fake_run)
+    r = client.get("/preflight", headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "git status failed" in body["message"]
+    assert "unsafe repository" in body["message"]
+
+
+def test_ensure_content_git_auto_initializes_plain_folder(tmp_path, monkeypatch):
+    from app import ingest_runner as ir
+
+    monkeypatch.setattr(ir, "AUTO_INIT_GIT", True)
+    content = tmp_path / "wiki"
+    (content / "wiki").mkdir(parents=True)
+    (content / "wiki" / "note.md").write_text("# note\n", encoding="utf-8")
+
+    ok, msg = ir.ensure_content_git(content)
+
+    assert ok is True
+    assert "initialized" in msg
+    assert (content / ".git").is_dir()
+    head = subprocess.run(["git", "-C", str(content), "rev-parse", "HEAD"], capture_output=True, text=True)
+    assert head.returncode == 0  # baseline commit exists → sync's `git archive HEAD` works
+    # Idempotent: an existing repo is left alone with no message.
+    ok2, msg2 = ir.ensure_content_git(content)
+    assert ok2 is True and msg2 == ""
+
+
+def test_ensure_content_git_blocks_when_opted_out(tmp_path, monkeypatch):
+    from app import ingest_runner as ir
+
+    monkeypatch.setattr(ir, "AUTO_INIT_GIT", False)
+    content = tmp_path / "wiki"
+    content.mkdir()
+
+    ok, msg = ir.ensure_content_git(content)
+
+    assert ok is False
+    assert "not a git repo" in msg
+    assert not (content / ".git").exists()
+
+
+def test_job_logs_are_bounded(client, auth, monkeypatch):
+    from app import ingest_runner as ir
+
+    monkeypatch.setattr(ir, "JOB_LOG_LIMIT", 3)
+    job = ir.Job("boundedjob")
+    for i in range(5):
+        job.emit(f"line {i}")
+    job.emit("__END__")
+    ir.JOBS[job.id] = job
+    try:
+        r = client.get(f"/jobs/{job.id}", headers=auth)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["dropped_lines"] == 3
+        assert body["lines"] == [
+            "... 3 earlier log line(s) truncated ...",
+            "line 3",
+            "line 4",
+            "__END__",
+        ]
+
+        events = client.get(f"/jobs/{job.id}/events", headers=auth)
+        assert events.status_code == 200
+        assert "earlier log line(s) truncated" in events.text
+        assert "line 3" in events.text
+        assert "line 4" in events.text
+    finally:
+        ir.JOBS.pop(job.id, None)
+
+
+def test_terminal_jobs_are_reaped(monkeypatch):
+    from app import ingest_runner as ir
+
+    monkeypatch.setattr(ir, "JOB_TTL_S", 60)
+    job = ir.Job("oldjob")
+    job.status = "done"
+    job.updated_at = 100
+    ir.JOBS[job.id] = job
+    try:
+        ir.reap_jobs(now=161)
+        assert job.id not in ir.JOBS
+    finally:
+        ir.JOBS.pop(job.id, None)
+
+
+def test_cancel_job_route_marks_queued_job_canceled(client, auth):
+    from app import ingest_runner as ir
+
+    job = ir.Job("cancelroutejob")
+    ir.JOBS[job.id] = job
+    try:
+        r = client.post(f"/jobs/{job.id}/cancel", headers=auth)
+        assert r.status_code == 200
+        assert r.json()["status"] == "canceled"
+        assert job.status == "canceled"
+        assert job.result == {"status": "canceled"}
+        assert job.visible_lines()[-2:] == ["canceled by request", "__END__"]
+    finally:
+        ir.JOBS.pop(job.id, None)
+
+
+def test_cancel_job_kills_active_process_group(monkeypatch):
+    from app import ingest_runner as ir
+
+    async def run():
+        monkeypatch.setattr(ir, "PROCESS_CLEANUP_TIMEOUT_S", 2)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            start_new_session=True,
+        )
+        job = ir.Job("cancelprocjob")
+        job.status = "running"
+        job.process = proc
+        ir.JOBS[job.id] = job
+        try:
+            canceled = await ir.cancel_job(job.id)
+            assert canceled is job
+            assert job.status == "canceled"
+            assert proc.returncode is not None
+            assert job.visible_lines()[-2:] == ["canceled by request", "__END__"]
+        finally:
+            ir.JOBS.pop(job.id, None)
+
+    asyncio.run(run())
+
+
+def test_timeout_cleanup_kills_and_awaits_process_group(monkeypatch):
+    from app import ingest_runner as ir
+
+    async def run():
+        monkeypatch.setattr(ir, "PROCESS_CLEANUP_TIMEOUT_S", 2)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            start_new_session=True,
+        )
+        job = ir.Job("killjob")
+        await ir._kill_process_group(proc, job, "test")
+        assert proc.returncode is not None
+        assert "did not exit" not in "\n".join(job.visible_lines())
+
+    asyncio.run(run())
+
+
+def test_ingest_upload_streams_to_stage_before_starting_job(client, auth, monkeypatch, tmp_path):
+    from app import ingest_runner as ir
+    from app import settings
+
+    called = {}
+
+    def fake_start_job(target, options):
+        called["target"] = Path(target)
+        called["options"] = options
+        return "uploadjob"
+
+    monkeypatch.setattr(settings, "STAGE_DIR", tmp_path)
+    monkeypatch.setattr(ir, "start_job", fake_start_job)
+
+    r = client.post(
+        "/ingest",
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        data={"options": json.dumps({"kind": "auto"})},
+        headers=auth,
+    )
+
+    assert r.status_code == 200
+    assert r.json()["job_id"] == "uploadjob"
+    assert called["options"] == {"kind": "auto", "section_label": None}
+    assert called["target"].read_bytes() == b"hello"
+
+
+def test_ingest_upload_rejects_over_limit_and_removes_partial(client, auth, monkeypatch, tmp_path):
+    from app import settings
+
+    monkeypatch.setattr(settings, "STAGE_DIR", tmp_path)
+    monkeypatch.setattr(settings, "MAX_UPLOAD_BYTES", 4)
+
+    r = client.post(
+        "/ingest",
+        files={"file": ("large.txt", b"abcde", "text/plain")},
+        data={"options": "{}"},
+        headers=auth,
+    )
+
+    assert r.status_code == 413
+    assert "PW_MAX_UPLOAD_MB" in r.text
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ingest_options_validate_kind_and_section(client, auth, monkeypatch, tmp_path):
+    from app import settings
+
+    monkeypatch.setattr(settings, "STAGE_DIR", tmp_path)
+
+    invalid = [
+        {"url": "https://example.com", "options": {"kind": "bogus"}},
+        {"url": "https://example.com", "options": {"kind": "auto", "section_label": ["bad"]}},
+        {"url": "https://example.com", "options": {"kind": "lang", "section_label": "ch1"}},
+    ]
+    for payload in invalid:
+        r = client.post("/ingest", json=payload, headers=auth)
+        assert r.status_code == 400
+
+    upload = client.post(
+        "/ingest",
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        data={"options": json.dumps({"kind": "bogus"})},
+        headers=auth,
+    )
+    assert upload.status_code == 400
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ingest_media_alias_maps_to_video_kind(client, auth, monkeypatch):
+    from app import ingest_runner as ir
+
+    called = {}
+
+    def fake_start_job(target, options):
+        called["target"] = target
+        called["options"] = options
+        return "mediajob"
+
+    monkeypatch.setattr(ir, "start_job", fake_start_job)
+    r = client.post(
+        "/ingest",
+        json={"url": "https://youtube.com/watch?v=x", "options": {"kind": "media"}},
+        headers=auth,
+    )
+
+    assert r.status_code == 200
+    assert called["options"]["kind"] == "video"
+    argv = ir._build_argv("target", called["options"])
+    assert argv[-3:] == ["--kind", "video", "target"]
+
+
+def test_json_routes_reject_malformed_or_non_object_payloads(client, auth):
+    json_headers = {**auth, "Content-Type": "application/json"}
+
+    malformed = client.post("/vocab", content="{", headers=json_headers)
+    assert malformed.status_code == 400
+    assert "valid JSON" in malformed.text
+
+    for method, path in [
+        ("POST", "/ingest"),
+        ("POST", "/vocab"),
+        ("PATCH", "/vocab/1"),
+        ("POST", "/review/1/grade"),
+        ("POST", "/translate"),
+        ("POST", "/assist"),
+        ("POST", "/annotations"),
+        ("PATCH", "/annotations/an_missing"),
+        ("POST", "/annotations/an_missing/promote"),
+    ]:
+        r = client.request(method, path, content="[]", headers=json_headers)
+        assert r.status_code == 400, f"{method} {path}: {r.status_code} {r.text}"
+        assert "JSON object" in r.text
+
+
+def test_json_routes_reject_bad_field_shapes(client, auth, tmp_path, monkeypatch):
+    from app import settings
+
+    monkeypatch.setattr(settings, "STAGE_DIR", tmp_path)
+
+    cases = [
+        client.post("/ingest", json={"url": "https://example.com", "options": []}, headers=auth),
+        client.post("/vocab", json={"lemma": ["not", "a", "string"]}, headers=auth),
+        client.post("/translate", json={"text": ["not", "a", "string"]}, headers=auth),
+        client.post("/assist", json={"text": "hello", "lang": ["en"]}, headers=auth),
+        client.post("/annotations", json={"source_id": "S", "target": []}, headers=auth),
+    ]
+    for r in cases:
+        assert r.status_code == 400
+
+    upload = client.post(
+        "/ingest",
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        data={"options": "[]"},
+        headers=auth,
+    )
+    assert upload.status_code == 400
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_mark_known_removes_vocab_item_from_review_queue(client, auth):
+    add = client.post(
+        "/vocab",
+        json={"kind": "word", "lemma": "already-known-test-word", "gloss": "known"},
+        headers=auth,
+    )
+    assert add.status_code == 200
+    item_id = add.json()["id"]
+
+    patch = client.patch(f"/vocab/{item_id}", json={"status": "known"}, headers=auth)
+    assert patch.status_code == 200
+
+    vocab = client.get("/vocab", headers=auth).json()
+    item = next(i for i in vocab if i["id"] == item_id)
+    assert item["status"] == "known"
+    assert item["state"] == 1
+    assert item["due"] is None
+
+    queue = client.get("/review/queue", headers=auth).json()
+    assert all(i["id"] != item_id for i in queue)
+
+
+def test_duplicate_vocab_save_merges_new_context_without_resetting_schedule(client, auth):
+    lemma = "context-merge-test-word"
+    first = client.post(
+        "/vocab",
+        json={"kind": "word", "lemma": lemma, "gloss": "old gloss"},
+        headers=auth,
+    )
+    assert first.status_code == 200
+    item_id = first.json()["id"]
+    assert client.patch(f"/vocab/{item_id}", json={"status": "known"}, headers=auth).status_code == 200
+
+    second = client.post(
+        "/vocab",
+        json={
+            "kind": "word",
+            "lemma": lemma,
+            "reading": "ctx",
+            "pos": "noun",
+            "gloss": "new gloss",
+            "example": "new example",
+            "source_id": "01SOURCE",
+            "anchor": "p-1",
+        },
+        headers=auth,
+    )
+    assert second.status_code == 200
+    assert second.json()["id"] == item_id
+
+    item = next(i for i in client.get("/vocab", headers=auth).json() if i["id"] == item_id)
+    assert item["status"] == "known"
+    assert item["state"] == 1
+    assert item["due"] is None
+    assert item["reading"] == "ctx"
+    assert item["pos"] == "noun"
+    assert item["gloss"] == "new gloss"
+    assert item["example"] == "new example"
+    assert item["source_id"] == "01SOURCE"
+    assert item["anchor"] == "p-1"
+
+
+def test_review_grade_rejects_out_of_range_values(client, auth):
+    add = client.post(
+        "/vocab",
+        json={"kind": "word", "lemma": "grade-range-test-word", "gloss": "grade"},
+        headers=auth,
+    )
+    assert add.status_code == 200
+    item_id = add.json()["id"]
+
+    for grade in (0, 5, "bad"):
+        r = client.post(f"/review/{item_id}/grade", json={"grade": grade}, headers=auth)
+        assert r.status_code == 400
+
+    ok = client.post(f"/review/{item_id}/grade", json={"grade": 3}, headers=auth)
+    assert ok.status_code == 200
+
+
+def test_export_rejects_unsupported_formats(client, auth):
+    assert client.get("/export?format=csv", headers=auth).status_code == 200
+    r = client.get("/export?format=anki", headers=auth)
+    assert r.status_code == 400
+    assert "unsupported export format" in r.text
+
+
+def test_llm_health_requires_local_command(client, auth, monkeypatch):
+    monkeypatch.delenv("LLM_CMD", raising=False)
+    monkeypatch.delenv("PW_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("PW_LLM_API_ENABLED", "1")
+    monkeypatch.setenv("PW_LLM_API_KEY", "unused-api-key")
+
+    r = client.get("/health/llm", headers=auth)
+
+    assert r.status_code == 503
+    assert "Local LLM command/provider is not configured" in r.json()["message"]
+
+
+def test_llm_health_runs_command(client, auth, monkeypatch, tmp_path):
+    script = tmp_path / "llm_health_stub.py"
+    script.write_text("import sys\nsys.stdin.read()\nprint('ok')\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_CMD", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+    monkeypatch.setenv("PW_LLM_MODEL", "test-local-model")
+
+    r = client.get("/health/llm", headers=auth)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["provider"] == "command"
+    assert body["model"] == "test-local-model"
+    assert body["matched_expected"] is True
+
+
+def test_llm_health_runs_codex_provider(client, auth, monkeypatch, tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+    codex.chmod(0o755)
+    monkeypatch.delenv("LLM_CMD", raising=False)
+    monkeypatch.setenv("PW_LLM_PROVIDER", "codex")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    r = client.get("/health/llm", headers=auth)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["provider"] == "codex"
+    assert body["matched_expected"] is True
+
+
+def test_llm_command_timeout_kills_process_group(monkeypatch, tmp_path):
+    from app import llm
+
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "spawn_child.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "pidfile = sys.argv[1]\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])\n"
+        "open(pidfile, 'w').write(str(child.pid))\n"
+        "sys.stdin.read()\n"
+        "time.sleep(20)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "LLM_CMD",
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {shlex.quote(str(pidfile))}",
+    )
+
+    try:
+        llm.complete_command("prompt", timeout=0.5)
+        assert False, "timeout did not raise"
+    except RuntimeError as exc:
+        assert "timed out" in str(exc)
+
+    deadline = time.time() + 2
+    while not pidfile.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert pidfile.exists()
+    child_pid = pidfile.read_text(encoding="utf-8").strip()
+
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        ps = subprocess.run(["ps", "-p", child_pid, "-o", "stat="], capture_output=True, text=True)
+        if ps.returncode != 0 or "Z" in ps.stdout:
+            break
+        time.sleep(0.05)
+    assert ps.returncode != 0 or "Z" in ps.stdout
+
+
+def test_annotations_fail_closed_and_authz(client, auth):
+    # No token header at all → 401 (token IS configured in tests).
+    assert client.get("/annotations?source_id=S").status_code == 401
+    # Wrong token → 401.
+    assert client.get("/annotations?source_id=S", headers={"X-Auth-Token": "nope"}).status_code == 401
+    # Correct token → 200.
+    assert client.get("/annotations?source_id=S", headers=auth).status_code == 200
+
+
+def _mk(**sel):
+    return {
+        "source_id": "01SRC", "color": "note",
+        "target": {"block_id": "p-abc", "section_id": "s-1",
+                   "context": {"prev_block_id": "", "next_block_id": ""},
+                   "selector": sel},
+        "body": "",
+    }
+
+
+def test_annotation_crud(client, auth):
+    payload = _mk(quote="hello world", prefix="", suffix="", start=0, end=11)
+    r = client.post("/annotations", json=payload, headers=auth)
+    assert r.status_code == 200
+    a = r.json()
+    aid = a["id"]
+    assert a["target"]["selector"]["quote"] == "hello world"
+
+    # list
+    got = client.get("/annotations?source_id=01SRC", headers=auth).json()
+    assert any(x["id"] == aid for x in got)
+
+    # patch body + color
+    p = client.patch(f"/annotations/{aid}", json={"body": "my note", "color": "important"}, headers=auth)
+    assert p.status_code == 200 and p.json()["body"] == "my note" and p.json()["color"] == "important"
+
+    # delete
+    assert client.delete(f"/annotations/{aid}", headers=auth).status_code == 200
+    assert client.delete(f"/annotations/{aid}", headers=auth).status_code == 404
+
+
+def test_annotation_validation_rejects_unsafe_fields(client, auth):
+    bad_color = _mk(quote="x", start=0, end=1)
+    bad_color["color"] = 'bad" onclick="alert(1)'
+    assert client.post("/annotations", json=bad_color, headers=auth).status_code == 400
+
+    bad_tags = _mk(quote="x", start=0, end=1)
+    bad_tags["tags"] = "not-a-list"
+    assert client.post("/annotations", json=bad_tags, headers=auth).status_code == 400
+
+    a = client.post("/annotations", json=_mk(quote="x", start=0, end=1), headers=auth).json()
+    assert client.patch(f"/annotations/{a['id']}", json={"color": "bad"}, headers=auth).status_code == 400
+    assert client.patch(f"/annotations/{a['id']}", json={"tags": ["ok", 3]}, headers=auth).status_code == 400
+
+    unsafe_link = [{"type": "human-zone", "wiki_rel": "entities/ATP", "href": "javascript:alert(1)"}]
+    assert client.patch(f"/annotations/{a['id']}", json={"links": unsafe_link}, headers=auth).status_code == 400
+
+    unsupported_link = [{"type": "external", "wiki_rel": "entities/ATP", "href": "/wiki/entities/ATP"}]
+    assert client.patch(f"/annotations/{a['id']}", json={"links": unsupported_link}, headers=auth).status_code == 400
+
+    safe_link = [{"type": "human-zone", "wiki_rel": "entities/ATP", "href": "/wiki/entities/ATP"}]
+    r = client.patch(f"/annotations/{a['id']}", json={"links": safe_link}, headers=auth)
+    assert r.status_code == 200
+    assert r.json()["links"] == safe_link
+
+
+def test_image_region_roundtrip(client, auth):
+    payload = _mk(quote="", region={"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.25})
+    payload["target"]["block_id"] = "i-fig1"
+    payload["color"] = "important"
+    a = client.post("/annotations", json=payload, headers=auth).json()
+    region = a["target"]["selector"].get("region")
+    assert region == {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.25}
+    # survives a re-read
+    got = client.get("/annotations?source_id=01SRC", headers=auth).json()
+    match = next(x for x in got if x["id"] == a["id"])
+    assert match["target"]["selector"]["region"]["w"] == 0.3
+
+
+def test_promote_into_human_zone(client, auth, content_dir):
+    payload = _mk(quote="线粒体 <script>", prefix="", suffix="", start=0, end=3)
+    payload["body"] = "body <b>bold</b>\n<!-- /human-zone -->"
+    a = client.post("/annotations", json=payload, headers=auth).json()
+    r = client.post(f"/annotations/{a['id']}/promote",
+                    json={"wiki_rel": "entities/ATP", "source_title": "Nick [Lane] <b>"}, headers=auth)
+    assert r.status_code == 200
+    res = r.json()
+    assert res["ok"] and res["href"] == "/wiki/entities/ATP"
+    page = (content_dir / "wiki" / "entities" / "ATP.md").read_text(encoding="utf-8")
+    assert f"<!-- anno:{a['id']} -->" in page and "线粒体 &lt;script&gt;" in page
+    assert "body &lt;b&gt;bold&lt;/b&gt;" in page
+    assert "&lt;!-- /human-zone --&gt;" in page
+    assert "[Nick \\[Lane\\] &lt;b&gt;]" in page
+    assert "<script>" not in page and "<b>bold</b>" not in page
+    assert page.count("<!-- /human-zone -->") == 1
+    # the promotion is recorded on the annotation
+    assert any(l.get("wiki_rel") == "entities/ATP" for l in res["annotation"]["links"])
+
+    # idempotent: re-promoting updates in place (still one block)
+    r2 = client.post(f"/annotations/{a['id']}/promote",
+                     json={"wiki_rel": "entities/ATP", "source_title": "Nick Lane"}, headers=auth)
+    assert r2.status_code == 200
+    page2 = (content_dir / "wiki" / "entities" / "ATP.md").read_text(encoding="utf-8")
+    assert page2.count(f"<!-- anno:{a['id']} -->") == 1
+
+
+def test_promote_rejects_bad_paths(client, auth):
+    a = client.post("/annotations", json=_mk(quote="x", start=0, end=1), headers=auth).json()
+    # missing wiki_rel
+    assert client.post(f"/annotations/{a['id']}/promote", json={}, headers=auth).status_code == 400
+    # traversal outside wiki/
+    r = client.post(f"/annotations/{a['id']}/promote", json={"wiki_rel": "../../etc/x"}, headers=auth)
+    assert r.status_code == 400
+    # absolute paths are rejected before path resolution
+    r = client.post(f"/annotations/{a['id']}/promote", json={"wiki_rel": "/entities/ATP"}, headers=auth)
+    assert r.status_code == 400
+    # unknown page
+    r = client.post(f"/annotations/{a['id']}/promote", json={"wiki_rel": "entities/NOPE"}, headers=auth)
+    assert r.status_code == 400
+
+
+def test_assist_modes_and_validation(client, auth):
+    for mode in ("explain", "summarize", "define"):
+        r = client.post("/assist", json={"text": "线粒体是能量工厂", "mode": mode}, headers=auth)
+        assert r.status_code == 200
+        j = r.json()
+        assert j["mode"] == mode and j.get("configured") is False  # no LLM in tests
+    assert client.post("/assist", json={"text": "x", "mode": "bogus"}, headers=auth).status_code == 400
+    assert client.post("/assist", json={"text": "", "mode": "explain"}, headers=auth).status_code == 400
+
+
+def test_translate_graceful_without_llm(client, auth):
+    r = client.post("/translate", json={"text": "hello"}, headers=auth)
+    assert r.status_code == 200
+    assert r.json().get("configured") is False
+
+
+def test_translate_prefers_local_llm_command(client, auth, monkeypatch, tmp_path):
+    script = tmp_path / "llm_stub.py"
+    script.write_text("import sys\nsys.stdin.read()\nprint('local translation')\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_CMD", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+    monkeypatch.setenv("PW_LLM_API_ENABLED", "1")
+    monkeypatch.setenv("PW_LLM_API_KEY", "unused-api-key")
+    monkeypatch.setenv("PW_LLM_MODEL", "test-local-model")
+
+    r = client.post("/translate", json={"text": "command preference test", "lang": "ja"}, headers=auth)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["translation"] == "local translation"
+    assert body["target_lang"] == "Simplified Chinese"
+    assert body["prompt_version"] == "translate:v1"
+    assert body["llm_provider"] == "command"
+    assert body["llm_model"] == "test-local-model"
+
+    cached = client.post("/translate", json={"text": "command preference test"}, headers=auth).json()
+    assert cached["cached"] is True
+    assert cached["target_lang"] == "Simplified Chinese"
+    assert cached["prompt_version"] == "translate:v1"
+    assert cached["llm_provider"] == "command"
+    assert cached["llm_model"] == "test-local-model"
+
+    from app import db
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT lang,prompt_version,llm_provider,llm_model FROM translations WHERE translation=?",
+        ("local translation",),
+    ).fetchone()
+    conn.close()
+    assert dict(row) == {
+        "lang": "Simplified Chinese",
+        "prompt_version": "translate:v1",
+        "llm_provider": "command",
+        "llm_model": "test-local-model",
+    }
+
+
+def test_api_key_requires_explicit_enable(client, auth, monkeypatch):
+    monkeypatch.delenv("LLM_CMD", raising=False)
+    monkeypatch.delenv("PW_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("PW_LLM_API_ENABLED", raising=False)
+    monkeypatch.setenv("PW_LLM_API_KEY", "unused-api-key")
+
+    r = client.post("/translate", json={"text": "api disabled test"}, headers=auth)
+
+    assert r.status_code == 200
+    assert r.json().get("configured") is False

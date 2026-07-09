@@ -1,0 +1,263 @@
+---
+import Base from '../layouts/Base.astro';
+import { loadVault, chaptersForSource, sourceReaderHref, cleanTitle as clean, enOf } from '../lib/vault.mjs';
+
+const { pages, sources, backlinks } = loadVault();
+const entities = pages.filter((p) => p.kind === 'entity');
+const topics = pages.filter((p) => p.kind === 'topic');
+const content = [...entities, ...topics];
+
+const mmdd = (d: any) => (d ? String(d).slice(5) : '');
+
+const cards = content.map((p) => ({
+  href: p.href, title: p.title, en: enOf(p), updated: mmdd(p.last_ingested),
+  kind: p.kind, tags: p.tags || [],
+  kindLabel: p.kind === 'topic' ? 'Topic' : 'Entity',
+  kindColor: p.kind === 'topic' ? 'var(--amber)' : 'var(--terra)',
+  search: (p.title + ' ' + enOf(p) + ' ' + (p.tags || []).join(' ')).toLowerCase(),
+}));
+
+const tagCount: Record<string, number> = {};
+for (const p of content) for (const t of p.tags || []) tagCount[t] = (tagCount[t] || 0) + 1;
+const tagPills = Object.entries(tagCount).sort((a, b) => b[1] - a[1]);
+
+const recent = [...content].filter((p) => p.last_ingested)
+  .sort((a, b) => String(b.last_ingested).localeCompare(String(a.last_ingested))).slice(0, 5);
+const conflicts = content.filter((p) => /==\s*CONFLICT/i.test(p.body));
+const topicsRail = topics.map((t) => ({ title: t.title, href: t.href, refs: (backlinks.get(t.href)?.size) || 0 }))
+  .sort((a, b) => b.refs - a.refs).slice(0, 8);
+
+const src = sources[0];
+const heroTitle = src ? clean(src.title) : '';
+const heroChapters = src ? chaptersForSource(src.id).length : 0;
+const heroReadHref = src ? sourceReaderHref(src.id) : '#';
+---
+<Base title="Dashboard" active="home">
+  <span slot="topright">Reading over <span style="color:var(--text-2)">{sources.length} source{sources.length === 1 ? '' : 's'}</span></span>
+
+  {src && (
+    <section style="position:relative;overflow:hidden;border:1px solid var(--border);border-radius:18px;background:linear-gradient(115deg,#221a12 0%,#1a1610 55%,#161009 100%);padding:26px 30px;margin-bottom:26px">
+      <div style="position:absolute;inset:0;background:radial-gradient(520px 220px at 88% -20%,color-mix(in srgb,var(--terra) 22%,transparent),transparent 70%);pointer-events:none"></div>
+      <div style="position:relative;display:flex;gap:26px;align-items:center;flex-wrap:wrap">
+        <div style="flex:none;width:112px;height:158px;border-radius:8px 12px 12px 8px;background:linear-gradient(155deg,#3a2c1f,#241a12);border:1px solid var(--border-strong);box-shadow:-6px 8px 22px -8px rgba(0,0,0,.7),inset 6px 0 0 -3px rgba(0,0,0,.4);display:flex;flex-direction:column;justify-content:space-between;padding:14px 12px">
+          <div style="font-family:var(--serifcjk);font-size:15px;line-height:1.25;color:#f0e2cf;font-weight:600">{[...heroTitle].slice(0, 8).join('')}</div>
+          <div><div style="width:26px;height:2px;background:var(--terra);margin-bottom:7px"></div><div style="font-size:9.5px;color:var(--text-3);font-family:var(--mono);letter-spacing:.02em">{src.origin_type.toUpperCase()}</div></div>
+        </div>
+        <div style="min-width:230px;flex:1">
+          <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--terra);font-weight:600;margin-bottom:8px">Currently building from</div>
+          <h1 style="font-family:var(--serifcjk);font-size:30px;font-weight:600;line-height:1.15;margin:0 0 6px">{heroTitle}</h1>
+          <div style="color:var(--text-2);font-size:14px;margin-bottom:18px">{src.origin_type} · {content.length} pages synthesized</div>
+          <div style="display:flex;gap:26px;flex-wrap:wrap;align-items:center">
+            {[[entities.length, 'entities'], [topics.length, 'topics'], [heroChapters, 'chapters']].map(([n, l]) => (
+              <div><div style="font-family:var(--serif);font-size:24px;font-weight:600;line-height:1">{n}</div><div style="font-size:12px;color:var(--text-3);margin-top:3px">{l}</div></div>
+            ))}
+            <div style="margin-left:auto;display:flex;gap:9px">
+              <a href={src.href} style="background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);border-radius:9px;padding:9px 16px;font-size:13.5px">Open source</a>
+              <a href={heroReadHref} class="btn-accent" style="padding:9px 18px">Read →</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  )}
+
+  <!-- Quick-stats strip -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">
+    <a href="/entities" class="qtile"><div class="n" style="color:var(--terra)">{entities.length}</div><div class="l">Entities</div></a>
+    <a href="/topics" class="qtile"><div class="n" style="color:var(--amber)">{topics.length}</div><div class="l">Topics</div></a>
+    <a href="/sources" class="qtile"><div class="n" style="color:var(--sage)">{sources.length}</div><div class="l">Sources</div></a>
+    <a href="/reader/review" class="qtile"><div style="display:flex;align-items:baseline"><div class="n" style="color:var(--amber)"><span id="due-count">·</span></div><span class="u">↻</span></div><div class="l">待复习</div></a>
+  </div>
+
+  <!-- Ingest console -->
+  <section style="border:1px solid var(--border);border-radius:16px;background:var(--bg-1);padding:16px 18px;margin-bottom:26px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
+      <span style="width:30px;height:30px;border-radius:8px;background:var(--bg-3);border:1px solid var(--border-strong);display:flex;align-items:center;justify-content:center;color:var(--terra);font-size:15px">⟳</span>
+      <div>
+        <div style="font-family:var(--serif);font-size:17px;font-weight:600;line-height:1.1">Add to the vault</div>
+        <div style="font-size:12.5px;color:var(--text-3)">Run the DailyNotes pipeline over a link or file</div>
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:12px">
+        <span id="be-status" style="font-size:12px;font-family:var(--mono);color:var(--text-3)">○ backend offline</span>
+        <button id="be-toggle" class="btn-quiet">⚙ Backend</button>
+      </div>
+    </div>
+
+    <div id="be-settings" style="display:none;gap:12px;flex-wrap:wrap;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:14px">
+      <label style="flex:1;min-width:200px;font-size:11.5px;color:var(--text-3)">Backend URL
+        <input id="be-url" class="field" style="width:100%;margin-top:4px;font-family:var(--mono);font-size:12.5px;padding:7px 10px" placeholder="http://localhost:8787" /></label>
+      <label style="flex:1;min-width:200px;font-size:11.5px;color:var(--text-3)">Auth token
+        <input id="be-token" type="password" class="field" style="width:100%;margin-top:4px;font-family:var(--mono);font-size:12.5px;padding:7px 10px" /></label>
+      <button id="be-save" class="btn-quiet" style="align-self:flex-end">Save</button>
+    </div>
+
+    <div style="display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;margin-top:14px">
+      <div class="seg" style="width:150px;flex:none">
+        <button id="seg-url" class="on">Link</button><button id="seg-file">File</button>
+      </div>
+      <input id="ingest-url" class="field" style="flex:1;min-width:220px" placeholder="https://youtube.com/… or an article URL" />
+      <label id="ingest-file-row" style="display:none;flex:1;min-width:220px;align-items:center;gap:10px;padding:9px 13px;background:var(--bg-2);border:1px dashed var(--border-strong);border-radius:9px;color:var(--text-3);font-size:13.5px;cursor:pointer">
+        <span style="color:var(--terra)">＋</span> Choose a file (PDF, md, epub/mobi, audio)<input id="ingest-file" type="file" style="display:none" />
+      </label>
+      <button id="opt-toggle" class="btn-quiet" style="flex:none;padding:9px 13px">选项 <span id="opt-chevron">▾</span></button>
+      <button id="ingest-run" class="btn-accent" style="flex:none;padding:9px 18px">Run ingest ↗</button>
+      <button id="ingest-cancel" class="btn-quiet" style="display:none;flex:none;padding:9px 13px">Cancel</button>
+    </div>
+
+    <div id="ingest-options" style="display:none;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px">
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)">Kind
+        <select id="ingest-kind" class="field sm"><option value="auto">auto</option><option value="wiki">wiki</option><option value="video">video</option><option value="lang">lang (profile)</option></select></label>
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)">Section
+        <input id="ingest-section" class="field sm" style="width:110px;font-family:var(--mono)" placeholder="#第二章" /></label>
+    </div>
+    <pre id="ingest-log" style="display:none;margin:14px 0 0;background:#100d08;border:1px solid var(--border);border-radius:9px;padding:12px 14px;max-height:180px;overflow:auto;font-family:var(--mono);font-size:12px;color:var(--text-2);line-height:1.55;white-space:pre-wrap"></pre>
+    <p style="margin:10px 0 0;font-size:11.5px;color:var(--text-3)">The pipeline commits to the local-only vault and can spend LLM/ASR budget · costly media steps confirm first.</p>
+  </section>
+
+  <!-- Knowledge index -->
+  <div style="display:grid;grid-template-columns:minmax(0,1fr) 268px;gap:30px;align-items:start">
+    <div>
+      <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:4px">
+        <h2 style="font-family:var(--serif);font-size:22px;font-weight:600;margin:0">Knowledge index</h2>
+        <span id="idx-filterlabel" style="color:var(--text-3);font-size:13px"></span>
+      </div>
+      <p style="color:var(--text-3);font-size:13.5px;margin:0 0 16px">{content.length} pages across {tagPills.length} tags · filter to narrow the field</p>
+
+      <div style="display:flex;align-items:center;gap:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:11px;padding:9px 14px;margin-bottom:12px">
+        <span style="color:var(--text-3)">⌕</span>
+        <input id="idx-search" placeholder="Filter entities & topics…" style="flex:1;background:transparent;border:none;outline:none;color:var(--text);font-size:14px;font-family:var(--sans)" />
+        <button id="idx-clear" style="display:none;background:var(--bg-3);border:1px solid var(--border);color:var(--text-3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--sans)">清除 ✕</button>
+        <div class="viewtog">
+          <button id="view-cards" class="on" title="卡片视图">▦</button>
+          <button id="view-list" title="列表视图">☰</button>
+        </div>
+      </div>
+
+      <div id="idx-pills" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px">
+        <button class="pill active" data-group="all">All <span class="n">{content.length}</span></button>
+        {tagPills.map(([t, n]) => <button class="pill" data-group={t}>{t} <span class="n">{n}</span></button>)}
+      </div>
+
+      <div id="idx-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:12px">
+        {cards.map((c) => (
+          <a href={c.href} class="idx-card" data-tags={c.tags.join(' ')} data-t={c.title} data-search={c.search}>
+            <span class="kt" style={`color:${c.kindColor}`}>{c.kindLabel}</span>
+            <span class="idx-date">{c.updated}</span>
+            <span class="idx-main"><span class="idx-title">{c.title}</span><span class="idx-en">{c.en}</span></span>
+            <span class="idx-tags">{c.tags.slice(0, 3).map((t: string) => <span>{t}</span>)}</span>
+          </a>
+        ))}
+      </div>
+      <div id="idx-empty" style="display:none;text-align:center;color:var(--text-3);padding:44px 0;font-size:14px">No pages match. <button id="idx-reset" style="background:none;border:none;color:var(--terra);cursor:pointer;font-size:14px;text-decoration:underline">Reset</button></div>
+    </div>
+
+    <aside style="display:flex;flex-direction:column;gap:22px;position:sticky;top:74px">
+      <div class="card">
+        <h4>Topics · 主题</h4>
+        <div style="display:flex;flex-direction:column">
+          {topicsRail.map((t) => (
+            <a href={t.href} class="rail-link"><span class="serifcjk" style="font-family:var(--serifcjk);font-size:14.5px">{t.title}</span><span class="k">{t.refs}</span></a>
+          ))}
+        </div>
+      </div>
+      <div class="card">
+        <h4>Recently ingested</h4>
+        <div style="display:flex;flex-direction:column;gap:9px">
+          {recent.map((r) => (
+            <a href={r.href} style="display:flex;align-items:center;gap:9px;color:var(--text-2);font-size:13.5px"><span style="width:6px;height:6px;border-radius:50%;background:var(--terra);flex:none"></span>{r.title}</a>
+          ))}
+        </div>
+      </div>
+      {conflicts.length ? (
+        <div class="card" style="border-color:color-mix(in srgb,var(--danger) 30%,var(--border))">
+          <h4 style="color:var(--danger)">Conflicts to resolve</h4>
+          <div style="display:flex;flex-direction:column">{conflicts.map((p) => <a href={p.href} class="rail-link"><span class="serifcjk">{p.title}</span></a>)}</div>
+        </div>
+      ) : (
+        <div style="background:color-mix(in srgb,var(--sage) 9%,var(--bg-1));border:1px solid color-mix(in srgb,var(--sage) 24%,var(--border));border-radius:14px;padding:15px 17px">
+          <div style="display:flex;align-items:center;gap:8px"><span style="color:var(--sage);font-size:15px">✓</span><span style="font-size:13.5px;font-weight:500">No open conflicts</span></div>
+          <p style="margin:6px 0 0;font-size:12.5px;color:var(--text-3);line-height:1.5">Every synthesis reconciles cleanly across its sources.</p>
+        </div>
+      )}
+    </aside>
+  </div>
+
+  <script>
+    import { mount } from '../scripts/ingest-client.js';
+    import { mountListFilter } from '../scripts/list-filter.js';
+
+    // ---- Knowledge index filtering ----
+    const grid = document.getElementById('idx-grid');
+    const search = document.getElementById('idx-search') as HTMLInputElement | null;
+    const pills = document.getElementById('idx-pills');
+    const empty = document.getElementById('idx-empty');
+    const flabel = document.getElementById('idx-filterlabel');
+    const clearBtn = document.getElementById('idx-clear');
+    const lf = grid && search && pills && empty && flabel && clearBtn
+      ? mountListFilter({
+          root: document,
+          search,
+          clearBtn,
+          countEl: null,
+          emptyEl: empty,
+          view: grid,
+          viewCards: document.getElementById('view-cards')!,
+          viewList: document.getElementById('view-list')!,
+          cardSelector: '.idx-card',
+          sectionSelector: '.idx-section',
+          railSelector: '#idx-pills',
+          groupButtonSelector: '.pill',
+          groupActiveClass: 'active',
+          titleSelector: '.idx-title',
+          groupsForCard: (card: HTMLElement) => (card.dataset.tags || '').split(' ').filter(Boolean),
+          onApplied: (state: { group: string }) => {
+            flabel.textContent = state.group === 'all' ? '' : '· ' + state.group;
+          },
+        })
+      : null;
+    lf?.syncClear(); lf?.syncGroup(); lf?.apply();
+
+    // ingest 选项 (Kind / Section) collapse
+    const opts = document.getElementById('ingest-options'), chevron = document.getElementById('opt-chevron');
+    document.getElementById('opt-toggle')?.addEventListener('click', () => {
+      if (!opts) return;
+      const open = opts.style.display === 'none' || !opts.style.display;
+      opts.style.display = open ? 'flex' : 'none';
+      if (chevron) chevron.textContent = open ? '▴' : '▾';
+    });
+
+    // 待复习 count from the study backend (best-effort; leaves '·' if offline)
+    (async () => {
+      try {
+        const base = localStorage.getItem('backendUrl') || 'http://localhost:8787';
+        const token = localStorage.getItem('backendToken') || '';
+        const r = await fetch(base + '/review/stats', { headers: token ? { 'X-Auth-Token': token } : {} });
+        if (!r.ok) return;
+        const s = await r.json();
+        const el = document.getElementById('due-count'); if (el) el.textContent = String(Number(s.due ?? 0));
+      } catch {}
+    })();
+
+    document.getElementById('idx-reset')?.addEventListener('click', () => {
+      if (!lf || !search) return;
+      lf.state.group = 'all';
+      lf.state.query = '';
+      search.value = '';
+      lf.syncClear();
+      lf.syncGroup();
+      lf.apply();
+      search.focus();
+    });
+
+    // ---- Ingest console ----
+    mount({
+      urlId: 'be-url', tokenId: 'be-token', statusId: 'be-status', saveId: 'be-save',
+      toggleId: 'be-toggle', settingsId: 'be-settings',
+      segUrlId: 'seg-url', segFileId: 'seg-file',
+      urlRowId: 'ingest-url', fileRowId: 'ingest-file-row',
+      runId: 'ingest-run', cancelId: 'ingest-cancel', logId: 'ingest-log',
+      kindId: 'ingest-kind', sectionId: 'ingest-section', urlInputId: 'ingest-url',
+      fileInputId: 'ingest-file',
+    });
+  </script>
+</Base>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copy to ~/Library/LaunchAgents/com.personalwiki.backend.plist (drop .example),
+     replace /ABS/PATH/TO/personal_wiki with this repo's absolute path, then:
+     launchctl load ~/Library/LaunchAgents/com.personalwiki.backend.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.personalwiki.backend</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABS/PATH/TO/personal_wiki/backend/.venv/bin/python</string>
+    <string>-m</string>
+    <string>app.serve</string>
+  </array>
+  <key>WorkingDirectory</key><string>/ABS/PATH/TO/personal_wiki/backend</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/personalwiki-backend.log</string>
+  <key>StandardErrorPath</key><string>/tmp/personalwiki-backend.err</string>
+</dict>
+</plist>

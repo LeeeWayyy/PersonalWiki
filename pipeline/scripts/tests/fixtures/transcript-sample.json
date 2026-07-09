@@ -1,0 +1,256 @@
+{
+ "segments": [
+  {
+   "text": "All right, it's 11.05.",
+   "start": 10.098,
+   "end": 11.419,
+   "speaker": "SPEAKER_03",
+   "words": [
+    {
+     "word": "All",
+     "start": 10.098,
+     "end": 10.238,
+     "score": 0.33,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "right,",
+     "start": 10.258,
+     "end": 10.478,
+     "score": 0.729,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "it's",
+     "start": 10.638,
+     "end": 10.759,
+     "score": 0.765,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "11.05.",
+     "start": 10.839,
+     "end": 11.419,
+     "score": 0.604,
+     "speaker": "SPEAKER_03"
+    }
+   ]
+  },
+  {
+   "text": "I'm going to try to start promptly at 11.05 each time.",
+   "start": 11.459,
+   "end": 14.221,
+   "speaker": "SPEAKER_03",
+   "words": [
+    {
+     "word": "I'm",
+     "start": 11.459,
+     "end": 11.559,
+     "score": 0.734,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "going",
+     "start": 11.579,
+     "end": 11.699,
+     "score": 0.9,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "to",
+     "start": 11.719,
+     "end": 11.759,
+     "score": 0.949,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "try",
+     "start": 11.779,
+     "end": 11.939,
+     "score": 0.824,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "to",
+     "start": 11.979,
+     "end": 12.059,
+     "score": 0.744,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "start",
+     "start": 12.159,
+     "end": 12.44,
+     "score": 0.87,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "promptly",
+     "start": 12.56,
+     "end": 12.96,
+     "score": 0.728,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "at",
+     "start": 13.02,
+     "end": 13.1,
+     "score": 0.745,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "11.05",
+     "start": 13.2,
+     "end": 13.721,
+     "score": 0.683,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "each",
+     "start": 13.761,
+     "end": 13.901,
+     "score": 0.836,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "time.",
+     "start": 13.941,
+     "end": 14.221,
+     "score": 0.896,
+     "speaker": "SPEAKER_03"
+    }
+   ]
+  },
+  {
+   "text": "So welcome.",
+   "start": 14.521,
+   "end": 15.582,
+   "speaker": "SPEAKER_03",
+   "words": [
+    {
+     "word": "So",
+     "start": 14.521,
+     "end": 14.801,
+     "score": 0.85,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "welcome.",
+     "start": 15.142,
+     "end": 15.582,
+     "score": 0.809,
+     "speaker": "SPEAKER_03"
+    }
+   ]
+  },
+  {
+   "text": "Is everybody psyched?",
+   "start": 16.042,
+   "end": 16.843,
+   "speaker": "SPEAKER_03",
+   "words": [
+    {
+     "word": "Is",
+     "start": 16.042,
+     "end": 16.122,
+     "score": 0.684,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "everybody",
+     "start": 16.142,
+     "end": 16.482,
+     "score": 0.926,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "psyched?",
+     "start": 16.503,
+     "end": 16.843,
+     "score": 0.498,
+     "speaker": "SPEAKER_03"
+    }
+   ]
+  },
+  {
+   "text": "I'm psyched.",
+   "start": 17.803,
+   "end": 19.905,
+   "speaker": "SPEAKER_03",
+   "words": [
+    {
+     "word": "I'm",
+     "start": 17.803,
+     "end": 17.944,
+     "score": 0.937,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "psyched.",
+     "start": 17.964,
+     "end": 19.905,
+     "score": 0.506,
+     "speaker": "SPEAKER_03"
+    }
+   ]
+  },
+  {
+   "text": "This is 9.13, The Human Brain.",
+   "start": 20.025,
+   "end": 21.786,
+   "speaker": "SPEAKER_03",
+   "words": [
+    {
+     "word": "This",
+     "start": 20.025,
+     "end": 20.165,
+     "score": 0.907,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "is",
+     "start": 20.225,
+     "end": 20.285,
+     "score": 0.834,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "9.13,",
+     "start": 20.345,
+     "end": 21.006,
+     "score": 0.9,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "The",
+     "start": 21.106,
+     "end": 21.186,
+     "score": 0.947,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "Human",
+     "start": 21.206,
+     "end": 21.446,
+     "score": 0.789,
+     "speaker": "SPEAKER_03"
+    },
+    {
+     "word": "Brain.",
+     "start": 21.466,
+     "end": 21.786,
+     "score": 0.836,
+     "speaker": "SPEAKER_03"
+    }
+   ]
+  }
+ ],
+ "language": "en",
+ "meta": {
+  "source": "https://www.youtube.com/watch?v=ba-HMvDn_vU",
+  "model": "large-v3",
+  "device": "cuda",
+  "compute_type": "float16",
+  "diarized": true
+ }
+}

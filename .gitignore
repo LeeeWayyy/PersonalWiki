@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+
+# Build output
+dist/
+.astro/
+
+# Local vault content — vendored once by scripts/vendor-content.sh. Gitignored so
+# the full book text / epub / private notes stay OUT of this repo's git history.
+# Anchored to the repo root so the committed ci-fixtures/content is NOT ignored.
+/content/
+# Synced snapshot of content/, produced by scripts/sync_content.py at build time
+/vault/
+
+# Build-time translation cache (regenerable)
+.reading-cache/
+
+# Pagefind index (generated into dist during build)
+public/pagefind/
+
+# Vault media copied from the read-only sync for static serving
+public/vault-assets/
+
+# Pipeline test snapshots
+pipeline/scripts/tests/.e2e-snapshot.*
+
+# Backend runtime state (personal study data — back this up separately)
+backend/data/*.db
+backend/data/*.db-*
+backend/.env
+/backups/
+backend/data/stage/
+
+# Design Folder
+design
+
+# OS / editor
+.DS_Store
+*.swp
+.env
+
+# Machine-local launchd agents (fill from *.plist.example)
+deploy/com.personalwiki.*.plist

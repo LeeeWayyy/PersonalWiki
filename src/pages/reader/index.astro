@@ -1,0 +1,24 @@
+---
+import Base from '../../layouts/Base.astro';
+import { loadLang } from '../../lib/vault.mjs';
+const langs = loadLang();
+---
+<Base title="Language reader" active="reader" crumbs={[{ label: 'Language reader' }]}>
+  <div class="title-row"><h1>Language reader</h1>
+    <div class="metaline">Immersion reading + a personal word / grammar bank · Japanese</div>
+  </div>
+  {langs.length ? (
+    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">
+      {langs.map((l) => (
+        <a class="card" href={`/reader/${l.slug}`} style="text-decoration:none;color:inherit">
+          <div class="chip">JA</div>
+          <div style="font-weight:600;margin:8px 0 4px">{l.title}</div>
+          <div class="muted small">{l.vocab.length} words · {l.grammar.length} grammar points · {l.chapters.length} chapter(s)</div>
+        </a>
+      ))}
+    </div>
+  ) : (
+    <div class="card"><p class="muted">No language sources yet. Ingest one with <code>--profile lang</code> from the ingest console.</p></div>
+  )}
+  <p class="muted small" style="margin-top:20px">Reader is the interim view over the committed vocab/grammar; it upgrades to the pipeline's structured <code>_reading</code> sidecar when available (plan §3a).</p>
+</Base>

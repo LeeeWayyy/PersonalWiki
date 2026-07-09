@@ -1,0 +1,39 @@
+{
+  "source_id": "S1FIXTURE000000000000000000",
+  "title": "Fixture Source",
+  "lang": "en",
+  "blocks": [
+    {
+      "id": "p-dup",
+      "type": "paragraph",
+      "section_id": "s-intro",
+      "section": "Intro",
+      "order": 0,
+      "text": "ATP stores energy."
+    },
+    {
+      "id": "p-mid",
+      "type": "paragraph",
+      "section_id": "s-intro",
+      "section": "Intro",
+      "order": 1,
+      "text": "Context bridge."
+    },
+    {
+      "id": "p-dup",
+      "type": "paragraph",
+      "section_id": "s-intro",
+      "section": "Intro",
+      "order": 2,
+      "text": "ATP stores energy."
+    },
+    {
+      "id": "p-tail",
+      "type": "paragraph",
+      "section_id": "s-intro",
+      "section": "Intro",
+      "order": 3,
+      "text": "Final paragraph with citric acid cycle."
+    }
+  ]
+}

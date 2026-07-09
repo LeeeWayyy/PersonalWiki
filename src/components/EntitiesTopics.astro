@@ -1,0 +1,167 @@
+---
+// One shared index for /entities + /topics. `initialTab` decides the default
+// dataset; the segmented control flips between them client-side (no navigation).
+import Base from '../layouts/Base.astro';
+import { loadVault, enOf } from '../lib/vault.mjs';
+
+interface Props { initialTab?: 'entity' | 'topic'; }
+const { initialTab = 'entity' } = Astro.props;
+
+const { pages, backlinks, forward } = loadVault();
+const entities = pages.filter((p) => p.kind === 'entity');
+const topics = pages.filter((p) => p.kind === 'topic');
+const kindOf = new Map(pages.map((p) => [p.href, p.kind]));
+
+const fwdEntities = (href: string) => {
+  const s = forward.get(href); if (!s) return 0;
+  let n = 0; for (const h of s) if (kindOf.get(h) === 'entity') n++; return n;
+};
+// First real prose line of the body as a synthesis snippet (skip headings, lists, tables, quotes).
+function synthOf(body: string) {
+  for (const raw of (body || '').split('\n')) {
+    const l = raw.trim();
+    if (!l || /^[#>|\-*!\[<]/.test(l)) continue;
+    const t = l
+      .replace(/!?\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, a, b) => b || a)
+      .replace(/\[src:[^\]]*\]/g, '').replace(/[=*_`]/g, '').replace(/\s+/g, ' ').trim();
+    if (t.length < 4) continue;
+    const chars = [...t];
+    return chars.length > 90 ? chars.slice(0, 90).join('') + '…' : t;
+  }
+  return '';
+}
+
+function build(list: any[], tab: 'entity' | 'topic') {
+  const items = list.map((p) => {
+    const group = (p.tags && p.tags[0]) || '未分类';
+    const en = enOf(p);
+    const person = tab === 'entity' && (p.tags || []).some((t: string) => /person|people|人物|人名/i.test(t));
+    const glyph = tab === 'topic'
+      ? { g: '❋', c: 'var(--amber)', bg: 'color-mix(in srgb,var(--amber) 14%,var(--bg-3))' }
+      : person
+      ? { g: '☺', c: 'var(--amber)', bg: 'color-mix(in srgb,var(--amber) 14%,var(--bg-3))' }
+      : { g: '◈', c: 'var(--terra)', bg: 'color-mix(in srgb,var(--terra) 14%,var(--bg-3))' };
+    const nsrc = (p.sources || []).length;
+    const meta = tab === 'entity'
+      ? `↳ ${backlinks.get(p.href)?.size || 0} 链接 · ▤ ${nsrc} 来源`
+      : `❋ ${fwdEntities(p.href)} 实体 · ▤ ${nsrc} 来源`;
+    return {
+      href: p.href, title: p.title, en, group, glyph, meta, snip: synthOf(p.body),
+      search: (p.title + ' ' + en + ' ' + (p.tags || []).join(' ')).toLowerCase(),
+    };
+  });
+  const order: string[] = [];
+  for (const it of items) if (!order.includes(it.group)) order.push(it.group);
+  return {
+    total: items.length,
+    groups: order.map((g) => ({ name: g, count: items.filter((i) => i.group === g).length })),
+    sections: order.map((g) => ({ name: g, items: items.filter((i) => i.group === g) })),
+  };
+}
+
+const data = { entity: build(entities, 'entity'), topic: build(topics, 'topic') };
+const meta = {
+  entity: { title: 'Entities', kicker: `Browse · ${entities.length} pages`, ph: `在 ${entities.length} 个实体中快速筛选…` },
+  topic: { title: 'Topics', kicker: `Synthesis · ${topics.length} pages`, ph: `在 ${topics.length} 个主题中快速筛选…` },
+};
+const tabs: Array<'entity' | 'topic'> = ['entity', 'topic'];
+const init = meta[initialTab];
+---
+<Base title={init.title} active="entities" crumbs={[{ label: init.title }]}>
+  <div id="et" data-tab={initialTab} data-ent-title={meta.entity.title} data-ent-kicker={meta.entity.kicker} data-ent-ph={meta.entity.ph} data-top-title={meta.topic.title} data-top-kicker={meta.topic.kicker} data-top-ph={meta.topic.ph}>
+    <div class="et-head">
+      <div>
+        <div class="et-kicker" id="et-kicker">{init.kicker}</div>
+        <h1 id="et-title">{init.title}</h1>
+      </div>
+      <div class="et-seg">
+        <button data-seg="entity" class={initialTab === 'entity' ? 'on' : ''}>Entities</button>
+        <button data-seg="topic" class={initialTab === 'topic' ? 'on' : ''}>Topics</button>
+      </div>
+    </div>
+
+    <div class="et-filter">
+      <span style="color:var(--terra);font-size:15px;flex:none">⌕</span>
+      <input id="et-search" placeholder={init.ph} autocomplete="off" spellcheck="false" />
+      <button id="et-clear" style="display:none;background:var(--bg-3);border:1px solid var(--border);color:var(--text-3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--sans);flex:none">清除 ✕</button>
+      <span class="et-count" id="et-count">{init.title === 'Entities' ? data.entity.total : data.topic.total} 结果</span>
+      <div class="viewtog">
+        <button id="et-view-cards" class="on" title="卡片视图">▦</button>
+        <button id="et-view-list" title="列表视图">☰</button>
+      </div>
+    </div>
+
+    <div class="et-grid et-view" id="et-view">
+      {tabs.map((tab) => (
+        <nav class="et-rail" data-tab={tab} style={tab === initialTab ? '' : 'display:none'}>
+          <h4>索引</h4>
+          <button class="et-gbtn on" data-group="all">全部 <span class="c">{data[tab].total}</span></button>
+          {data[tab].groups.map((g) => (
+            <button class="et-gbtn" data-group={g.name}>{g.name} <span class="c">{g.count}</span></button>
+          ))}
+        </nav>
+      ))}
+
+      <div>
+        {tabs.map((tab) => (
+          <div class="et-tab" data-tab={tab} style={tab === initialTab ? '' : 'display:none'}>
+            {data[tab].sections.map((sec) => (
+              <section class="et-section" data-tab={tab} data-group={sec.name}>
+                <div class="et-shead"><span class="nm">{sec.name}</span><span class="c">{sec.items.length}</span><span class="rule"></span></div>
+                <div class="et-cards">
+                  {sec.items.map((it) => (
+                    <a href={it.href} class="et-card" data-tab={tab} data-group={it.group} data-t={it.title} data-search={it.search}>
+                      <span class="et-glyph" style={`color:${it.glyph.c};background:${it.glyph.bg}`}>{it.glyph.g}</span>
+                      <span class="et-main"><span class="t">{it.title}</span><span class="al">{it.en}</span></span>
+                      <span class="et-tag">{it.group}</span>
+                      <span class="et-snip">{it.snip}</span>
+                      <span class="et-meta">{it.meta}</span>
+                    </a>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        ))}
+        <div id="et-empty" style="display:none;padding:40px 0;text-align:center;color:var(--text-3);font-family:var(--serifcjk);font-size:14px"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    import { mountListFilter } from '../scripts/list-filter.js';
+
+    const root = document.getElementById('et')!;
+    const search = document.getElementById('et-search') as HTMLInputElement;
+    const kickerEl = document.getElementById('et-kicker')!;
+    const titleEl = document.getElementById('et-title')!;
+    const rails = [...root.querySelectorAll<HTMLElement>('.et-rail')];
+    const tabBlocks = [...root.querySelectorAll<HTMLElement>('.et-tab')];
+
+    const lf = mountListFilter({
+      root, search,
+      clearBtn: document.getElementById('et-clear')!,
+      countEl: document.getElementById('et-count')!,
+      emptyEl: document.getElementById('et-empty')!,
+      view: document.getElementById('et-view')!,
+      viewCards: document.getElementById('et-view-cards')!,
+      viewList: document.getElementById('et-view-list')!,
+      tab: root.dataset.tab || 'entity',
+      emptyText: (q: string, raw: string) => (q ? `没有匹配 “${raw}” 的条目 · 试试其它关键词` : '暂无条目'),
+      onApplied: (state: { tab: string }) => {
+        tabBlocks.forEach((t) => (t.style.display = t.dataset.tab === state.tab ? '' : 'none'));
+        rails.forEach((r) => (r.style.display = r.dataset.tab === state.tab ? '' : 'none'));
+      },
+    });
+
+    root.querySelectorAll<HTMLElement>('.et-seg button').forEach((b) => b.addEventListener('click', () => {
+      const tab = (lf.state.tab = b.dataset.seg!);
+      lf.state.group = 'all'; lf.state.query = ''; search.value = '';
+      root.querySelectorAll('.et-seg button').forEach((x) => x.classList.toggle('on', x === b));
+      kickerEl.textContent = root.dataset[tab === 'entity' ? 'entKicker' : 'topKicker'] || '';
+      titleEl.textContent = root.dataset[tab === 'entity' ? 'entTitle' : 'topTitle'] || '';
+      search.placeholder = root.dataset[tab === 'entity' ? 'entPh' : 'topPh'] || '';
+      lf.syncClear(); lf.syncGroup(); lf.apply();
+    }));
+  </script>
+</Base>

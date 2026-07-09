@@ -1,0 +1,219 @@
+---
+import Base from '../../layouts/Base.astro';
+import { loadLang } from '../../lib/vault.mjs';
+import type { LangEntry } from '../../lib/vault.mjs';
+
+export async function getStaticPaths() {
+  return loadLang().map((l: LangEntry) => ({ params: { slug: l.slug }, props: { lang: l } }));
+}
+const { lang } = Astro.props as { lang: LangEntry };
+const reading = lang.reading;
+const parasOf = (c: any) => c.paragraphs || [{ sentences: c.sentences || [] }];
+const wordCount = reading
+  ? reading.chapters.reduce((n: number, c: any) => n + parasOf(c).reduce((pm: number, p: any) =>
+      pm + p.sentences.reduce((m: number, s: any) => m + s.tokens.filter((t: any) => t.w).length, 0), 0), 0)
+  : lang.vocab.length;
+const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).replace(/</g, '\\u003c') : '';
+---
+<Base title={lang.title} active="reader" crumbs={[{ label: 'Reader', href: '/reader' }, { label: lang.title }]}>
+  <style is:global>
+    #rd .jp { font-family: var(--jp); line-height: 2.05; color: #ece2d1; }
+    #rd ruby rt { font-size: .5em; color: var(--text-3); font-family: var(--sans); font-weight: 400; transition: opacity .15s; }
+    #rd.furi-off ruby rt { opacity: 0; }
+    #rd .en { font-size: 14.5px; color: var(--text-2); line-height: 1.6; margin-top: 7px; font-family: var(--sans); }
+    #rd.trans-hide .en { display: none; }
+    #rd.trans-tap .en { display: none; }
+    #rd.trans-tap .sent.reveal .en { display: block; }
+    #rd .sent { padding: 9px 12px; margin: 2px -12px; border-radius: 10px; }
+    #rd .sent:hover { background: var(--bg-1); }
+    #rd .word:hover { filter: brightness(1.35); }
+    #rd-toolbar button { font-family: var(--sans); }
+  </style>
+
+  <div style="max-width:880px;margin:0 auto">
+    <div style="margin-bottom:22px">
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
+        <span style="font-size:10.5px;font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 42%,transparent);border-radius:5px;padding:2px 7px">JA · 日本語</span>
+        <span style="font-size:12px;color:var(--text-3);font-family:var(--mono)">immersion reader · {wordCount} words{reading ? '' : ' · raw fallback'}</span>
+      </div>
+      <h1 style="font-family:var(--jp);font-size:32px;font-weight:600;line-height:1.2;margin:0">{lang.title}</h1>
+    </div>
+
+    {reading ? (
+      <>
+        <div id="rd-toolbar" style="position:sticky;top:52px;z-index:4;display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--bg-1);border:1px solid var(--border);border-radius:12px;padding:9px 12px;margin-bottom:26px;box-shadow:0 8px 24px -14px rgba(0,0,0,.6)">
+          <button id="t-furi">ふりがな</button>
+          <div style="display:flex;align-items:center;gap:7px">
+            <span style="font-size:12px;color:var(--text-3)">訳</span>
+            <div class="seg" id="t-trans" style="padding:2px">
+              <button data-m="show" class="on" style="flex:none">表示</button>
+              <button data-m="tap" style="flex:none">タップ</button>
+              <button data-m="hide" style="flex:none">非表示</button>
+            </div>
+          </div>
+          <div class="seg" style="padding:2px">
+            <button id="t-smaller" style="flex:none;font-family:var(--serif);font-size:13px">A−</button>
+            <button id="t-bigger" style="flex:none;font-family:var(--serif);font-size:17px">A+</button>
+          </div>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:9px">
+            <span style="font-size:12px;font-family:var(--mono);color:var(--amber)"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:color-mix(in srgb,var(--amber) 60%,transparent);border:1px solid var(--amber);margin-right:5px;vertical-align:middle"></span><span id="c-new">0</span> new</span>
+            <span style="font-size:12px;font-family:var(--mono);color:var(--sage)">★ <span id="c-saved">0</span> saved</span>
+          </div>
+        </div>
+
+        <div id="pos-legend" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:22px;align-items:center">
+          <span style="font-size:11px;color:var(--text-3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.06em;margin-right:3px">品詞 · pos</span>
+        </div>
+
+        <div id="rd"></div>
+        <div id="rd-sheet" style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg-2);border-top:1px solid var(--border-strong);box-shadow:0 -10px 34px rgba(0,0,0,.5);padding:18px 24px 26px;font-family:var(--sans);max-height:52vh;overflow:auto;transition:transform .22s ease;transform:translateY(115%)">
+          <div style="max-width:640px;margin:0 auto;position:relative">
+            <button id="sheet-x" style="position:absolute;right:0;top:-2px;background:none;border:none;color:var(--text-3);font-size:22px;cursor:pointer;line-height:1">×</button>
+            <div id="sheet-body"></div>
+          </div>
+        </div>
+
+        <script is:inline id="reading-data" type="application/json" set:html={readingPayload}></script>
+        <script is:inline>
+          const { reading, sourceId } = JSON.parse(document.getElementById('reading-data').textContent);
+          const BACKEND = localStorage.getItem('backendUrl') || 'http://localhost:8787';
+          const TOKEN = localStorage.getItem('backendToken') || '';
+          const H = TOKEN ? { 'X-Auth-Token': TOKEN } : {};
+          const saved = new Set();
+          let fontSize = 24, furi = true, trans = 'show';
+          const parasOf = (ch) => ch.paragraphs || [{ sentences: ch.sentences || [] }];
+
+          const POS = { '動詞': 'var(--terra)', '形容詞': 'var(--amber)', '形容動詞': '#cbb96a', '形状詞': '#cbb96a',
+            '名詞': 'var(--sage)', '代名詞': '#c790a6', '副詞': '#6fa6b2', '連体詞': '#9a94c4' };
+          function posStyle(pos, isNew) {
+            const hue = POS[pos] || null;
+            let s = 'cursor:pointer;border-radius:3px;padding:0 1px;transition:filter .12s;';
+            if (hue) s += `background:color-mix(in srgb,${hue} 17%,var(--bg-2));`;
+            s += isNew ? 'border-bottom:2px solid var(--amber);'
+              : hue ? `border-bottom:1px solid color-mix(in srgb,${hue} 45%,transparent);`
+                    : 'border-bottom:1px dotted var(--border-strong);';
+            return s;
+          }
+          function esc(s){return (s+'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+          function att(s){return esc(s).replace(/"/g,'&quot;');}
+
+          // POS legend
+          const legend = document.getElementById('pos-legend');
+          [['動詞','verb','var(--terra)'],['形容詞','i-adj','var(--amber)'],['形容動詞','na-adj','#cbb96a'],
+           ['名詞','noun','var(--sage)'],['副詞','adverb','#6fa6b2'],['代名詞','pronoun','#c790a6']].forEach(([jp,en,hue]) => {
+            const el = document.createElement('span');
+            el.style.cssText = `display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:20px;font-size:12px;background:color-mix(in srgb,${hue} 17%,var(--bg-2));border:1px solid color-mix(in srgb,${hue} 40%,var(--border))`;
+            el.innerHTML = `<span style="font-family:var(--jp);color:var(--text)">${jp}</span><span style="color:var(--text-3);font-size:11px">${en}</span>`;
+            legend.appendChild(el);
+          });
+
+          const rd = document.getElementById('rd');
+          const sheet = document.getElementById('rd-sheet');
+          const sheetBody = document.getElementById('sheet-body');
+
+          async function loadKnown() {
+            try { const r = await fetch(`${BACKEND}/vocab?kind=word`, { headers: H }); if (r.ok) (await r.json()).forEach((i) => saved.add(i.lemma)); } catch {}
+            document.getElementById('c-saved').textContent = saved.size;
+          }
+
+          function tokenHtml(t) {
+            const ruby = t.rt ? `<ruby>${esc(t.t)}<rt>${esc(t.rt)}</rt></ruby>` : esc(t.t);
+            if (!t.w || !t.m) return ruby;
+            const isNew = t.new && !saved.has(t.w);
+            return `<span class="word" data-w="${att(t.w)}" data-r="${att(t.rt || t.t)}" data-m="${att(t.m)}" data-n="${att(t.n || '')}" data-p="${att(t.pos || '')}" style="${posStyle(t.pos, isNew)}">${ruby}</span>`;
+          }
+
+          function render() {
+            rd.innerHTML = ''; let newCount = 0;
+            for (const ch of reading.chapters) {
+              if (ch.chapter) { const h = document.createElement('div'); h.style.cssText = 'font-family:var(--jp);font-size:19px;font-weight:600;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:8px;margin:26px 0 18px'; h.textContent = ch.chapter; rd.appendChild(h); }
+              for (const para of parasOf(ch)) {
+                const pEl = document.createElement('div'); pEl.style.cssText = 'margin:0 0 20px;border-left:2px solid transparent;padding-left:4px';
+                for (const s of para.sentences) {
+                  for (const t of s.tokens) if (t.w && t.m && t.new && !saved.has(t.w)) newCount++;
+                  const el = document.createElement('div'); el.className = 'sent';
+                  const jp = document.createElement('div'); jp.className = 'jp'; jp.style.fontSize = fontSize + 'px';
+                  jp.innerHTML = s.tokens.map(tokenHtml).join('');
+                  el.appendChild(jp);
+                  if (s.grammar && s.grammar.length) {
+                    const chip = document.createElement('span');
+                    chip.style.cssText = 'display:inline-block;font-size:11.5px;color:var(--terra);background:color-mix(in srgb,var(--terra) 12%,var(--bg-2));border:1px solid color-mix(in srgb,var(--terra) 30%,var(--border));border-radius:20px;padding:2px 11px;margin-top:9px;cursor:pointer';
+                    chip.textContent = '文法 ' + s.grammar.length;
+                    chip.onclick = (e) => { e.stopPropagation();
+                      let d = el.querySelector('.gdet'); if (d) { d.remove(); return; }
+                      d = document.createElement('div'); d.className = 'gdet'; d.style.cssText = 'background:var(--bg-1);border:1px solid var(--border);border-radius:10px;padding:11px 14px;margin-top:10px';
+                      d.innerHTML = s.grammar.map((g) => `<div style="margin:4px 0"><span style="font-family:var(--jp);color:var(--terra);font-weight:600;font-size:14px">${esc(g.pattern)}</span><span style="font-size:13px;color:var(--text-2)"> — ${esc(g.explanation)}</span>${g.example_jp ? `<div style="font-family:var(--jp);font-size:12.5px;color:var(--text-3);margin-top:3px">${esc(g.example_jp)}</div>` : ''}</div>`).join('');
+                      el.appendChild(d); };
+                    el.appendChild(chip);
+                  }
+                  const en = document.createElement('div'); en.className = 'en'; en.textContent = s.en || ''; en.dataset.jp = s.jp;
+                  el.appendChild(en);
+                  el.addEventListener('click', () => onSentence(el, en));
+                  pEl.appendChild(el);
+                }
+                rd.appendChild(pEl);
+              }
+            }
+            document.getElementById('c-new').textContent = newCount;
+            applyModes();
+          }
+
+          function applyModes() {
+            rd.className = (furi ? '' : 'furi-off') + (trans === 'hide' ? ' trans-hide' : '') + (trans === 'tap' ? ' trans-tap' : '');
+          }
+
+          async function onSentence(el, en) {
+            if (trans === 'tap') el.classList.toggle('reveal');
+            if (!en.textContent) {
+              en.textContent = '…';
+              try { const r = await fetch(`${BACKEND}/translate`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ text: en.dataset.jp, lang: 'ja' }) });
+                en.textContent = r.ok ? (await r.json()).translation : '(translation unavailable)'; }
+              catch { en.textContent = `(study backend offline — start it: cd backend && bash run.sh · expected at ${BACKEND})`; }
+            }
+          }
+
+          // word → sheet
+          rd.addEventListener('click', (e) => {
+            const w = e.target.closest('.word'); if (!w) return; e.stopPropagation();
+            const d = w.dataset;
+            const already = saved.has(d.w);
+            sheetBody.innerHTML =
+              `<div style="font-family:var(--jp);font-size:26px;font-weight:600">${esc(d.w)}</div>` +
+              `<div style="color:var(--text-3);font-size:13px;font-family:var(--mono);margin:3px 0 10px">${esc(d.r)}${d.p ? ' · ' + esc(d.p) : ''}</div>` +
+              `<div style="font-size:16px;color:var(--text)">${esc(d.m)}</div>${d.n ? `<div style="color:var(--text-2);font-size:13px;margin-top:7px;line-height:1.55;font-family:var(--jp)">${esc(d.n)}</div>` : ''}` +
+              `<div style="display:flex;gap:9px;margin-top:16px"><button id="sv" class="btn-accent" style="padding:9px 16px;font-size:14px">${already ? '★ 保存済み' : '★ 単語帳に保存'}</button><button id="sv-known" style="background:var(--bg-3);color:var(--text);border:1px solid var(--border-strong);border-radius:9px;padding:9px 16px;font-size:14px;cursor:pointer;font-family:var(--sans)">既知にする</button></div>`;
+            sheet.style.transform = 'none';
+            const doSave = async (status) => {
+              try {
+                const r = await fetch(`${BACKEND}/vocab`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...H },
+                  body: JSON.stringify({ kind: 'word', source_id: sourceId, lemma: d.w, reading: d.r, pos: d.p, gloss: d.m }) });
+                if (!r.ok) throw new Error();
+                const id = (await r.json()).id;
+                if (status) await fetch(`${BACKEND}/vocab/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status }) });
+                saved.add(d.w); document.getElementById('c-saved').textContent = saved.size;
+                sheet.style.transform = 'translateY(115%)'; render();
+              } catch { alert('Could not reach study backend (' + BACKEND + ').'); }
+            };
+            document.getElementById('sv').onclick = () => doSave(null);
+            document.getElementById('sv-known').onclick = () => doSave('known');
+          });
+          document.getElementById('sheet-x').onclick = () => { sheet.style.transform = 'translateY(115%)'; };
+
+          // toolbar
+          const furiBtn = document.getElementById('t-furi');
+          function styleFuri() { furiBtn.style.cssText = (furi ? 'background:var(--terra);color:#1a0f08;font-weight:600;border:1px solid var(--terra);' : 'background:var(--bg-2);color:var(--text-2);border:1px solid var(--border);') + 'border-radius:8px;padding:6px 12px;font-size:12.5px;cursor:pointer'; }
+          furiBtn.onclick = () => { furi = !furi; styleFuri(); applyModes(); }; styleFuri();
+          document.querySelectorAll('#t-trans button').forEach((b) => b.onclick = () => {
+            trans = b.dataset.m; document.querySelectorAll('#t-trans button').forEach((x) => x.classList.toggle('on', x === b)); applyModes();
+          });
+          document.getElementById('t-bigger').onclick = () => { fontSize = Math.min(34, fontSize + 2); document.querySelectorAll('#rd .jp').forEach((j) => j.style.fontSize = fontSize + 'px'); };
+          document.getElementById('t-smaller').onclick = () => { fontSize = Math.max(16, fontSize - 2); document.querySelectorAll('#rd .jp').forEach((j) => j.style.fontSize = fontSize + 'px'); };
+
+          loadKnown().then(render);
+        </script>
+      </>
+    ) : (
+      <div class="card"><p class="muted">No structured reading data. Run <code>python3 scripts/build-reading.py</code> (needs fugashi) or re-ingest with the updated pipeline.</p></div>
+    )}
+  </div>
+</Base>

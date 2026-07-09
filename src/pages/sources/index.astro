@@ -1,0 +1,109 @@
+---
+import Base from '../../layouts/Base.astro';
+import { loadVault, loadLang, sourceHasBlocks, sourceReaderHref, chaptersForSource } from '../../lib/vault.mjs';
+
+const { sources, pages } = loadVault();
+const langIds = new Set(loadLang().map((e) => e.id));
+const citedBy = (id: string) => pages.filter((p) => (p.sources || []).includes(id)).length;
+
+// Source kind → group heading + glyph (book spine / article / language).
+const glyphs: Record<string, { g: string; c: string }> = {
+  书籍: { g: '▤', c: 'var(--terra)' },
+  文章: { g: '§', c: 'var(--amber)' },
+  语言: { g: '文', c: 'var(--sage)' },
+};
+const kindOf = (s: any) => {
+  if (langIds.has(s.id)) return '语言';
+  return /epub|pdf|mobi|azw|book/i.test((s.origin_type || '') + ' ' + (s.origin_ref || '')) ? '书籍' : '文章';
+};
+const glyphStyle = (c: string) =>
+  `color:${c};background:color-mix(in srgb,${c} 12%,var(--bg-3));border:1px solid color-mix(in srgb,${c} 32%,var(--border))`;
+
+const items = sources.map((s) => {
+  const group = kindOf(s);
+  const readable = sourceHasBlocks(s.id);
+  const chapters = readable ? chaptersForSource(s.id).length : 0;
+  const cited = citedBy(s.id);
+  const sub = s.origin_ref && s.origin_ref.length <= 48 ? s.origin_ref : s.origin_type;
+  return {
+    href: readable ? sourceReaderHref(s.id) : s.href,
+    title: s.title, sub, group, glyph: glyphs[group], readable,
+    meta: `被 ${cited} 处引用${chapters ? ` · ${chapters} 章` : ''}`,
+    search: (s.title + ' ' + sub + ' ' + group).toLowerCase(),
+  };
+});
+
+const order = ['书籍', '文章', '语言'].filter((g) => items.some((i) => i.group === g));
+const groups = order.map((g) => ({ name: g, count: items.filter((i) => i.group === g).length }));
+const sections = order.map((g) => ({ name: g, items: items.filter((i) => i.group === g) }));
+---
+<Base title="Sources" active="sources" crumbs={[{ label: 'Sources' }]}>
+  <div id="src">
+    <div class="et-head">
+      <div>
+        <div class="et-kicker">Library · {sources.length} sources</div>
+        <h1>Sources</h1>
+      </div>
+    </div>
+
+    <div class="et-filter">
+      <span style="color:var(--terra);font-size:15px;flex:none">⌕</span>
+      <input id="src-search" placeholder="按标题、作者或来源筛选…" autocomplete="off" spellcheck="false" />
+      <button id="src-clear" style="display:none;background:var(--bg-3);border:1px solid var(--border);color:var(--text-3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--sans);flex:none">清除 ✕</button>
+      <span class="et-count" id="src-count">{items.length} 结果</span>
+      <div class="viewtog">
+        <button id="src-view-cards" class="on" title="卡片视图">▦</button>
+        <button id="src-view-list" title="列表视图">☰</button>
+      </div>
+    </div>
+
+    <div class="et-grid et-view" id="src-view">
+      <nav class="et-rail">
+        <h4>索引</h4>
+        <button class="et-gbtn on" data-group="all">全部 <span class="c">{items.length}</span></button>
+        {groups.map((g) => (
+          <button class="et-gbtn" data-group={g.name}>{g.name} <span class="c">{g.count}</span></button>
+        ))}
+      </nav>
+
+      <div>
+        {sections.map((sec) => (
+          <section class="et-section" data-group={sec.name}>
+            <div class="et-shead"><span class="nm">{sec.name}</span><span class="c">{sec.items.length}</span><span class="rule"></span></div>
+            <div class="et-cards">
+              {sec.items.map((it) => (
+                <a href={it.href} class="et-card" data-group={it.group} data-t={it.title} data-search={it.search}>
+                  <span class="et-glyph spine" style={glyphStyle(it.glyph.c)}>{it.glyph.g}</span>
+                  <span class="et-main"><span class="t">{it.title}</span><span class="al">{it.sub}</span></span>
+                  {it.readable
+                    ? <span class="et-tag" style="color:var(--amber);background:color-mix(in srgb,var(--amber) 12%,var(--bg-2));border-color:color-mix(in srgb,var(--amber) 30%,var(--border))">可读</span>
+                    : <span class="et-tag">待提取</span>}
+                  <span class="et-snip"></span>
+                  <span class="et-meta"><span class="m">{it.meta}</span><span class="rd" style={`color:${it.readable ? 'var(--amber)' : 'var(--text-3)'}`}>{it.readable ? '可在此阅读 →' : '未提取正文'}</span></span>
+                </a>
+              ))}
+            </div>
+          </section>
+        ))}
+        <div id="src-empty" style="display:none;padding:40px 0;text-align:center;color:var(--text-3);font-family:var(--serifcjk);font-size:14px"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    import { mountListFilter } from '../../scripts/list-filter.js';
+
+    const root = document.getElementById('src')!;
+    mountListFilter({
+      root,
+      search: document.getElementById('src-search') as HTMLInputElement,
+      clearBtn: document.getElementById('src-clear')!,
+      countEl: document.getElementById('src-count')!,
+      emptyEl: document.getElementById('src-empty')!,
+      view: document.getElementById('src-view')!,
+      viewCards: document.getElementById('src-view-cards')!,
+      viewList: document.getElementById('src-view-list')!,
+      emptyText: (q: string, raw: string) => (q ? `没有匹配 “${raw}” 的来源 · 试试其它关键词` : '暂无来源'),
+    });
+  </script>
+</Base>

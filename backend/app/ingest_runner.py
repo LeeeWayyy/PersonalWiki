@@ -1,0 +1,391 @@
+"""Ingest control plane: run the wiki ingest pipeline from a web request.
+
+Honors the operational realities from the plan (§2a):
+- ONE lock serializes ingest + rebuild (avoids racing ingest.py's preflight).
+- The ingest engine applies LLM diffs and commits through git (`git apply
+  --index` + staged commits), so a wiki folder that is not a git repo is
+  auto-initialized with a baseline commit; set PW_INGEST_NO_AUTO_GIT=1 to
+  block instead of creating one. Reading/serving works without git regardless.
+- Preflight refuses a dirty tree and reports the offending paths + leftover
+  .rejected/.failed artifacts instead of failing opaquely.
+- Runs async, streaming stdout over SSE, with idle timeout + cancel.
+- LLM auth is the operator's responsibility (local Codex, custom LLM_CMD, or API
+  fallback in the daemon env); set PW_INGEST_STUB=1 to exercise the whole flow
+  without spending budget.
+"""
+from __future__ import annotations
+import os
+import re
+import json
+import shlex
+import signal
+import sys
+import uuid
+import asyncio
+import subprocess
+import time
+from collections import deque
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]  # personal_wiki root
+SCRIPTS_DIR = REPO / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from vendor_content import init_git_snapshot, init_empty_content  # noqa: E402
+
+
+def _repo_relative_path(env_name: str, default: Path) -> Path:
+    raw = os.environ.get(env_name)
+    path = Path(raw) if raw else default
+    return path if path.is_absolute() else (REPO / path).resolve()
+
+
+CONTENT_DIR = _repo_relative_path("PW_CONTENT_DIR", REPO / "content")      # local wiki folder
+DEFAULT_INGEST_SCRIPT = REPO / "pipeline" / "ingest.py"
+INGEST_CMD = os.environ.get("INGEST_CMD", f"python3 {shlex.quote(str(DEFAULT_INGEST_SCRIPT))}")
+REBUILD_CMD = os.environ.get("REBUILD_CMD", "")  # e.g. "npm --prefix /path/to/personal_wiki run build"
+JOB_TIMEOUT_S = 1800
+PROCESS_CLEANUP_TIMEOUT_S = 10
+JOB_LOG_LIMIT = 2000
+JOB_TTL_S = 86400
+STUB = os.environ.get("PW_INGEST_STUB") == "1"
+AUTO_INIT_GIT = os.environ.get("PW_INGEST_NO_AUTO_GIT") != "1"
+
+LOCK = asyncio.Lock()
+JOBS: dict[str, "Job"] = {}
+
+_WATCHED = ("wiki/", "sources/", ".wiki/log.md")
+_LANG_WATCHED = ("lang/",)
+_LEFTOVER = re.compile(r"\.(rejected|failed(\.\d+)?|apply-err(\.\d+)?)$")
+# ingest.py's ensure_wiki_scaffold creates wiki/_taxonomy.md and commits it in
+# the same run; its own preflight allows the placeholder as untracked. A run
+# interrupted after scaffold but before commit leaves it untracked, which would
+# otherwise wedge every later job here. Mirror ingest's tolerance — the
+# authoritative placeholder-vs-user-edit check stays in ingest.py's preflight.
+_SCAFFOLD_UNTRACKED = frozenset({"wiki/_taxonomy.md"})
+
+
+class Job:
+    def __init__(self, job_id: str):
+        self.id = job_id
+        self.status = "queued"          # queued|running|blocked|done|error|canceled
+        self.created_at = time.time()
+        self.updated_at = self.created_at
+        self.lines: deque[tuple[int, str]] = deque(maxlen=JOB_LOG_LIMIT)
+        self.next_seq = 0
+        self.result: dict = {}
+        self.process: asyncio.subprocess.Process | None = None
+        self.cancel_requested = False
+        self.ended = False
+
+    def emit(self, line: str):
+        if self.ended:
+            return
+        self.updated_at = time.time()
+        self.lines.append((self.next_seq, line))
+        self.next_seq += 1
+
+    @property
+    def dropped_lines(self) -> int:
+        return max(0, self.next_seq - len(self.lines))
+
+    def visible_lines(self) -> list[str]:
+        lines = [line for _, line in self.lines]
+        if self.dropped_lines:
+            return [f"... {self.dropped_lines} earlier log line(s) truncated ...", *lines]
+        return lines
+
+    def events_after(self, cursor: int) -> list[tuple[int, str]]:
+        if self.lines and cursor < self.lines[0][0]:
+            first_seq = self.lines[0][0]
+            marker = f"... {self.dropped_lines} earlier log line(s) truncated ..."
+            return [(first_seq - 1, marker), *self.lines]
+        return [(seq, line) for seq, line in self.lines if seq >= cursor]
+
+    def finish_canceled(self) -> None:
+        if self.ended:
+            return
+        self.status = "canceled"
+        self.result = {"status": "canceled"}
+        self.emit("canceled by request")
+        self.emit("__END__")
+        self.ended = True
+
+
+def reap_jobs(now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    terminal = {"blocked", "done", "error", "canceled"}
+    for job_id, job in list(JOBS.items()):
+        if job.status in terminal and now - job.updated_at > JOB_TTL_S:
+            JOBS.pop(job_id, None)
+
+
+def get_job(job_id: str) -> Job | None:
+    reap_jobs()
+    return JOBS.get(job_id)
+
+
+def _expand_status_path(content: Path, path: str) -> list[str]:
+    target = content / path
+    if not path.endswith("/") or not target.is_dir():
+        return [path]
+    files = [p.relative_to(content).as_posix() for p in target.rglob("*") if p.is_file()]
+    return sorted(files) or [path]
+
+
+def ensure_content_git(content: Path) -> tuple[bool, str]:
+    """Guarantee the wiki folder exists and is a git repo ingest can commit into.
+
+    The engine applies diffs via `git apply --index` and commits each run, so a
+    missing folder or a plain (non-git) folder can't be ingested. When the folder
+    is absent we create a fresh empty vault; when it exists but isn't a repo we
+    snapshot it. Both auto-init unless PW_INGEST_NO_AUTO_GIT=1. Returns
+    (ok, message); ok=False means ingest should block. Existing repos are left
+    untouched.
+    """
+    if (content / ".git").exists():
+        return True, ""
+    if not AUTO_INIT_GIT:
+        missing = not content.exists()
+        return False, (
+            f"wiki folder {'does not exist' if missing else 'is not a git repo'} ({content}) — "
+            "ingest needs a git repo so it can commit changes. Unset PW_INGEST_NO_AUTO_GIT to "
+            "let ingest create one automatically."
+        )
+    # Absent folder → make a fresh empty vault (dir + .gitignore + baseline
+    # commit); ingest.py's ensure_wiki_scaffold fills the wiki structure on run.
+    if not content.exists() or not any(content.iterdir()):
+        ok, detail = init_empty_content(content)
+        if not ok:
+            return False, f"failed to create an empty vault at {content}: {detail}"
+        return True, f"no wiki folder at {content}; {detail}"
+    ok, detail = init_git_snapshot(
+        content,
+        user_email="ingest@personal-wiki.local",
+        user_name="ingest",
+        commit_message="ingest: initial vault snapshot",
+        allow_empty=True,
+    )
+    if not ok:
+        if detail == "git is not installed":
+            return False, f"wiki folder is not a git repo ({content}) and git is not installed to create one"
+        return False, f"failed to initialize git in {content}: {detail or 'unknown error'}"
+    suffix = " with a baseline commit" if detail == "committed" else ""
+    return True, f"wiki folder was not a git repo; initialized one at {content}{suffix}"
+
+
+def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
+    """Return (ok, message, offending_paths)."""
+    content = CONTENT_DIR
+    if not content.exists():
+        return False, f"wiki folder not found at {content} - set PW_CONTENT_DIR or run python3 scripts/vendor_content.py", []
+    if not (content / ".git").exists():
+        return False, f"wiki folder is not a git repo ({content}) — ingest needs git so it can commit changes", []
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(content), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:  # noqa
+        return False, f"git status failed: {e}", []
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        detail = detail.splitlines()[-1] if detail else f"exit code {result.returncode}"
+        return False, f"git status failed: {detail}", []
+    out = result.stdout
+    watched = _LANG_WATCHED if (options or {}).get("kind") == "lang" else _WATCHED
+    offending, leftover = [], []
+    for line in out.splitlines():
+        path = line[3:].strip()
+        if any(path.startswith(w) or path == w.rstrip("/") for w in watched):
+            offending.extend(_expand_status_path(content, path))
+        if _LEFTOVER.search(path):
+            leftover.append(path)
+    offending = [p for p in offending if p not in _SCAFFOLD_UNTRACKED]
+    if offending or leftover:
+        msg = "Vault tree is not clean — ingest preflight would refuse."
+        if leftover:
+            msg += f" Leftover artifacts: {', '.join(leftover)}."
+        return False, msg, offending + leftover
+    return True, "clean", []
+
+
+def _build_argv(target: str, options: dict) -> list[str]:
+    argv = shlex.split(INGEST_CMD)
+    kind = (options or {}).get("kind", "auto")
+    if kind == "lang":
+        argv += ["--profile", "lang"]
+    elif kind in {"video", "audio", "image_note"}:
+        argv += ["--kind", kind]
+    section = (options or {}).get("section_label")
+    if section:
+        argv += ["--section-label", section]
+    argv.append(target)
+    return argv
+
+
+async def _stream(proc: asyncio.subprocess.Process, job: Job, *, idle_timeout_s: int = JOB_TIMEOUT_S):
+    assert proc.stdout
+    while True:
+        raw = await asyncio.wait_for(proc.stdout.readline(), timeout=idle_timeout_s)
+        if not raw:
+            break
+        job.emit(raw.decode(errors="replace").rstrip("\n"))
+
+
+async def _stream_until_exit(proc: asyncio.subprocess.Process, job: Job) -> int:
+    await _stream(proc, job)
+    return await proc.wait()
+
+
+async def _kill_process_group(proc: asyncio.subprocess.Process, job: Job, label: str) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:  # noqa
+        proc.kill()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=PROCESS_CLEANUP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        job.emit(f"warn: {label} did not exit after kill")
+
+
+async def cancel_job(job_id: str) -> Job | None:
+    job = get_job(job_id)
+    if not job:
+        return None
+    if job.status in {"blocked", "done", "error", "canceled"}:
+        return job
+    job.cancel_requested = True
+    proc = job.process
+    if proc and proc.returncode is None:
+        await _kill_process_group(proc, job, "cancel")
+    job.finish_canceled()
+    return job
+
+
+async def run_job(job: Job, target: str, options: dict):
+    async with LOCK:
+        if job.cancel_requested:
+            job.finish_canceled()
+            return
+        job.status = "running"
+        git_ok, git_msg = ensure_content_git(CONTENT_DIR)
+        if not git_ok:
+            job.status = "blocked"
+            job.emit("BLOCKED: " + git_msg)
+            job.result = {"status": "blocked", "offending": []}
+            job.emit("__END__")
+            return
+        if git_msg:
+            job.emit(git_msg)
+        ok, msg, offending = preflight(options)
+        if not ok:
+            job.status = "blocked"
+            job.emit("BLOCKED: " + msg)
+            for p in offending:
+                job.emit("  · " + p)
+            job.result = {"status": "blocked", "offending": offending}
+            job.emit("__END__")
+            return
+
+        if job.cancel_requested:
+            job.finish_canceled()
+            return
+
+        job.emit(f"preflight: clean · target={target} · opts={json.dumps(options)}")
+
+        if STUB:
+            for step in ["sidecar", "extract text", "keyword pre-pass",
+                         "LLM diff", "lint", "commit"]:
+                if job.cancel_requested:
+                    job.finish_canceled()
+                    return
+                await asyncio.sleep(0.2)
+                job.emit(f"[stub] {step} ✓")
+            job.status = "done"
+            job.result = {"status": "done", "stub": True}
+            job.emit("__END__")
+            return
+
+        argv = _build_argv(target, options)
+        job.emit("$ " + " ".join(shlex.quote(a) for a in argv))
+        proc_env = {**os.environ, "VAULT_CONTENT_DIR": str(CONTENT_DIR), "PYTHONUNBUFFERED": "1"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, cwd=str(CONTENT_DIR),  # pipeline runs with cwd = the local wiki repo
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                env=proc_env,
+                start_new_session=True,
+            )
+            job.process = proc
+        except FileNotFoundError as e:
+            job.status = "error"
+            job.emit(f"error: cannot launch ingest ({e})")
+            job.emit("__END__")
+            return
+        try:
+            rc = await _stream_until_exit(proc, job)
+        except asyncio.TimeoutError:
+            await _kill_process_group(proc, job, "ingest")
+            job.status = "error"
+            job.emit(f"error: ingest produced no output for {JOB_TIMEOUT_S}s — killed")
+            job.emit("__END__")
+            return
+        finally:
+            if job.process is proc:
+                job.process = None
+
+        if job.cancel_requested:
+            job.finish_canceled()
+            return
+
+        if rc != 0:
+            job.status = "error"
+            job.emit(f"ingest exited with code {rc}")
+            job.result = {"status": "error", "code": rc}
+            job.emit("__END__")
+            return
+
+        job.emit("ingest committed ✓")
+        if REBUILD_CMD:
+            job.emit("$ " + REBUILD_CMD)
+            rp = await asyncio.create_subprocess_shell(
+                REBUILD_CMD, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True)
+            job.process = rp
+            try:
+                rebuild_rc = await _stream_until_exit(rp, job)
+            except asyncio.TimeoutError:
+                await _kill_process_group(rp, job, "rebuild")
+                job.status = "error"
+                job.emit(f"error: rebuild produced no output for {JOB_TIMEOUT_S}s — killed")
+                job.emit("__END__")
+                return
+            finally:
+                if job.process is rp:
+                    job.process = None
+            if job.cancel_requested:
+                job.finish_canceled()
+                return
+            if rebuild_rc != 0:
+                job.status = "error"
+                job.emit(f"rebuild exited with code {rebuild_rc}")
+                job.result = {"status": "error", "rebuild_code": rebuild_rc}
+                job.emit("__END__")
+                return
+            job.emit("site rebuilt ✓")
+        job.status = "done"
+        job.result = {"status": "done"}
+        job.emit("__END__")
+
+
+def start_job(target: str, options: dict) -> str:
+    reap_jobs()
+    job_id = uuid.uuid4().hex[:12]
+    job = Job(job_id)
+    JOBS[job_id] = job
+    asyncio.create_task(run_job(job, target, options))
+    return job_id

@@ -1,0 +1,158 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Deterministic stub for the `extract-remote` CLI (audio_extraction only), used by
+scripts/tests/test_podcast_e2e.sh — writes a canned ExtractionResult envelope to
+`<out-dir>/<job_id>/result.json` (no network/GPU/RSS), mirroring the real client.
+
+Honors `--out-dir`, `--feed-url`, `--episode-guid`, `--enclosure-url`. The
+resolved identity in `meta` echoes the requested selectors so the consumer's
+dedup + reconciliation paths are exercised. Set $STUB_EXTRACT_FAIL=1 to simulate
+a service/job failure (exit 1, write nothing).
+Set $STUB_EXTRACT_GUID=<g> to force a *resolved* episode_guid different from the
+requested one (to exercise the guid-reconciliation hard error).
+"""
+import json
+import os
+import sys
+
+if os.environ.get("STUB_EXTRACT_FAIL"):
+    print("Error: extraction failed: stubbed failure", file=sys.stderr)
+    sys.exit(1)
+
+args = sys.argv[1:]
+
+
+def opt(name):
+    return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else None
+
+
+out_dir = opt("--out-dir") or "."
+kind = opt("--kind") or "audio_extraction"
+feed_url = opt("--feed-url") or ""
+req_guid = opt("--episode-guid") or ""
+enclosure = opt("--enclosure-url") or ""
+resolved_guid = os.environ.get("STUB_EXTRACT_GUID", req_guid) or None
+
+job_id = "abcdef012345"  # 12-hex, like uuid4().hex[:12]
+job_dir = os.path.join(out_dir, job_id)
+os.makedirs(job_dir, exist_ok=True)
+
+if kind == "video":
+    import hashlib
+    nf = int(os.environ.get("STUB_FRAMES", "2"))
+    os.makedirs(os.path.join(job_dir, "assets"), exist_ok=True)
+    frames, assets = [], []
+    for i in range(nf):
+        key = f"assets/frame-{i:06d}.jpg"
+        body = f"fake-frame-bytes-{i}".encode()
+        with open(os.path.join(job_dir, key), "wb") as f:
+            f.write(body)
+        isha = hashlib.sha256(body).hexdigest()
+        frames.append({"frame_id": i, "timecode": float(i * 5), "image_ref": key,
+                       "ocr_text": f"on-screen text in frame {i}", "confidence": 0.9})
+        assets.append({"key": key, "sha256": isha, "size": len(body), "media_type": "image/jpeg"})
+    import re as _re
+    vid_m = _re.search(r"[?&]v=([A-Za-z0-9_-]{11})", " ".join(args))
+    segments = [
+        {"text": "Frame e2e: this video discusses mitochondria and ATP.",
+         "start": 0.0, "end": 5.0, "speaker": "SPEAKER_00", "words": []},
+        {"text": "The e2e entity recurs across this end-to-end frames ingest test.",
+         "start": 5.0, "end": 11.0, "speaker": "SPEAKER_01", "words": []},
+    ]
+    env = {
+        "kind": "video",
+        "text": "SPEAKER_00: Frame e2e: this video discusses mitochondria and ATP.\n",
+        "language": "en", "segments": segments, "frames": frames, "assets": assets,
+        "meta": {"model": "large-v3", "device": "cuda", "compute_type": "float16",
+                 "whisperx_version": "3.1.1", "selected_audio_format": "251",
+                 "selected_video_format": "137", "ffmpeg_version": "6.1.1",
+                 "frame_policy": {"method": "fixed_cadence", "cadence_s": 5.0},
+                 "frame_count": nf, "duration_s": 11.0,
+                 "job_id": job_id, "server_version": "0.1.0",
+                 **({"video_id": vid_m.group(1)} if vid_m else {})},
+    }
+    with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as f:
+        json.dump(env, f, ensure_ascii=False, indent=2)
+    sys.stdout.write(env["text"])
+    sys.exit(0)
+
+if kind == "image_note":
+    import hashlib
+    n = int(os.environ.get("STUB_IMAGE_CARDS", "2"))
+    os.makedirs(os.path.join(job_dir, "assets"), exist_ok=True)
+    cards, assets = [], []
+    for i in range(n):
+        key = f"assets/card-{i:05d}.jpg"
+        body = f"fake-image-bytes-{i}".encode()
+        with open(os.path.join(job_dir, key), "wb") as f:
+            f.write(body)
+        isha = hashlib.sha256(body).hexdigest()
+        cards.append({"index": i, "ocr_text": f"OCR text of card {i+1}: e2e entity, mitochondria.",
+                      "image_ref": key, "source_filename": f"card-{i:05d}.jpg",
+                      "image_sha256": isha, "width": 800, "height": 600, "confidence": 0.97})
+        assets.append({"key": key, "sha256": isha, "size": len(body), "media_type": "image/jpeg"})
+    text = "".join(f"## card {i+1}\n{c['ocr_text']}\n\n" for i, c in enumerate(cards)).rstrip("\n") + "\n"
+    env = {
+        "kind": "image_note", "text": text, "language": "zh",
+        "cards": cards, "assets": assets,
+        "meta": {"ocr_engine": "paddleocr@2.7", "ocr_model": "ch_PP-OCRv4",
+                 "ocr_params": {"lang": "ch", "use_angle_cls": True},
+                 "ocr_device": "cpu", "card_count": n,
+                 "platform": os.environ.get("STUB_IMAGE_PLATFORM", "rednote"),
+                 "post_id": os.environ.get("STUB_IMAGE_POSTID") or None,
+                 "job_id": job_id, "server_version": "0.1.0"},
+    }
+    with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as f:
+        json.dump(env, f, ensure_ascii=False, indent=2)
+    sys.stdout.write(text)
+    sys.exit(0)
+
+# Optional malformed-segment injection (to exercise the consumer's hard gates).
+_BAD = os.environ.get("STUB_EXTRACT_SEGMENTS")  # "" | "ooo" (out of order) | "nan"
+if _BAD == "ooo":
+    segments = [
+        {"text": "second by timeline but emitted first.", "start": 11.0, "end": 16.0, "speaker": "SPEAKER_00", "words": []},
+        {"text": "first by timeline but emitted second.", "start": 0.0, "end": 5.0, "speaker": "SPEAKER_00", "words": []},
+    ]
+elif _BAD == "nan":
+    segments = [{"text": "nan start.", "start": float("nan"), "end": 5.0, "speaker": "SPEAKER_00", "words": []}]
+else:
+    segments = [
+        {"text": "This stub podcast episode discusses energy and biology.",
+         "start": 0.0, "end": 5.0, "speaker": "SPEAKER_00", "words": []},
+        {"text": "The e2e entity recurs throughout this end-to-end podcast ingest test.",
+         "start": 5.0, "end": 11.0, "speaker": "SPEAKER_01", "words": []},
+        {"text": "Mitochondria and ATP are mentioned as recurring themes here.",
+         "start": 11.0, "end": 16.0, "speaker": "SPEAKER_00", "words": []},
+    ]
+
+# STUB_EXTRACT_NO_ENCLOSURE forces the feed_title_published basis (service resolved
+# no guid and no enclosure — only title + published).
+_no_enc = bool(os.environ.get("STUB_EXTRACT_NO_ENCLOSURE"))
+
+envelope = {
+    "kind": "audio_extraction",
+    "text": "SPEAKER_00: This stub podcast episode discusses energy and biology.\n",
+    "language": "en",
+    "segments": segments,
+    "assets": [],
+    "meta": {
+        "model": "large-v3", "device": "cuda", "compute_type": "float16",
+        "whisperx_version": "3.1.1",
+        "feed_url": feed_url, "episode_guid": resolved_guid,
+        "episode_title": os.environ.get("STUB_EXTRACT_TITLE") or None,
+        "enclosure_url": None if _no_enc else (enclosure or "https://cdn.example.com/ep1.mp3"),
+        "final_download_url": "https://cdn.example.com/ep1.mp3",
+        "published": "2026-05-01", "resolution_source": "feed_parse",
+        "duration_s": 16.0, "job_id": job_id, "server_version": "0.1.0",
+        "_provenance": {"recipe": ["model", "device", "compute_type",
+                                   "whisperx_version", "resolution_source"],
+                        "observation": ["feed_url", "episode_guid", "enclosure_url",
+                                        "published", "segments", "duration_s"]},
+    },
+}
+with open(os.path.join(job_dir, "result.json"), "w", encoding="utf-8") as f:
+    json.dump(envelope, f, ensure_ascii=False, indent=2)
+sys.stdout.write(envelope["text"])

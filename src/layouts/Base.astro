@@ -1,0 +1,211 @@
+---
+import '../styles/global.css';
+import { readFileSync } from 'node:fs';
+import { loadVault, enOf } from '../lib/vault.mjs';
+
+interface Crumb { label: string; href?: string; }
+interface Props { title: string; crumbs?: Crumb[]; active?: string; rail?: boolean; }
+const { title, crumbs = [], active = '', rail = false } = Astro.props;
+
+const { pages, sources, backlinks, forward } = loadVault();
+const entities = pages.filter((p) => p.kind === 'entity');
+const topics = pages.filter((p) => p.kind === 'topic');
+const maps = pages.filter((p) => p.kind === 'map');
+const mapHref = maps[0]?.href ?? '/wiki/index';
+
+// Command-search index (entities + topics + sources), serialized for the ⌘K palette.
+const kindByHref = new Map(pages.map((p) => [p.href, p.kind]));
+const fwdEnt = (href: string) => {
+  const s = forward.get(href); if (!s) return 0;
+  let n = 0; for (const h of s) if (kindByHref.get(h) === 'entity') n++; return n;
+};
+const cmdItems = [
+  ...entities.map((p) => ({ kind: 'entity', title: p.title, sub: enOf(p), href: p.href, meta: `${backlinks.get(p.href)?.size || 0} 链接`, glyph: (p.tags || []).some((t: string) => /person|人物|人名/i.test(t)) ? '☺' : '◈' })),
+  ...topics.map((p) => ({ kind: 'topic', title: p.title, sub: enOf(p), href: p.href, meta: `${fwdEnt(p.href)} 实体`, glyph: '❋' })),
+  ...sources.map((s) => ({ kind: 'source', title: s.title, sub: s.origin_ref || s.origin_type, href: s.href, meta: s.origin_type, glyph: '▤' })),
+].map((it) => ({ ...it, hay: (it.title + ' ' + it.sub).toLowerCase() }));
+const cmdJson = JSON.stringify(cmdItems).replace(/</g, '\\u003c');
+
+const sync = (() => { try { return JSON.parse(readFileSync('vault/.sync-meta.json', 'utf8')); } catch { return null; } })();
+const syncWhen = sync?.synced_at ? sync.synced_at.replace('T', ' ').replace('Z', '').slice(5, 16) : '';
+
+// entities + topics are one merged nav item now; /entities & /topics both light it up.
+const navActive = active === 'entities' || active === 'topics' ? 'entities-topics' : active;
+const cls = (k: string) => (navActive === k ? 'active' : '');
+const browse = [
+  { icon: '◈', label: 'Entities & Topics', href: '/entities', count: entities.length + topics.length, key: 'entities-topics' },
+  { icon: '▤', label: 'Sources', href: '/sources', count: sources.length, key: 'sources' },
+  { icon: '⬡', label: 'Argument map', href: mapHref, count: '', key: 'map' },
+];
+const study = [
+  { icon: '文', label: 'Language reader', href: '/reader', key: 'reader' },
+  { icon: '↻', label: 'Review (SRS)', href: '/reader/review', key: 'review' },
+];
+const csp = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "style-src 'self' 'unsafe-inline'",
+  "script-src 'self' 'unsafe-inline'",
+  "connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://*.ts.net:*",
+  "media-src 'self' data: blob:",
+  "worker-src 'self' blob:",
+  "manifest-src 'self'",
+].join('; ');
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content={csp} />
+  <meta name="referrer" content="no-referrer" />
+  <title>{title} · Personal Wiki</title>
+  <slot name="head" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo"></div>
+        <div style="min-width:0">
+          <div class="brand-title"><a href="/">Personal Wiki</a></div>
+          <div class="brand-sub">Local wiki folder</div>
+        </div>
+      </div>
+
+      <button class="side-search" id="open-search"><span>⌕</span><span>Search the vault</span><kbd>⌘K</kbd></button>
+
+      <nav class="nav">
+        <a href="/" class={cls('home')}><span class="ico">◆</span>Dashboard</a>
+
+        <div class="nav-label">Browse</div>
+        {browse.map((n) => (
+          <a href={n.href} class={cls(n.key)}><span class="ico">{n.icon}</span><span>{n.label}</span>{n.count !== '' && <span class="count">{n.count}</span>}</a>
+        ))}
+
+        <div class="nav-label">Study</div>
+        {study.map((n) => (
+          <a href={n.href} class={cls(n.key)}><span class="ico">{n.icon}</span><span>{n.label}</span></a>
+        ))}
+      </nav>
+
+      {sync && (
+        <div class="side-foot"><span class="dot"></span>synced · {sync.commit}<br /><span style="opacity:.7">{syncWhen}</span></div>
+      )}
+    </aside>
+
+    <div class="main">
+      <div class="topbar">
+        <div class="breadcrumb">
+          <a href="/">Home</a>
+          {crumbs.map((c) => (<><span class="sep">/</span>{c.href ? <a href={c.href}>{c.label}</a> : <span class="cur">{c.label}</span>}</>))}
+        </div>
+        <div class="topbar-right"><slot name="topright" /></div>
+      </div>
+      <main class={rail ? 'content article' : 'content'}>
+        {rail ? (
+          <div class="content-with-rail">
+            <div><slot /></div>
+            <aside class="rail"><slot name="rail" /></aside>
+          </div>
+        ) : (<slot />)}
+      </main>
+    </div>
+  </div>
+  <div class="cmdk-overlay" id="cmdk" hidden>
+    <div class="cmdk-backdrop" id="cmdk-backdrop"></div>
+    <div class="cmdk-panel" role="dialog" aria-modal="true" aria-label="Search the vault">
+      <div class="cmdk-input">
+        <span class="i">⌕</span>
+        <input id="cmdk-q" placeholder="搜索实体、主题、来源…" autocomplete="off" spellcheck="false" aria-label="Search" />
+        <span class="esc">ESC</span>
+      </div>
+      <div class="cmdk-scopes" id="cmdk-scopes">
+        <button data-scope="all" class="on">全部 <span class="c"></span></button>
+        <button data-scope="entity">实体 <span class="c"></span></button>
+        <button data-scope="topic">主题 <span class="c"></span></button>
+        <button data-scope="source">来源 <span class="c"></span></button>
+        <span class="cmdk-count" id="cmdk-count"></span>
+      </div>
+      <div class="cmdk-results" id="cmdk-results"></div>
+      <div class="cmdk-foot">
+        <span><kbd>↑</kbd> <kbd>↓</kbd> 导航</span>
+        <span><kbd>↵</kbd> 打开</span>
+        <span><kbd>tab</kbd> 切换范围</span>
+        <span class="brand">Personal Wiki</span>
+      </div>
+    </div>
+  </div>
+  <script type="application/json" id="cmdk-data" set:html={cmdJson}></script>
+  <script>
+    import { esc, hl } from '../scripts/list-filter.js';
+
+    const data = JSON.parse(document.getElementById('cmdk-data')?.textContent || '[]');
+    const overlay = document.getElementById('cmdk') as HTMLElement | null;
+    const input = document.getElementById('cmdk-q') as HTMLInputElement | null;
+    const resultsEl = document.getElementById('cmdk-results');
+    const countEl = document.getElementById('cmdk-count');
+    const scopesEl = document.getElementById('cmdk-scopes');
+    const kindStyle: Record<string, { c: string; bd: string; bg: string; label: string }> = {
+      entity: { c: 'var(--terra)', bd: 'color-mix(in srgb,var(--terra) 40%,transparent)', bg: 'color-mix(in srgb,var(--terra) 14%,var(--bg-3))', label: '实体' },
+      topic: { c: 'var(--amber)', bd: 'color-mix(in srgb,var(--amber) 40%,transparent)', bg: 'color-mix(in srgb,var(--amber) 14%,var(--bg-3))', label: '主题' },
+      source: { c: 'var(--sage)', bd: 'color-mix(in srgb,var(--sage) 40%,transparent)', bg: 'color-mix(in srgb,var(--sage) 14%,var(--bg-3))', label: '来源' },
+    };
+    let scope = 'all', sel = 0, cur: any[] = [];
+
+    function render() {
+      if (!input || !resultsEl || !countEl || !scopesEl) return;
+      const q = input.value.trim().toLowerCase();
+      const m = q ? data.filter((d: any) => d.hay.includes(q)) : data;
+      const counts: Record<string, number> = { all: m.length, entity: 0, topic: 0, source: 0 };
+      for (const d of m) counts[d.kind]++;
+      cur = scope === 'all' ? m : m.filter((d: any) => d.kind === scope);
+      if (sel >= cur.length) sel = Math.max(0, cur.length - 1);
+      scopesEl.querySelectorAll('button').forEach((b) => {
+        const sc = (b as HTMLElement).dataset.scope!;
+        b.classList.toggle('on', sc === scope);
+        const c = b.querySelector('.c'); if (c) c.textContent = String(counts[sc]);
+      });
+      countEl.textContent = cur.length + ' 结果';
+      if (!cur.length) { resultsEl.innerHTML = '<div class="cmdk-empty">没有匹配 · 试试其它关键词</div>'; return; }
+      resultsEl.innerHTML = cur.map((d, i) => {
+        const k = kindStyle[d.kind];
+        const sub = d.sub ? `<span class="s">${hl(d.sub, q)}</span>` : '';
+        return `<a class="cmdk-row${i === sel ? ' sel' : ''}" href="${d.href}" data-i="${i}"><span class="g" style="color:${k.c};background:${k.bg}">${d.glyph}</span><span style="min-width:0"><span class="t">${hl(d.title, q)}</span>${sub}</span><span class="rt"><span class="m">${esc(d.meta || '')}</span><span class="k" style="color:${k.c};border-color:${k.bd}">${k.label}</span></span></a>`;
+      }).join('');
+    }
+    function scrollSel() { resultsEl?.querySelector('.cmdk-row.sel')?.scrollIntoView({ block: 'nearest' }); }
+    function open() { if (!overlay || !input) return; overlay.hidden = false; input.value = ''; scope = 'all'; sel = 0; render(); input.focus(); }
+    function close() { if (overlay) overlay.hidden = true; }
+
+    document.getElementById('open-search')?.addEventListener('click', open);
+    document.getElementById('cmdk-backdrop')?.addEventListener('click', close);
+    window.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); overlay?.hidden ? open() : close(); }
+      else if (e.key === 'Escape' && overlay && !overlay.hidden) { close(); }
+    });
+    input?.addEventListener('input', () => { sel = 0; render(); });
+    input?.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); if (cur.length) { sel = (sel + 1) % cur.length; render(); scrollSel(); } }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); if (cur.length) { sel = (sel - 1 + cur.length) % cur.length; render(); scrollSel(); } }
+      else if (e.key === 'Tab') { e.preventDefault(); const o = ['all', 'entity', 'topic', 'source']; scope = o[(o.indexOf(scope) + 1) % o.length]; sel = 0; render(); }
+      else if (e.key === 'Enter') { e.preventDefault(); const d = cur[sel]; if (d) location.href = d.href; }
+    });
+    scopesEl?.addEventListener('click', (e) => {
+      const b = (e.target as Element)?.closest<HTMLElement>('button[data-scope]'); if (!b) return;
+      scope = b.dataset.scope!; sel = 0; render(); input?.focus();
+    });
+    resultsEl?.addEventListener('mousemove', (e) => {
+      const a = (e.target as Element)?.closest<HTMLElement>('.cmdk-row'); if (!a) return;
+      const i = Number(a.dataset.i); if (i === sel) return;
+      sel = i; resultsEl.querySelectorAll('.cmdk-row').forEach((r, idx) => r.classList.toggle('sel', idx === sel));
+    });
+  </script>
+</body>
+</html>
