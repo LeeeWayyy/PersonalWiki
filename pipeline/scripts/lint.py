@@ -185,7 +185,7 @@ def lang_pages() -> list[Path]:
 def generated_pages() -> list[Path]:
     """Tool-owned generated pages: MOCs (`_index/`) + mind maps (`_maps/`).
     Kept SEPARATE from `all_wiki_pages()` so content-page checks (§2
-    frontmatter, tags, citations, two-tier) never fire on generated
+    frontmatter, tags, citations, llm-zone structure) never fire on generated
     pages — they're exempt by schema §1. Only the cross-cutting checks
     that legitimately apply to generated content (open conflicts,
     wikilink resolution) opt in via this helper."""
@@ -884,46 +884,32 @@ def check_wikilinks() -> tuple[bool, list[str]]:
     return False, notes
 
 
-def check_two_tier_format() -> tuple[bool, list[str]]:
-    """Pages with ≥2 distinct source ids or source anchors should use the two-tier
-    llm-zone (rolling `### Synthesis` + append-only
-    `### From src:<id>#<label>` sections). Warn-only: existing single-
-    source pages convert on the ingest that adds a second source."""
+def check_no_source_metadata_headings() -> tuple[bool, list[str]]:
+    """Source provenance belongs in paragraph citations, not visible headings."""
     notes: list[str] = []
-    bad: list[tuple[Path, int, list[str]]] = []
+    bad: list[tuple[Path, str]] = []
     zone_rx = re.compile(
         re.escape(LLM_OPEN) + r"(.*?)" + re.escape(LLM_CLOSE), re.DOTALL
     )
-    synth_rx = re.compile(r"^>\s*###\s+Synthesis\s*$", re.MULTILINE)
-    persrc_rx = re.compile(r"^>\s*###\s+From\s+src:", re.MULTILINE)
+    persrc_rx = re.compile(r"^>\s*###\s+(From\s+src:[^\n]+)\s*$", re.MULTILINE)
     for page in all_wiki_pages():
         text = page.read_text(encoding="utf-8", errors="replace")
         m = zone_rx.search(text)
         if not m:
             continue
         body = m.group(1)
-        citation_keys = set(extract_citation_keys(body))
-        if len(citation_keys) < 2:
-            continue
-        missing: list[str] = []
-        if not synth_rx.search(body):
-            missing.append("### Synthesis")
-        if not persrc_rx.search(body):
-            missing.append("### From src:<id>#<label>")
-        if missing:
-            bad.append((page, len(citation_keys), missing))
+        for hm in persrc_rx.finditer(body):
+            bad.append((page, hm.group(1).strip()))
     if not bad:
-        notes.append("  ✓ all multi-source pages use two-tier format")
+        notes.append("  ✓ no visible source-metadata headings")
         return True, notes
     notes.append(
-        f"  ⚠ {len(bad)} multi-source page(s) still in single-block form "
-        f"(will convert on next ingest that touches them):"
+        f"  ✗ {len(bad)} source-metadata heading(s) should be paragraph citations instead:"
     )
-    for page, n, missing in bad:
-        notes.append(
-            f"    {page.relative_to(VAULT_ROOT)}  ({n} citation anchors, missing: {', '.join(missing)})"
-        )
-    return True, notes  # warn-only
+    for page, heading in bad:
+        notes.append(f"    {page.relative_to(VAULT_ROOT)}  ### {heading}")
+    notes.append("    → fix: scripts/format-llm-zone.py --all")
+    return False, notes
 
 
 def check_entity_size(threshold: int = 400) -> tuple[bool, list[str]]:
@@ -1381,14 +1367,7 @@ def check_image_embed_paths() -> tuple[bool, list[str]]:
 
 
 def check_image_embed_location() -> tuple[bool, list[str]]:
-    """#15 — embed location respects two-tier rules.
-
-    Single-source page: embed inside the only `> [!AI]` callout, asset
-    dir matches the cited source.
-    Multi-source page: embed inside `### From src:<id>#<label>` Evidence
-    sections, asset dir matches that `src:<id>`.
-    Embeds inside `### Synthesis` are an error.
-    """
+    """#15 — image asset dirs must belong to a source cited by the page."""
     notes: list[str] = []
     bad: list[tuple[Path, str]] = []
     for page in all_wiki_pages():
@@ -1404,7 +1383,11 @@ def check_image_embed_location() -> tuple[bool, list[str]]:
         elif not isinstance(page_sources, list):
             page_sources = []
         page_sources = [s for s in page_sources if isinstance(s, str)]
-        is_multi_source = len(set(page_sources)) >= 2
+        expected_stems = {
+            stem for src in set(page_sources)
+            for stem in [_source_stem_for_id(src)]
+            if stem
+        }
         for embed_path, is_image in _iter_embeds(zone):
             if not is_image:
                 continue
@@ -1413,61 +1396,14 @@ def check_image_embed_location() -> tuple[bool, list[str]]:
             if not m:
                 continue   # already caught by #14
             asset_source_stem = m.group(1)
-            # Find which Evidence section (if any) the embed lives in.
-            # Cheap parse: split llm-zone on "> ### " headings.
-            # Find the line in zone where the embed appears.
-            idx = zone.find(f"![[{embed_path}")
-            if idx < 0:
-                # Could be embed with alias/frag; search loosely.
-                lit = re.escape(embed_path.split("|")[0].split("#")[0])
-                m2 = re.search(r"!\[\[\s*" + lit, zone)
-                idx = m2.start() if m2 else -1
-            if idx < 0:
-                continue
-            preceding = zone[:idx]
-            # Find the LAST `> ### ...` heading before idx.
-            last_h = None
-            for hm in re.finditer(r"^>\s*###\s+(.+?)\s*$", preceding,
-                                   re.MULTILINE):
-                last_h = hm.group(1).strip()
-            if last_h and last_h.startswith("Synthesis"):
-                bad.append((page, f"embed inside ### Synthesis: {embed_path}"))
-                continue
-            if last_h and last_h.startswith("From src:"):
-                # `From src:<id>#<label>` or `From src:<id>` — extract id.
-                src_m = re.match(r"From src:\s*([0-9A-Z]{26})", last_h)
-                if src_m:
-                    src_id = src_m.group(1)
-                    # source's stem in sources/ derived from sidecar lookup.
-                    expected = _source_stem_for_id(src_id)
-                    if expected and expected != asset_source_stem:
-                        bad.append((page,
-                                    f"embed under ### From src:{src_id} but "
-                                    f"asset dir is {asset_source_stem!r}: "
-                                    f"{embed_path}"))
-                continue
-            # Embed NOT under a `### From src:` heading.
-            if is_multi_source:
-                # Multi-source pages MUST place embeds inside Evidence
-                # sections, never in floating top-level prose.
+            if expected_stems and asset_source_stem not in expected_stems:
                 bad.append((page,
-                            f"multi-source page: embed must live under a "
-                            f"### From src:<id>#<label> heading: {embed_path}"))
-                continue
-            # Single-source page: the only `> [!AI]` callout doubles as
-            # Evidence. Embed must point to that source's asset dir.
-            if len(set(page_sources)) == 1:
-                page_src = page_sources[0]
-                expected = _source_stem_for_id(page_src)
-                if expected and expected != asset_source_stem:
-                    bad.append((page,
-                                f"single-source page (src:{page_src}) embed "
-                                f"asset dir is {asset_source_stem!r}: "
-                                f"{embed_path}"))
-            # else: zero-source page somehow has an image embed; #14 / #4
-            # (citation orphans) will surface that as a different problem.
+                            f"embed asset dir is {asset_source_stem!r}, "
+                            f"but page sources map to {sorted(expected_stems)}: "
+                            f"{embed_path}"))
+            # Zero-source pages are surfaced by citation/frontmatter checks.
     if not bad:
-        notes.append("  ✓ embed locations respect two-tier rules")
+        notes.append("  ✓ image embeds belong to cited page sources")
         return True, notes
     notes.append(f"  ✗ {len(bad)} embed(s) in wrong location / cross-source:")
     for page, msg in bad[:20]:
@@ -1875,7 +1811,7 @@ def main() -> int:
         ("zone markers", check_zone_markers()),
         ("page_id present + unique", check_page_id_present()),
         ("wikilinks resolve", check_wikilinks()),
-        ("two-tier on multi-source (warn-only)", check_two_tier_format()),
+        ("no source-metadata headings", check_no_source_metadata_headings()),
         ("entity size (warn-only)", check_entity_size()),
         ("H1 matches filename", check_h1_present()),
         ("frontmatter sources: matches body", check_frontmatter_sync(cites)),

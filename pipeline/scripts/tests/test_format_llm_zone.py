@@ -32,8 +32,24 @@ Evidence line [src:01KX582AX79FD9BQG2VNMG41NY#第一章].
         self.assertTrue(changed)
         self.assertIn("> [!AI] LLM Synthesis", out)
         self.assertIn("> ### Synthesis", out)
-        self.assertIn("> ### From src:01KX582AX79FD9BQG2VNMG41NY#第一章", out)
+        self.assertNotIn("From src:01KX582AX79FD9BQG2VNMG41NY", out)
         self.assertNotIn("\n### Synthesis", out)
+
+    def test_strips_source_metadata_heading_from_valid_callout(self):
+        text = """# X
+
+<!-- llm-zone -->
+> [!AI] LLM Synthesis
+>
+> ### From src:01KX582AX79FD9BQG2VNMG41NY#第一章 Noisy chapter label
+>
+> Evidence [src:01KX582AX79FD9BQG2VNMG41NY#第一章].
+<!-- /llm-zone -->
+"""
+        out, changed = fmt.normalize_text(text)
+        self.assertTrue(changed)
+        self.assertNotIn("From src:", out)
+        self.assertIn("> Evidence [src:01KX582AX79FD9BQG2VNMG41NY#第一章].", out)
 
     def test_valid_callout_is_unchanged(self):
         text = """# X

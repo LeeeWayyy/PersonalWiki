@@ -203,22 +203,19 @@ prose is reserved for real attribution or comparison.
 
 ## Multi-Source Synthesis
 
-- When a page has two or more distinct sources or two or more distinct
-  source anchors (`src:<id>#<label>`), use a rolling `### Synthesis`
-  section followed by append-only `### From src:<id>#<label>` evidence
-  sections.
-- Rewrite `### Synthesis` on each ingest so it integrates all sources
-  currently on the page.
-- Edit an existing matching `### From ...` section in place; never
-  duplicate the same source+anchor heading.
+- When a page cites multiple distinct sources, use paragraph-level
+  citations to keep provenance clear. Do not create visible
+  `### From src:<id>#<label>` metadata headings; each paragraph already
+  carries its source.
+- A `### Synthesis` heading is optional and should be used only when it
+  improves readability. It is not required for multiple chapters from
+  the same source.
 - If this run adds a new chapter/section anchor to a page that already
-  cites earlier chapters, convert or extend the page so earlier anchors
+  cites earlier chapters, extend or compact the prose so earlier anchors
   remain visible and cited. Do not delete the earlier chapter's
   paragraphs just because the new chapter has a stronger synthesis.
-- Citations inside `### Synthesis` may combine sources. Citations
-  inside an evidence section cite only that source.
-- `### From src:<id>#<label>` is a section label, not a citation. Do
-  not put bracketed `[src:...]` syntax in the heading.
+- Citations inside synthesis paragraphs may combine sources:
+  `[src:a#§1,src:b#第二章]`.
 
 ## Candidate Updates And Conflicts
 
@@ -238,8 +235,7 @@ prose is reserved for real attribution or comparison.
 - Embed only images listed in `IMAGES`.
 - Use Obsidian transclude syntax: `![[sources/<asset>.assets/<file>]]`.
   Markdown image syntax is forbidden in `llm-zone`.
-- Put image embeds in the evidence section that cites the matching
-  source. Never place source-specific images in `### Synthesis`.
+- Put image embeds next to the paragraph that cites the matching source.
 - Never invent or modify captions. Use the caption text from `IMAGES`.
 - If prose references a figure absent from `IMAGES`, cite the prose
   but omit the embed.

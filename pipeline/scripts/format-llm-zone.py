@@ -34,6 +34,7 @@ ZONE_RX = re.compile(
     re.DOTALL,
 )
 AI_CALLOUT_RX = re.compile(r"^\s*>\s*\[!AI\]\s+LLM Synthesis\s*$")
+FROM_SRC_HEADING_RX = re.compile(r"^\s*###\s+From\s+src:[A-Z0-9]{26}\b")
 
 
 def _all_content_lines_quoted(lines: list[str]) -> bool:
@@ -60,11 +61,13 @@ def normalize_zone_body(body: str) -> tuple[str, bool]:
     while lines and not lines[-1].strip():
         lines.pop()
 
-    if _all_content_lines_quoted(lines):
+    unquoted = [_unquote_one_callout_level(ln).rstrip() for ln in lines]
+    content = _strip_source_metadata_headings(unquoted)
+
+    if _all_content_lines_quoted(lines) and content == unquoted:
         normalized = "\n" + "\n".join(lines) + "\n"
         return normalized, normalized != body
 
-    content = [_unquote_one_callout_level(ln).rstrip() for ln in lines]
     while content and not content[0].strip():
         content.pop(0)
     if content and re.match(r"^\s*\[!AI\]\s+LLM Synthesis\s*$", content[0]):
@@ -81,6 +84,17 @@ def normalize_zone_body(body: str) -> tuple[str, bool]:
             out.append(">" if not line.strip() else f"> {line}")
     normalized = "\n" + "\n".join(out) + "\n"
     return normalized, normalized != body
+
+
+def _strip_source_metadata_headings(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    for line in lines:
+        if FROM_SRC_HEADING_RX.match(line):
+            if out and out[-1] == "":
+                out.pop()
+            continue
+        out.append(line)
+    return out
 
 
 def normalize_text(text: str) -> tuple[str, bool]:
