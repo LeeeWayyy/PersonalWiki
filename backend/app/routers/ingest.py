@@ -17,6 +17,11 @@ from ..validation import json_object, normalize_ingest_options, optional_string,
 router = APIRouter()
 
 
+def _sse_data(line: str) -> str:
+    parts = line.splitlines() or [""]
+    return "".join(f"data: {part}\n" for part in parts) + "\n"
+
+
 async def _write_upload(file: UploadFile, dest: Path) -> int:
     total = 0
     try:
@@ -99,7 +104,7 @@ async def job_events(
                 if line == "__END__":
                     yield f"event: done\ndata: {job.status}\n\n"
                     return
-                yield f"data: {line}\n\n"
+                yield _sse_data(line)
             if await request.is_disconnected():
                 return
             await asyncio.sleep(0.25)

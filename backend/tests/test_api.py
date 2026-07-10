@@ -8,6 +8,7 @@ study/job read auth, and the AI-assist / translate graceful-degradation paths
 import asyncio
 import datetime as dt
 import json
+import logging
 import os
 import shlex
 import sqlite3
@@ -435,6 +436,43 @@ def test_job_emit_persists_to_disk_and_keeps_ring_on_log_failure(tmp_path, monke
 
     assert broken.visible_lines() == ["still live"]
     assert broken.log_failed is True
+
+
+def test_sse_data_splits_multiline_payloads():
+    from app.routers.ingest import _sse_data
+
+    assert _sse_data("one\ntwo") == "data: one\ndata: two\n\n"
+    assert _sse_data("") == "data: \n\n"
+
+
+def test_queued_job_log_handler_does_not_capture_active_job(tmp_path, monkeypatch):
+    from app import ingest_runner as ir
+
+    async def run():
+        monkeypatch.setattr(ir, "JOB_LOG_DIR", tmp_path / "logs")
+        monkeypatch.setattr(ir, "STUB", True)
+        monkeypatch.setattr(ir, "REBUILD_CMD", "")
+        monkeypatch.setattr(ir, "ensure_content_git", lambda _content: (True, ""))
+        monkeypatch.setattr(ir, "preflight", lambda _options: (True, "clean", []))
+
+        first = ir.Job("firstjob")
+        second = ir.Job("secondjob")
+        first_task = asyncio.create_task(ir.run_job(first, "https://example.com/a", {"kind": "auto"}))
+        while first.status != "running":
+            await asyncio.sleep(0.01)
+        second_task = asyncio.create_task(ir.run_job(second, "https://example.com/b", {"kind": "auto"}))
+        await asyncio.sleep(0.05)
+        logging.getLogger("app").warning("active job marker job_id=firstjob")
+        await asyncio.gather(first_task, second_task)
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first.status == "done"
+    assert second.status == "done"
+    second_log = (tmp_path / "logs" / "secondjob.log").read_text(encoding="utf-8")
+    assert "job_id=firstjob" not in second_log
+    assert "target=https://example.com/b" in second_log
 
 
 def test_start_job_keeps_task_reference(monkeypatch):

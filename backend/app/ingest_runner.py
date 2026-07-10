@@ -413,10 +413,11 @@ async def shutdown_jobs() -> None:
 
 
 async def run_job(job: Job, target: str, options: dict):
-    job_handler = _JobLogHandler(job)
-    logging.getLogger("app").addHandler(job_handler)
+    job_handler: _JobLogHandler | None = None
     try:
         async with LOCK:
+            job_handler = _JobLogHandler(job)
+            logging.getLogger("app").addHandler(job_handler)
             if job.cancel_requested:
                 job.finish_canceled()
                 return
@@ -561,7 +562,8 @@ async def run_job(job: Job, target: str, options: dict):
         job.process = None
         job.finish_terminal("error", {"status": "error", "error": str(e)}, [f"error: {e}"])
     finally:
-        logging.getLogger("app").removeHandler(job_handler)
+        if job_handler is not None:
+            logging.getLogger("app").removeHandler(job_handler)
         if job.status in TERMINAL_STATUSES:
             await asyncio.to_thread(_cleanup_staged_target, target, job.id)
 

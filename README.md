@@ -152,8 +152,7 @@ pipeline/ingest.py ──► PW_CONTENT_DIR (local wiki repo — private, never 
    `PW_LLM_API_ENABLED=1` and `PW_LLM_API_KEY`. Debug daemon auth with
    `GET /health/llm` using `X-Auth-Token`; it probes only the local provider,
    never the API fallback. Without one configured, real ingest and `/translate`
-   won't run (the UI degrades gracefully). Static builds do not call the LLM for
-   fallback reader translations unless `PW_BUILD_TRANSLATE=1` is set.
+   won't run (the UI degrades gracefully).
 3. **Private hosting** — `tailscale serve` in front of `scripts/serve.mjs` (site)
    and `python -m app.serve` (backend), plus `launchd` agents to keep both
    resident. Run the daemon as your login user so git ownership matches the vault.
