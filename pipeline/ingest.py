@@ -20,9 +20,11 @@ Env: PW_LLM_PROVIDER=codex by default in app config; LLM_CMD is an advanced
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -57,6 +59,8 @@ CHAPTERED_EXTS = (".epub", ".mobi", ".azw", ".azw3")
 # Fallback only (books with no chapter markers): a `## ` section with fewer body
 # chars than this is structural (cover/TOC/title page) and skipped.
 CHAPTER_MIN_CHARS = int(os.environ.get("PW_CHAPTER_MIN_CHARS", "200"))
+SECTION_LABEL_MAX_CHARS = int(os.environ.get("PW_SECTION_LABEL_MAX_CHARS", "200"))
+KEYWORD_SOURCE_HEAD_CHARS = 6_000
 
 # Distinguish an actual chapter heading from a section heading, so sections are
 # ingested grouped under their parent chapter and out-of-chapter front/back
@@ -94,6 +98,16 @@ SCAFFOLD_PATHS: list[str] = []
 _TEMPS: list[str] = []
 _DIFF_RAW: list[str] = []
 _TEMP_DIRS: list[str] = []
+_RUN_CREATED_FILES: set[str] = set()
+_RUN_CREATED_DIRS: set[str] = set()
+_PREEXISTING_SOURCE_PATHS: set[str] = set()
+_INGEST_LOCK_FH = None
+_ROLLBACK_ON_FAILURE = False
+
+
+def _log_prefix() -> str:
+    run_id = os.environ.get("PW_RUN_ID", "").strip()
+    return f"ingest[{run_id}]" if run_id else "ingest"
 
 
 def mktemp() -> str:
@@ -139,18 +153,121 @@ def _cleanup() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _source_path_snapshot() -> set[str]:
+    """Existing sources/ paths before this run creates any new source artifacts."""
+    root = Path("sources")
+    if not root.exists():
+        return set()
+    return {p.as_posix() for p in root.rglob("*")}
+
+
+def _tracked_file(path: str) -> bool:
+    return subprocess.run(
+        ["git", "-c", "core.quotepath=false", "ls-files", "--error-unmatch", "--", path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+def _tracked_under(path: str) -> bool:
+    r = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "ls-files", "--", path],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return bool(r.stdout.strip())
+
+
+def _register_run_created_file(path: str) -> None:
+    rel = Path(path).as_posix()
+    if rel not in _PREEXISTING_SOURCE_PATHS and not _tracked_file(rel):
+        _RUN_CREATED_FILES.add(rel)
+
+
+def _register_run_created_dir(path: str) -> None:
+    rel = Path(path).as_posix()
+    if rel not in _PREEXISTING_SOURCE_PATHS and not _tracked_under(rel):
+        _RUN_CREATED_DIRS.add(rel)
+
+
+def _register_new_source_artifacts(dest: str) -> None:
+    _register_run_created_file(dest)
+    _register_run_created_file(SRC["SIDECAR"])
+    if SRC.get("AUDIT_JSON"):
+        _register_run_created_file(SRC["AUDIT_JSON"])
+    _register_run_created_dir(f"{dest}.assets")
+
+
+def _rollback_after_apply_failure() -> None:
+    """Drop staged/worktree wiki/log changes created after git apply --index.
+
+    Once source cleanup removes a newly-created source artifact, leaving staged
+    wiki edits around can strand citations to a source_id that no longer exists.
+    Preflight guarantees these paths were clean before ingest touched them.
+    """
+    if not _ROLLBACK_ON_FAILURE:
+        return
+    paths = [
+        p for p in [*WIKI_PATHSPEC, ".wiki/log.md"]
+        if Path(p).exists() or _tracked_under(p)
+    ]
+    if not paths:
+        return
+    subprocess.run(
+        ["git", "-c", "core.quotepath=false", "restore", "--staged", "--worktree", "--", *paths],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def _cleanup_run_created_artifacts() -> None:
+    """Remove only untracked source artifacts known to have been created here."""
+    for rel in sorted(_RUN_CREATED_FILES, reverse=True):
+        p = Path(rel)
+        if p.is_file() and not _tracked_file(rel):
+            try:
+                p.unlink()
+            except OSError as exc:
+                eout(f"warn — failed to remove run-created file {rel}: {exc}")
+    for rel in sorted(_RUN_CREATED_DIRS, key=lambda s: s.count("/"), reverse=True):
+        p = Path(rel)
+        if p.is_dir() and not _tracked_under(rel):
+            shutil.rmtree(p, ignore_errors=True)
+
+
 def out(msg: str) -> None:
-    print(f"ingest: {msg}", flush=True)
+    print(f"{_log_prefix()}: {msg}", flush=True)
 
 
 def eout(msg: str) -> None:
-    print(f"ingest: {msg}", file=sys.stderr, flush=True)
+    print(f"{_log_prefix()}: {msg}", file=sys.stderr, flush=True)
 
 
 def die(msg: str) -> None:
-    print(f"ingest: {msg}", file=sys.stderr, flush=True)
+    print(f"{_log_prefix()}: {msg}", file=sys.stderr, flush=True)
+    _rollback_after_apply_failure()
+    _cleanup_run_created_artifacts()
     _cleanup()
     sys.exit(1)
+
+
+_TERMINATING = False
+
+
+def _handle_termination(signum, _frame) -> None:
+    """Let backend cancel/idle-timeout SIGTERM run normal failed-run cleanup."""
+    global _TERMINATING
+    if _TERMINATING:
+        return
+    _TERMINATING = True
+    name = signal.Signals(signum).name
+    die(f"terminated by {name}")
+
+
+signal.signal(signal.SIGTERM, _handle_termination)
+signal.signal(signal.SIGINT, _handle_termination)
 
 
 # ── subprocess helpers ────────────────────────────────────────────────────────
@@ -332,21 +449,42 @@ def check_deps() -> None:
             die(f"{tool} required")
 
 
-# ── candidate collection ──────────────────────────────────────────────────────
-def collect_candidates(keywords_file: str, candidates_file: str, cap: int) -> None:
-    out("rebuilding alias index...")
-    run_stream([f"{SCRIPTS}/alias-index.py", "build"])
+def acquire_content_ingest_lock() -> None:
+    """Serialize content mutations across CLI/backend ingest processes."""
+    global _INGEST_LOCK_FH
+    lock_path = Path(".wiki") / "ingest.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    _INGEST_LOCK_FH = open(lock_path, "a+", encoding="utf-8")
+    out(f"waiting for ingest lock: {lock_path}")
+    fcntl.flock(_INGEST_LOCK_FH.fileno(), fcntl.LOCK_EX)
 
-    pages = sorted(
+
+# ── candidate collection ──────────────────────────────────────────────────────
+def wiki_page_count() -> int:
+    return sum(
+        1 for sub in ("entities", "topics")
+        for _ in Path("wiki", sub).rglob("*.md")
+    ) if Path("wiki").is_dir() else 0
+
+
+def wiki_page_paths() -> list[str]:
+    return sorted(
         str(p) for sub in ("entities", "topics")
         for p in Path("wiki", sub).rglob("*.md")
     ) if Path("wiki").is_dir() else []
+
+
+def collect_candidates(keywords_file: str, candidates_file: str, cap: int) -> None:
+    pages = wiki_page_paths()
     total = len(pages)
 
-    if 0 < total <= cap:
+    if total <= cap:
         write(candidates_file, "".join(p + "\n" for p in pages))
         out(f"{total} candidate pages (full vault, cap={cap})")
         return
+
+    out("rebuilding alias index...")
+    run_stream([f"{SCRIPTS}/alias-index.py", "build"])
 
     hits: list[str] = []
     kw_text = read(keywords_file)
@@ -401,6 +539,34 @@ def build_prompt(expand_file: str, out_file: str, all_source_ids: str,
             stdout=f)
     if r.returncode != 0:
         die("build-prompt failed")
+
+
+def validate_section_label(label: str) -> str:
+    if not label:
+        return ""
+    if len(label) > SECTION_LABEL_MAX_CHARS:
+        die(f"--section-label must be <= {SECTION_LABEL_MAX_CHARS} characters")
+    bad = [c for c in label if ord(c) < 32 or ord(c) == 127]
+    if bad:
+        die("--section-label must not contain control characters or newlines")
+    return label
+
+
+def whole_source_already_logged(source_id: str) -> bool:
+    log_path = Path(".wiki") / "log.md"
+    if not log_path.is_file():
+        return False
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if _log_line_marks_whole_source(line, source_id):
+            return True
+    return False
+
+
+def _log_line_marks_whole_source(line: str, source_id: str) -> bool:
+    parsed = parse_log_line(line)
+    if not parsed or parsed[0] != source_id or parsed[1]:
+        return False
+    return "pages: (images-only)" not in line
 
 
 def handle_no_changes_or_continue(raw_file: str, section_label: str) -> None:
@@ -466,20 +632,21 @@ def run_lang(dest: str) -> int:
     stage EXACT paths, assert the staged set ⊆ lang/, and commit (or no-op
     exit). The generator writes pages + appends the log AFTER rendering."""
     out("generating language study/vocab/grammar pages...")
+    manifest_file = mktemp()
     r = subprocess.run(
         ["uv", "run", f"{SCRIPTS}/generate-language-pages.py",
-         "--source-id", SRC["SOURCE_ID"]],
-        text=True, capture_output=True,
+         "--source-id", SRC["SOURCE_ID"], "--manifest-out", manifest_file],
+        text=True,
     )
-    sys.stderr.write(r.stderr)
-    sys.stdout.write(r.stdout)
     if r.returncode != 0:
         die("language generator failed")
 
-    manifest: list[str] = []
-    for line in r.stdout.splitlines():
-        if line.startswith("MANIFEST:"):
-            manifest = json.loads(line[len("MANIFEST:"):])
+    try:
+        manifest = json.loads(read(manifest_file))
+    except (OSError, json.JSONDecodeError) as exc:
+        die(f"language generator wrote an invalid manifest: {exc}")
+    if not isinstance(manifest, list) or not all(isinstance(p, str) for p in manifest):
+        die("language generator wrote an invalid manifest: expected a JSON list of paths")
 
     # Lint gate (cwd/env already point at content/lang, so lint resolves the
     # lang roots): source drift + duplicate ids + conflicts + citation orphans.
@@ -579,6 +746,8 @@ def _should_auto_chapter(args) -> bool:
 
 
 _HEADING_RX = re.compile(r"^##\s+(.+?)\s*$")
+_EXTRACTION_TRUNCATION_RX = re.compile(
+    r"(?:^|\n)\[\.\.\. truncated at \d+ chars \.\.\.\]\s*$")
 
 
 def _section_sizes(full_text: str) -> list[tuple[str, int]]:
@@ -602,6 +771,10 @@ def _section_sizes(full_text: str) -> list[tuple[str, int]]:
     if title is not None:
         sizes.append((title, count))
     return sizes
+
+
+def _has_extraction_truncation_marker(text: str) -> bool:
+    return bool(_EXTRACTION_TRUNCATION_RX.search(text))
 
 
 def _enumerate_sections(input_path: Path) -> list[tuple[str, int]]:
@@ -655,8 +828,7 @@ def _source_log_progress(lines: list[str], source_id: str) -> tuple[set[str], bo
     labels = set(chapter_order_from_lines(lines, source_id))
     whole_done = False
     for line in lines:
-        parsed = parse_log_line(line)
-        if parsed and parsed[0] == source_id and not parsed[1]:
+        if _log_line_marks_whole_source(line, source_id):
             whole_done = True
             break
     return labels, whole_done
@@ -777,6 +949,7 @@ def run_chaptered(args) -> int:
 
 
 def main() -> int:
+    global _ROLLBACK_ON_FAILURE
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--section", default="")
     ap.add_argument("--section-label", default="")
@@ -821,7 +994,8 @@ def main() -> int:
                          "language study/vocab/grammar pages under content/lang/")
     ap.add_argument("input")
     args = ap.parse_args()
-    section_label = args.section_label
+    section_label = validate_section_label(args.section_label)
+    args.section_label = section_label
 
     # Pin the ingest model for every downstream LLM call (llm_client reads this
     # from the env). Kept out of the caption path, which has its own model knob.
@@ -867,19 +1041,25 @@ def main() -> int:
             die(f"--profile lang does not support {', '.join(forbidden)} "
                 "(v1 = text/document sources only, generator owns chapter slicing; "
                 "audio/video transcription is v2)")
-        for d in (VAULT_ROOT, VAULT_ROOT / "sources", VAULT_ROOT / ".wiki",
-                  VAULT_ROOT / "_study", VAULT_ROOT / "_vocab", VAULT_ROOT / "_grammar"):
+        for d in (VAULT_ROOT, VAULT_ROOT / "sources", VAULT_ROOT / ".wiki"):
             d.mkdir(parents=True, exist_ok=True)
 
     # cwd + env side effects live here (not module scope) so importing this
     # module is side-effect-free. All relative git ops below run in content/.
-    os.environ["VAULT_CONTENT_DIR"] = str(VAULT_ROOT)  # inherited by child scripts
+    # PW_CONTENT_DIR is the public override; VAULT_CONTENT_DIR remains an
+    # internal/legacy alias for scripts that have not moved to _util.py.
+    os.environ["PW_CONTENT_DIR"] = str(VAULT_ROOT)
+    os.environ["VAULT_CONTENT_DIR"] = str(VAULT_ROOT)
     os.chdir(VAULT_ROOT)
 
     global SCAFFOLD_PATHS
     SCAFFOLD_PATHS = ensure_wiki_scaffold(args.profile)
+    acquire_content_ingest_lock()
     preflight(args.profile, SCAFFOLD_PATHS)
     check_deps()
+    global _PREEXISTING_SOURCE_PATHS
+    if args.profile == "wiki":
+        _PREEXISTING_SOURCE_PATHS = _source_path_snapshot()
 
     # Whole-book mode loops the normal single-section ingest once per chapter.
     # It runs after the common setup gates so missing tools and dirty vault state
@@ -942,6 +1122,21 @@ def main() -> int:
         sys.exit(1)
     SRC.update(parse_shell_assignments(r.stdout))
     dest = SRC["DEST"]
+    if args.profile == "wiki" and not SRC.get("EXISTING_SIDECAR"):
+        _register_new_source_artifacts(dest)
+    elif args.profile == "wiki" and SRC.get("AUDIT_JSON"):
+        _register_run_created_file(SRC["AUDIT_JSON"])
+
+    if (
+        args.profile == "wiki"
+        and not args.kind
+        and not args.section
+        and not section_label
+        and not args.images_only
+        and whole_source_already_logged(SRC["SOURCE_ID"])
+    ):
+        out(f"whole-source ingest already logged for {SRC['SOURCE_ID']}; nothing to do")
+        return 0
 
     # ── §lang: skip all wiki synthesis; run the language generator instead ──
     if args.profile == "lang":
@@ -1011,42 +1206,49 @@ def main() -> int:
     out(f"extracted {len(text)} characters")
     if len(text) == 0:
         die("extractor produced empty text")
+    if not args.section and _has_extraction_truncation_marker(text):
+        die("extractor hit the text limit during a whole-source ingest; use "
+            "--chapters for chaptered ingest or raise --limit so the source is "
+            "not logged as complete from truncated text")
 
-    # ── §5 keyword pre-pass ──
-    keywords_file = mktemp()
-    source_head = text[:20000]
-    kw_prompt = (
-        "Extract the 5 most important entity names (people, products, projects,\n"
-        "concepts, organizations) mentioned in the text below. Output them as a\n"
-        "newline-separated list. No numbering, no commentary, just one name per\n"
-        "line. Use the same language as the source text (do not translate).\n\n"
-        f"---\n{source_head}\n---\n"
-    )
-    out("extracting key entities...")
-    write(keywords_file, llm(kw_prompt, soft=True))
-    kw = read(keywords_file)
-    nonws = sum(1 for c in kw if not c.isspace())
-    klines = kw.split("\n")
-    nonempty = sum(1 for ln in klines if ln.strip())
-    maxline = max((len(ln) for ln in klines), default=0)
-    if nonws < 5 or nonempty < 2 or maxline > 100:
-        eout("keyword pre-pass output looks like an error/prose, not keywords.")
-        eout(f"  non-whitespace chars: {nonws} (need >=5)")
-        eout(f"  non-empty lines:      {nonempty} (need >=2)")
-        eout(f"  longest line:         {maxline} chars (need <=100)")
-        eout("  raw output:")
-        for ln in kw.splitlines():
-            print(f"  | {ln}", file=sys.stderr)
-        die("keyword pre-pass produced no usable output (LLM call failed?). "
-            "Aborting before the main edit pass would run blind.")
-    out("keywords:")
-    for ln in kw.splitlines():
-        print(f"  - {ln}")
-
-    # ── §6 collect candidates ──
+    # ── §5 keyword pre-pass / §6 collect candidates ──
     cap = int(os.environ.get("CAND_CAP", "20"))
     candidates_file = mktemp()
-    collect_candidates(keywords_file, candidates_file, cap)
+    pages = wiki_page_paths()
+    if len(pages) <= cap:
+        write(candidates_file, "".join(f"{p}\n" for p in pages))
+        out(f"{len(pages)} candidate pages (full vault, cap={cap}; skipped keyword pre-pass)")
+    else:
+        keywords_file = mktemp()
+        source_head = text[:KEYWORD_SOURCE_HEAD_CHARS]
+        kw_prompt = (
+            "Extract the 5 most important entity names (people, products, projects,\n"
+            "concepts, organizations) mentioned in the text below. Output them as a\n"
+            "newline-separated list. No numbering, no commentary, just one name per\n"
+            "line. Use the same language as the source text (do not translate).\n\n"
+            f"---\n{source_head}\n---\n"
+        )
+        out("extracting key entities...")
+        write(keywords_file, llm(kw_prompt, soft=True))
+        kw = read(keywords_file)
+        nonws = sum(1 for c in kw if not c.isspace())
+        klines = kw.split("\n")
+        nonempty = sum(1 for ln in klines if ln.strip())
+        maxline = max((len(ln) for ln in klines), default=0)
+        if nonws < 5 or nonempty < 2 or maxline > 100:
+            eout("keyword pre-pass output looks like an error/prose, not keywords.")
+            eout(f"  non-whitespace chars: {nonws} (need >=5)")
+            eout(f"  non-empty lines:      {nonempty} (need >=2)")
+            eout(f"  longest line:         {maxline} chars (need <=100)")
+            eout("  raw output:")
+            for ln in kw.splitlines():
+                print(f"  | {ln}", file=sys.stderr)
+            die("keyword pre-pass produced no usable output (LLM call failed?). "
+                "Aborting before the main edit pass would run blind.")
+        out("keywords:")
+        for ln in kw.splitlines():
+            print(f"  - {ln}")
+        collect_candidates(keywords_file, candidates_file, cap)
 
     # ── §7 main ingest call ──
     # Sidecars only. git's `*` matches `/`, so "sources/*.md" also catches
@@ -1103,6 +1305,7 @@ def main() -> int:
                  "--recount", "--whitespace=nowarn", diff_file],
                 env=apply_env, stderr=ef).returncode == 0
         if applied:
+            _ROLLBACK_ON_FAILURE = True
             break
 
         err_text = read(apply_err)
@@ -1212,17 +1415,14 @@ def main() -> int:
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
         eout("ABORT — alias-uniqueness check failed:")
         subprocess.run([f"{SCRIPTS}/alias-index.py", "check"])
-        eout("  Resolve the collision (likely a duplicate of an existing page")
-        eout("  outside the candidate window) by hand-editing the staged diff,")
-        eout("  then 'git restore --staged .' and re-run, OR commit yourself.")
-        _cleanup()
-        sys.exit(1)
+        eout("  Resolve the collision in the vault or candidate set, then re-run.")
+        eout("  This failed run will roll back its staged wiki/source edits.")
+        die("alias-uniqueness check failed")
     if subprocess.run([f"{SCRIPTS}/lint.py", "--gate=page-id"]).returncode != 0:
-        eout("  Resolve the duplicate/malformed page_id in the staged diff")
-        eout("  (the LLM should not emit page_id; add-page-id.py injects one),")
-        eout("  then 'git restore --staged .' and re-run, OR commit yourself.")
-        _cleanup()
-        sys.exit(1)
+        eout("  Resolve the duplicate/malformed page_id cause and re-run")
+        eout("  (the LLM should not emit page_id; add-page-id.py injects one).")
+        eout("  This failed run will roll back its staged wiki/source edits.")
+        die("page-id lint failed")
 
     # ── supersede (media --reocr / --retranscribe): migrate any live citations of the
     #    superseded predecessor to the new source so nothing is orphaned. The LLM's new
@@ -1256,6 +1456,7 @@ def main() -> int:
     commit_suffix = f" — {section_label}" if section_label else ""
     git_run("commit", "-m",
             f"ingest: {SRC['SOURCE_ID']}{section_tag} ({SRC['DEST_BASENAME']}{commit_suffix}){sup_note}")
+    _ROLLBACK_ON_FAILURE = False
     out(f"committed {SRC['SOURCE_ID']}{section_tag}")
     out("done.")
     return 0

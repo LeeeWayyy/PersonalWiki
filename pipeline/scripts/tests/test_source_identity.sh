@@ -99,6 +99,29 @@ EOF
   else
     fail "drift: wrong error: $(cat "$TMP/err")"
   fi
+
+  # B4: URL fetches are bounded. Fake curl writes the requested -o file and
+  # records argv; source-identity should pass both timeout and filesize caps.
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$TMP/curl.args"
+out=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+  shift
+done
+printf 'url body\n' > "$out"
+SH
+  chmod +x "$TMP/bin/curl"
+  if TMP="$TMP" PATH="$TMP/bin:$PATH" "$SI" "https://example.com/a/b?q=1" >/dev/null 2>"$TMP/url.err" \
+     && grep -q -- "--max-time" "$TMP/curl.args" \
+     && grep -q -- "--max-filesize" "$TMP/curl.args" \
+     && grep -q -- "--proto =http,https" "$TMP/curl.args"; then
+    pass "url fetch: curl bounded and restricted to http(s)"
+  else
+    fail "url fetch bounds missing: args=$(cat "$TMP/curl.args" 2>/dev/null) err=$(cat "$TMP/url.err" 2>/dev/null)"
+  fi
   rm -f /tmp/si_dup.txt /tmp/si_new.txt /tmp/si_dup2.txt
   exit $rc
 ) || rc=1

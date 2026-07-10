@@ -32,11 +32,12 @@ sentence → grammar, and first-occurrence ("new word") highlighting. Being date
 free it re-renders byte-identically from cache, so a no-change re-run is a no-op.
 
 The log (`.wiki/log.md`) is appended AFTER rendering succeeds, one idempotent
-line per chapter, so a render crash leaves no dirty log. The last stdout line
-is `MANIFEST:<json>` — the relative paths ingest must stage.
+line per chapter, so a render crash leaves no dirty log. The relative paths
+ingest must stage are written to `--manifest-out` so generator logs can stream
+without scraping stdout.
 
 Run (normally invoked by ingest.py --profile lang):
-    VAULT_CONTENT_DIR=content/lang generate-language-pages.py --source-id <ULID>
+    PW_CONTENT_DIR=content/lang generate-language-pages.py --source-id <ULID> --manifest-out /tmp/lang-manifest.json
 """
 
 from __future__ import annotations
@@ -46,6 +47,8 @@ import json
 import os
 import re
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import fugashi
@@ -75,14 +78,15 @@ DROP_POS1 = {"助詞", "助動詞", "補助記号", "記号", "空白"}
 
 CJK_RX = re.compile(r"[㐀-鿿豈-﫿\U00020000-\U0002ffff]")
 
-_TAGGER: fugashi.Tagger | None = None
+_TAGGER_LOCAL = threading.local()
 
 
 def tagger() -> fugashi.Tagger:
-    global _TAGGER
-    if _TAGGER is None:
-        _TAGGER = fugashi.Tagger()  # auto-wires unidic-lite
-    return _TAGGER
+    local_tagger = getattr(_TAGGER_LOCAL, "tagger", None)
+    if local_tagger is None:
+        local_tagger = fugashi.Tagger()  # auto-wires unidic-lite
+        _TAGGER_LOCAL.tagger = local_tagger
+    return local_tagger
 
 
 def kata2hira(s: str) -> str:
@@ -551,7 +555,7 @@ def build_reading_json(display: str, source_id: str,
             "lang": "ja", "prompt_version": PROMPT_VERSION, "chapters": chapters}
 
 
-def generate(source_id: str, refresh: bool, dry_run: bool) -> list[Path]:
+def generate(source_id: str, refresh: bool, dry_run: bool, jobs: int = 1) -> list[Path]:
     sources = dl.find_sources(SOURCES_DIR)
     if source_id not in sources:
         raise SystemExit(f"generate-language-pages: no sidecar for {source_id} in {SOURCES_DIR}")
@@ -576,11 +580,24 @@ def generate(source_id: str, refresh: bool, dry_run: bool) -> list[Path]:
     if not chapters:
         chapters = [(WHOLE_LABEL, None)]  # transcript / heading-less → one unit
 
-    # Per-chapter fugashi + LLM (cached), in document order.
-    per_chapter: list[tuple[str, dict]] = []
-    for idx, (label, section) in enumerate(chapters, start=1):
+    # Per-chapter fugashi + LLM (cached), in document order. Each chapter is
+    # independent until the final render/log pass, so callers can opt into a
+    # small thread pool without changing output order.
+    def load_one(item: tuple[int, tuple[str, str | None]]) -> tuple[str, dict]:
+        idx, (label, section) = item
         data = chapter_data(meta, idx, label, section, refresh, dry_run)
-        per_chapter.append((chapter_key(label), data))
+        return chapter_key(label), data
+
+    per_chapter: list[tuple[str, dict]] = []
+    work = list(enumerate(chapters, start=1))
+    jobs = max(1, min(jobs, len(work) or 1))
+    if jobs == 1:
+        for item in work:
+            per_chapter.append(load_one(item))
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            for result in ex.map(load_one, work):
+                per_chapter.append(result)
 
     # Global gloss map: key → word (first meaning wins). Inline tokens look up
     # their gloss here; the render's `seen` set drives first-occurrence highlight.
@@ -642,16 +659,21 @@ def main() -> int:
     ap.add_argument("--source-id", required=True, help="the source_id to generate for")
     ap.add_argument("--refresh", action="store_true", help="re-call the LLM, ignore cache")
     ap.add_argument("--dry-run", action="store_true", help="render from cache only; never call LLM or write")
+    ap.add_argument("--jobs", type=int, default=int(os.environ.get("PW_LANG_JOBS", "4")),
+                    help="Parallel per-chapter LLM calls (default 4, or PW_LANG_JOBS).")
+    ap.add_argument("--manifest-out", required=True,
+                    help="Write the manifest JSON list to this file.")
     args = ap.parse_args()
 
     for d in (READING_DIR, CACHE_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
-    rendered = generate(args.source_id, args.refresh, args.dry_run)
+    rendered = generate(args.source_id, args.refresh, args.dry_run, args.jobs)
     manifest = sorted(str(p.relative_to(VAULT_ROOT)) for p in rendered)
     if LOG_PATH.is_file():
         manifest.append(str(LOG_PATH.relative_to(VAULT_ROOT)))
-    print("MANIFEST:" + json.dumps(manifest, ensure_ascii=False))
+    manifest_json = json.dumps(manifest, ensure_ascii=False)
+    Path(args.manifest_out).write_text(manifest_json + "\n", encoding="utf-8")
     return 0
 
 

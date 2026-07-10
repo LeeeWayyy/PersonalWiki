@@ -6,11 +6,15 @@ LLM budget require `PW_AUTH_TOKEN` and fail closed when it is not configured.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import settings
 from .routers import annotations, health, ingest, llm, study
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="Personal Wiki backend")
 app.add_middleware(

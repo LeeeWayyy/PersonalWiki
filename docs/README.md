@@ -3,12 +3,9 @@
 This folder holds project-level design, architecture, and review documents.
 Runtime-specific docs stay with the subsystem they describe.
 
-## Design And Review
+## Project Notes
 
-- [`PLAN.md`](./PLAN.md) — original implementation plan and feature direction.
-- [`ARCHITECTURE-IMPROVEMENT-PLAN.md`](./ARCHITECTURE-IMPROVEMENT-PLAN.md) — current architecture review and refactor plan.
-- [`SOURCE-READER-DESIGN.md`](./SOURCE-READER-DESIGN.md) — source reader and annotation design.
-- [`PROJECT-ISSUES-AUDIT.md`](./PROJECT-ISSUES-AUDIT.md) — issue inventory from the project audit loop.
+- [`SHELL-TO-LOCAL-APP-MIGRATION.md`](./SHELL-TO-LOCAL-APP-MIGRATION.md) — migration notes for the local app/runtime split.
 
 ## Related Subsystem Docs
 

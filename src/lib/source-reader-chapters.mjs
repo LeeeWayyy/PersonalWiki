@@ -68,13 +68,44 @@ function decodeLoose(value) {
 function normalizeSourceAnchor(anchor = '') {
   let raw = String(anchor || '').trim();
   if (raw.startsWith('#')) raw = raw.slice(1);
+  if (raw.startsWith('sec=')) return `sec=${decodeLoose(raw.slice(4))}`;
+  if (raw.startsWith('s=')) return `s=${decodeLoose(raw.slice(2))}`;
+  if (raw.startsWith('b=') || raw.includes('&')) return raw;
   return decodeLoose(raw);
 }
 
-function fragmentForSourceAnchor(anchor = '') {
+function sourceAnchorParts(anchor = '') {
+  const original = String(anchor || '').trim().replace(/^#/, '');
   const raw = normalizeSourceAnchor(anchor);
+  const out = { raw, sectionId: '', label: '', blockId: '', prev: '', next: '' };
+  if (!raw) return out;
+  if (raw.startsWith('sec=')) {
+    out.label = raw.slice(4);
+  } else if (raw.startsWith('s=')) {
+    out.sectionId = raw.slice(2);
+  } else if (original.startsWith('b=')) {
+    const params = new URLSearchParams(raw);
+    out.sectionId = params.get('s') || '';
+    out.label = params.get('sec') || '';
+    out.blockId = params.get('b') || '';
+    out.prev = params.get('prev') || '';
+    out.next = params.get('next') || '';
+  } else if (raw.startsWith('s-')) {
+    out.sectionId = raw;
+  } else if (raw.startsWith('p-') || raw.startsWith('h-') || raw.startsWith('i-')) {
+    out.blockId = raw;
+  } else {
+    out.label = raw;
+  }
+  return out;
+}
+
+function fragmentForSourceAnchor(anchor = '') {
+  const { raw } = sourceAnchorParts(anchor);
   if (!raw) return '';
-  if (raw.includes('=')) return encodeURI(raw);
+  if (raw.startsWith('sec=')) return `sec=${encodeURIComponent(raw.slice(4))}`;
+  if (raw.startsWith('s=')) return `s=${encodeURIComponent(raw.slice(2))}`;
+  if (raw.startsWith('b=')) return raw;
   if (raw.startsWith('s-')) return `s=${encodeURIComponent(raw)}`;
   if (raw.startsWith('p-') || raw.startsWith('h-')) return encodeURIComponent(raw);
   return `sec=${encodeURIComponent(raw)}`;
@@ -82,25 +113,8 @@ function fragmentForSourceAnchor(anchor = '') {
 
 export function chapterForSourceAnchor(chapters = [], anchor = '') {
   if (!chapters.length) return null;
-  const raw = normalizeSourceAnchor(anchor);
+  const { raw, sectionId, label, blockId } = sourceAnchorParts(anchor);
   if (!raw) return chapters[0];
-
-  let sectionId = '';
-  let label = '';
-  let blockId = '';
-
-  if (raw.includes('=')) {
-    const params = new URLSearchParams(raw);
-    sectionId = params.get('s') || '';
-    label = params.get('sec') || '';
-    blockId = params.get('b') || '';
-  } else if (raw.startsWith('s-')) {
-    sectionId = raw;
-  } else if (raw.startsWith('p-') || raw.startsWith('h-') || raw.startsWith('i-')) {
-    blockId = raw;
-  } else {
-    label = raw;
-  }
 
   if (sectionId) {
     const hit = chapters.find((chapter) => chapter.section_id === sectionId);

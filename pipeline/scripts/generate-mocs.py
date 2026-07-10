@@ -224,25 +224,6 @@ def render_moc(
     return fm + h1 + human + "\n" + moc_zone
 
 
-def write_moc(path: Path, content: str, dry_run: bool) -> bool:
-    """Write content to path atomically (temp + rename). Skip if file
-    already equals content. Returns True if a write happened.
-
-    Caller is responsible for choosing the right `last_generated:`
-    date in `content` (see render_moc(): preserves prior date on
-    same-content re-runs to keep this byte comparison stable across
-    day boundaries; bumps to today on real changes)."""
-    if path.exists() and path.read_text(encoding="utf-8") == content:
-        return False
-    if dry_run:
-        return True
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
-    return True
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("--dry-run", action="store_true", help="show changes, don't write")
@@ -308,7 +289,7 @@ def main() -> int:
             skipped += 1
             continue
         content = render_moc(tag, carriers, member_hash, today, existing_text)
-        if write_moc(path, content, args.dry_run):
+        if dl.atomic_write(path, content, args.dry_run):
             written += 1
             verb = "would write" if args.dry_run else "wrote"
             print(f"  {verb} {path.relative_to(VAULT_ROOT)} ({len(carriers)} member(s))")

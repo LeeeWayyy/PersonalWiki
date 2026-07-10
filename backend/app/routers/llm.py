@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
@@ -13,6 +14,7 @@ from ..auth import require_auth
 from ..validation import json_object, optional_string
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
 
 
 def _cache_hash(*parts: str) -> str:
@@ -32,6 +34,40 @@ def _llm_cache_meta(prompt_version: str) -> tuple[str, str | None, str | None]:
     return prompt_version, ident["provider"], ident["model"]
 
 
+def _translation_cache_get(h: str):
+    conn = db.connect()
+    try:
+        return conn.execute(
+            "SELECT translation,context,lang,prompt_version,llm_provider,llm_model FROM translations WHERE text_hash=?",
+            (h,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _translation_cache_put(
+    *,
+    h: str,
+    context: str,
+    lang: str,
+    translation: str,
+    prompt_version: str,
+    provider: str | None,
+    model: str | None,
+) -> None:
+    conn = db.connect()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO translations(
+                 text_hash,context,lang,translation,prompt_version,llm_provider,llm_model,created
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (h, context, lang, translation, prompt_version, provider, model, db.now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @router.post("/translate")
 async def translate(request: Request, x_auth_token: str | None = Header(None)):
     require_auth(x_auth_token)
@@ -40,21 +76,16 @@ async def translate(request: Request, x_auth_token: str | None = Header(None)):
     if not text:
         raise HTTPException(400, "text required")
     h = _cache_hash("translate", settings.TRANSLATE_PROMPT_VERSION, settings.TRANSLATE_LANG, text)
-    conn = db.connect()
-    cached = conn.execute(
-        "SELECT translation,lang,prompt_version,llm_provider,llm_model FROM translations WHERE text_hash=?",
-        (h,),
-    ).fetchone()
+    cached = await asyncio.to_thread(_translation_cache_get, h)
     if cached:
-        conn.close()
         return {
             "translation": cached["translation"],
             "cached": True,
             "target_lang": cached["lang"],
             **_cache_payload(cached),
         }
+    LOGGER.info("translate cache miss target_lang=%s chars=%d", settings.TRANSLATE_LANG, len(text))
     if not llm_client.configured():
-        conn.close()
         return {
             "translation": (
                 "(translation needs an LLM - set PW_LLM_PROVIDER=codex, configure a custom LLM_CMD, "
@@ -68,17 +99,18 @@ async def translate(request: Request, x_auth_token: str | None = Header(None)):
     try:
         tr = await asyncio.to_thread(llm_client.complete, prompt, timeout=120) or "(no output)"
     except Exception as e:  # noqa
-        conn.close()
         raise HTTPException(502, f"LLM call failed: {e}")
     prompt_version, provider, model = _llm_cache_meta(settings.TRANSLATE_PROMPT_VERSION)
-    conn.execute(
-        """INSERT OR REPLACE INTO translations(
-             text_hash,lang,translation,prompt_version,llm_provider,llm_model,created
-           ) VALUES(?,?,?,?,?,?,?)""",
-        (h, settings.TRANSLATE_LANG, tr, prompt_version, provider, model, db.now_iso()),
+    await asyncio.to_thread(
+        _translation_cache_put,
+        h=h,
+        context="translate",
+        lang=settings.TRANSLATE_LANG,
+        translation=tr,
+        prompt_version=prompt_version,
+        provider=provider,
+        model=model,
     )
-    conn.commit()
-    conn.close()
     return {
         "translation": tr,
         "cached": False,
@@ -111,16 +143,11 @@ async def assist(request: Request, x_auth_token: str | None = Header(None)):
         raise HTTPException(400, "text required")
     lang = optional_string(b.get("lang"), "lang", settings.TRANSLATE_LANG) or settings.TRANSLATE_LANG
     h = _cache_hash("assist", settings.ASSIST_PROMPT_VERSION, mode, lang, text)
-    conn = db.connect()
-    cached = conn.execute(
-        "SELECT translation,prompt_version,llm_provider,llm_model FROM translations WHERE text_hash=?",
-        (h,),
-    ).fetchone()
+    cached = await asyncio.to_thread(_translation_cache_get, h)
     if cached:
-        conn.close()
         return {"result": cached["translation"], "mode": mode, "cached": True, **_cache_payload(cached)}
+    LOGGER.info("assist cache miss mode=%s lang=%s chars=%d", mode, lang, len(text))
     if not llm_client.configured():
-        conn.close()
         return {
             "result": (
                 "(AI assist needs an LLM - set PW_LLM_PROVIDER=codex, configure a custom LLM_CMD, "
@@ -135,17 +162,18 @@ async def assist(request: Request, x_auth_token: str | None = Header(None)):
     try:
         out = await asyncio.to_thread(llm_client.complete, prompt, timeout=120) or "(no output)"
     except Exception as e:  # noqa
-        conn.close()
         raise HTTPException(502, f"LLM call failed: {e}")
     prompt_version, provider, model = _llm_cache_meta(settings.ASSIST_PROMPT_VERSION)
-    conn.execute(
-        """INSERT OR REPLACE INTO translations(
-             text_hash,lang,translation,prompt_version,llm_provider,llm_model,created
-           ) VALUES(?,?,?,?,?,?,?)""",
-        (h, mode, out, prompt_version, provider, model, db.now_iso()),
+    await asyncio.to_thread(
+        _translation_cache_put,
+        h=h,
+        context=mode,
+        lang=lang,
+        translation=out,
+        prompt_version=prompt_version,
+        provider=provider,
+        model=model,
     )
-    conn.commit()
-    conn.close()
     return {
         "result": out,
         "mode": mode,

@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import datetime as dt
+import threading
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("PW_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 CREATE TABLE IF NOT EXISTS translations (
   text_hash TEXT PRIMARY KEY,
+  context TEXT,
   lang TEXT,
   translation TEXT,
   prompt_version TEXT,
@@ -81,7 +83,17 @@ def now_iso() -> str:
 
 
 def today() -> dt.date:
-    return dt.datetime.utcnow().date()
+    return dt.datetime.now().astimezone().date()
+
+
+def local_date_from_iso(value: str) -> dt.date:
+    text = (value or "").strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = dt.datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone().date()
 
 
 # Additive migrations for tables that predate a column. SQLite has no
@@ -91,7 +103,23 @@ _MIGRATIONS = [
     "ALTER TABLE translations ADD COLUMN prompt_version TEXT",
     "ALTER TABLE translations ADD COLUMN llm_provider TEXT",
     "ALTER TABLE translations ADD COLUMN llm_model TEXT",
+    "ALTER TABLE translations ADD COLUMN context TEXT",
 ]
+
+_INIT_LOCK = threading.Lock()
+_INITIALIZED_DATABASES: dict[str, tuple[int, int]] = {}
+
+
+def _db_init_key(path: Path) -> str:
+    return str(path.expanduser().resolve(strict=False))
+
+
+def _db_file_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (stat.st_dev, stat.st_ino)
 
 
 def _ensure_reviews_foreign_key(conn: sqlite3.Connection) -> None:
@@ -119,13 +147,33 @@ def _ensure_reviews_foreign_key(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_item ON reviews(item_id)")
 
 
-def connect() -> sqlite3.Connection:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.execute("PRAGMA journal_mode=WAL;")
+def _ensure_translation_context(conn: sqlite3.Connection) -> None:
+    """Backfill the generic translations cache discriminator.
+
+    Legacy translate rows stored the target language in `lang`; legacy assist
+    rows stored the assist mode in `lang`. New rows use `context` for the cache
+    context (`translate`, `explain`, `summarize`, `define`) and keep `lang` for
+    actual language.
+    """
+    cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(translations)").fetchall()
+    }
+    if "context" not in cols:
+        return
+    conn.execute(
+        """UPDATE translations
+           SET context=lang, lang=NULL
+           WHERE context IS NULL AND COALESCE(prompt_version, '') LIKE 'assist:%'"""
+    )
+    conn.execute(
+        """UPDATE translations
+           SET context='translate'
+           WHERE context IS NULL"""
+    )
+
+
+def _run_schema_migrations(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     for stmt in _MIGRATIONS:
         try:
@@ -134,5 +182,34 @@ def connect() -> sqlite3.Connection:
             if "duplicate column name" not in str(e).lower():
                 raise sqlite3.OperationalError(f"migration failed: {stmt}: {e}") from e
     _ensure_reviews_foreign_key(conn)
+    _ensure_translation_context(conn)
     conn.commit()
+
+
+def _ensure_initialized(conn: sqlite3.Connection, path: Path) -> None:
+    init_key = _db_init_key(path)
+    identity = _db_file_identity(path)
+    if identity is not None and _INITIALIZED_DATABASES.get(init_key) == identity:
+        return
+
+    with _INIT_LOCK:
+        identity = _db_file_identity(path)
+        if identity is not None and _INITIALIZED_DATABASES.get(init_key) == identity:
+            return
+
+        _run_schema_migrations(conn)
+        identity = _db_file_identity(path)
+        if identity is not None:
+            _INITIALIZED_DATABASES[init_key] = identity
+
+
+def connect() -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    db_path = Path(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA journal_mode=WAL;")
+    _ensure_initialized(conn, db_path)
     return conn

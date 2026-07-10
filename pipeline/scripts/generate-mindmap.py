@@ -62,7 +62,7 @@ EXTRACT = TOOLING_ROOT / "scripts" / "extract.py"
 
 PROMPT_VERSION = "v2"
 NODE_WRAP = 16   # soft-wrap Mermaid node labels every ~N chars with <br>
-SOURCE_CHAR_LIMIT = 300_000
+SOURCE_CHAR_LIMIT = 120_000
 LLM_TIMEOUT_S = 900
 
 NODE_ID_RX = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -248,32 +248,6 @@ def validate(obj: dict, chapters: list[str]) -> dict:
     }
 
 
-# ─── cache ───────────────────────────────────────────────────────────────────
-# Local (not derived_lib's): the cache filename here has no chapter-suffix
-# segment, and switching to dl.cache_path would orphan every existing cache.
-
-
-def cache_path(source_id: str, sha: str) -> Path:
-    return CACHE_DIR / f"{source_id}.{(sha or '0')[:12]}.{PROMPT_VERSION}.json"
-
-
-def load_cache(source_id: str, sha: str) -> dict | None:
-    p = cache_path(source_id, sha)
-    if not p.is_file():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def save_cache(source_id: str, sha: str, data: dict) -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_path(source_id, sha).write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
 # ─── render ──────────────────────────────────────────────────────────────────
 
 
@@ -368,7 +342,7 @@ def render_map(source_id: str, title: str, chapters: list[str], data: dict,
 def generate_one(source_id: str, meta: dict, refresh: bool, dry_run: bool) -> tuple[bool, str]:
     chapters = chapter_order(source_id)
     sha = meta["sha256"]
-    data = None if refresh else load_cache(source_id, sha)
+    data = None if refresh else dl.load_flat_cache(CACHE_DIR, PROMPT_VERSION, source_id, sha)
     used_llm = False
     if data is None:
         if dry_run:
@@ -377,7 +351,7 @@ def generate_one(source_id: str, meta: dict, refresh: bool, dry_run: bool) -> tu
         prompt = build_prompt(text, chapters, meta["title"])
         raw = dl.call_llm(prompt, LLM_TIMEOUT_S)
         data = validate(dl.extract_json(raw), chapters)
-        save_cache(source_id, sha, data)
+        dl.save_flat_cache(CACHE_DIR, PROMPT_VERSION, source_id, sha, data)
         used_llm = True
 
     chash = content_hash(data)

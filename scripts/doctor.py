@@ -34,13 +34,6 @@ def _run(cmd: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False)
 
 
-def _node_version_ok(version: str) -> bool:
-    try:
-        return app_start.node_version_ok(app_start.parse_node_version(version))
-    except app_start.AppStartError:
-        return False
-
-
 def _python_bin() -> str:
     return os.environ.get("PYTHON") or shutil.which("python3") or shutil.which("python") or ""
 
@@ -59,7 +52,11 @@ def run_doctor(root: Path = ROOT) -> int:
     node = shutil.which("node")
     if node:
         version = _run([node, "--version"], root).stdout.strip()
-        if _node_version_ok(version):
+        try:
+            node_ok = app_start.node_version_ok(app_start.parse_node_version(version))
+        except app_start.AppStartError:
+            node_ok = False
+        if node_ok:
             reporter.ok(f"Node {version}")
         else:
             reporter.fail(f"Node 22.12+ is required; found {version or 'unknown'}")

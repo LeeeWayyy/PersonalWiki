@@ -92,6 +92,7 @@ function bootSourceReader(options = {}) {
   let cmdCatalog = [];
   let cmdSel = 0;
   let prefs = cleanPrefs(readJson(PREFS_KEY, DEFAULT_PREFS));
+  const pendingAnnotationBodies = new Map();
 
   const renderedBlockIds = new Set([...doc.querySelectorAll('[data-block]')].map((el) => el.dataset.block).filter(Boolean));
   const renderedSectionIds = new Set([...doc.querySelectorAll('[data-section]')].map((el) => el.dataset.section).filter(Boolean));
@@ -128,6 +129,10 @@ function bootSourceReader(options = {}) {
       + (fuzzy ? ` · ${fuzzy} re-anchored` : '')
       + (orphanCount ? ` · ${orphanCount} orphaned` : '')
       + (otherChapterNoteCount ? ` · ${otherChapterNoteCount} in other chapters` : '');
+  }
+
+  function showOfflineStatus(message = 'Study backend offline — start it to load/save notes.') {
+    statusEl.textContent = message;
   }
 
   function syncPrefsControls() {
@@ -328,7 +333,7 @@ function bootSourceReader(options = {}) {
       statusEl.textContent = annotationStatus();
       render();
     } catch {
-      statusEl.textContent = 'Study backend offline — start it to load/save notes.';
+      showOfflineStatus();
     }
   }
 
@@ -624,11 +629,21 @@ function bootSourceReader(options = {}) {
     const aid = b.dataset.aid;
     const body = b.textContent;
     const a = annotations.find((x) => x.id === aid);
-    if (!a || a.body === body) return;
-    a.body = body;
+    const pendingBody = pendingAnnotationBodies.get(aid);
+    if (!a || (a.body === body && pendingBody !== body)) return;
     try {
-      await fetch(`${BACKEND}/annotations/${aid}`, { method: 'PATCH', headers: H, body: JSON.stringify({ body }) });
-    } catch {}
+      const r = await fetch(`${BACKEND}/annotations/${aid}`, { method: 'PATCH', headers: H, body: JSON.stringify({ body }) });
+      if (!r.ok) throw new Error();
+      a.body = body;
+      pendingAnnotationBodies.delete(aid);
+      b.removeAttribute('title');
+      statusEl.textContent = annotationStatus();
+    } catch {
+      a.body = body;
+      pendingAnnotationBodies.set(aid, body);
+      b.title = 'Not saved — backend offline. Blur again to retry.';
+      showOfflineStatus('Study backend offline — note edit kept locally; start it to save notes.');
+    }
   }, true);
 
   function closePromoteMenu() {
@@ -702,9 +717,14 @@ function bootSourceReader(options = {}) {
     if (del) {
       const aid = del.dataset.del;
       try {
-        await fetch(`${BACKEND}/annotations/${aid}`, { method: 'DELETE', headers: H });
-      } catch {}
+        const r = await fetch(`${BACKEND}/annotations/${aid}`, { method: 'DELETE', headers: H });
+        if (!r.ok) throw new Error();
+      } catch {
+        showOfflineStatus('Study backend offline — delete not saved; note kept locally.');
+        return;
+      }
       annotations = annotations.filter((x) => x.id !== aid);
+      pendingAnnotationBodies.delete(aid);
       allAnnotationCount = Math.max(0, allAnnotationCount - 1);
       statusEl.textContent = annotationStatus();
       render();
@@ -763,6 +783,14 @@ function bootSourceReader(options = {}) {
     return el;
   }
 
+  function decodeHashValue(value) {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+
   document.getElementById('sr-cited')?.addEventListener('click', (e) => {
     if (e.target.closest('a')) return;
     const card = e.target.closest('.cite-card');
@@ -771,19 +799,19 @@ function bootSourceReader(options = {}) {
   });
 
   function resolveFragment() {
-    const h = decodeURIComponent(location.hash.slice(1));
+    const h = location.hash.slice(1);
     if (!h) return;
-    if (h.startsWith('b=') || h.includes('&')) {
+    if (h.startsWith('s=')) {
+      locate(decodeHashValue(h.slice(2)));
+    } else if (h.startsWith('sec=')) {
+      locate(decodeHashValue(h.slice(4)));
+    } else if (h.startsWith('b=')) {
       const q = new URLSearchParams(h);
       pulse(resolveBlock({ target: { block_id: q.get('b'), section_id: q.get('s'), context: { prev_block_id: q.get('prev') || '', next_block_id: q.get('next') || '' } } }));
-    } else if (h.startsWith('s=')) {
-      locate(h.slice(2));
-    } else if (h.startsWith('sec=')) {
-      locate(h.slice(4));
     } else if (h.startsWith('s-')) {
-      locate(h);
+      locate(decodeHashValue(h));
     } else if (h.startsWith('p-') || h.startsWith('h-')) {
-      locate(h);
+      locate(decodeHashValue(h));
     }
   }
 

@@ -39,6 +39,8 @@ from pathlib import Path
 
 SOURCES = Path("sources")  # cwd-relative, exactly like ingest.sh `sources/*.md`
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+URL_FETCH_MAX_TIME_S = os.environ.get("PW_SOURCE_FETCH_MAX_TIME_S", "120")
+URL_FETCH_MAX_BYTES = os.environ.get("PW_SOURCE_FETCH_MAX_BYTES", str(100 * 1024 * 1024))
 
 
 def die(msg: str) -> None:
@@ -147,7 +149,13 @@ def main() -> int:
             os.close(fd)
             progress(f"fetching {inp}")
             # -f: non-zero on HTTP errors, so 404/500 bodies aren't stored.
-            if subprocess.run(["curl", "-fsSL", inp, "-o", tmp_fetch]).returncode != 0:
+            if subprocess.run([
+                "curl", "-fsSL",
+                "--proto", "=http,https",
+                "--max-time", URL_FETCH_MAX_TIME_S,
+                "--max-filesize", URL_FETCH_MAX_BYTES,
+                inp, "-o", tmp_fetch,
+            ]).returncode != 0:
                 die(f"fetch failed for {inp}")
             sha256 = sha256_of(tmp_fetch)
             fetched = tmp_fetch

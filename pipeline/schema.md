@@ -83,10 +83,9 @@ Plus two tool-owned auxiliary types:
   subtree** (the `--profile lang` ingest path; never mixed into the wiki).
   Each source emits `_reading/<slug>.html` for standalone local reading and
   `_reading/<slug>.reading.json` for the website reader / word bank. The JSON
-  schema is `reading/2`: `source_id`, title, language, prompt version, ordered
-  chapters, paragraphs, sentences, tokens, furigana readings, first-occurrence
-  flags, glosses, and grammar notes. **Not subject to §2** (no `page_id`, no
-  wiki `sources`, no `aliases`, no `last_ingested`). Editing rules:
+  schema is `reading/2` and is the authoritative language-reader contract.
+  **Not subject to §2** (no `page_id`, no wiki `sources`, no `aliases`, no
+  `last_ingested`). Editing rules:
   - `_reading/*.html` and `_reading/*.reading.json` are regenerated on every
     run — DO NOT hand-edit; edits will be erased.
   - These are **derived views**, never sources (§6): never cited as evidence
@@ -94,8 +93,78 @@ Plus two tool-owned auxiliary types:
     anchors to the source it summarizes (for auditability), and cannot drift
     independently of that source.
   - Legacy `_study`, `_vocab`, and `_grammar` markdown artifacts are retired
-    compatibility inputs for the site fallback generator, not the canonical
-    `--profile lang` output.
+    and are not read by the app. Re-ingest old language sources with
+    `--profile lang` to generate current `reading/2` JSON.
+
+`reading/2` shape emitted by `scripts/generate-language-pages.py`:
+
+```json
+{
+  "schema": "reading/2",
+  "source_id": "01K...",
+  "title": "Display title",
+  "lang": "ja",
+  "prompt_version": "v4",
+  "chapters": [
+    {
+      "chapter": "第1章",
+      "paragraphs": [
+        {
+          "sentences": [
+            {
+              "jp": "原文。",
+              "en": "Target-language translation.",
+              "tokens": [
+                {
+                  "t": "原文",
+                  "rt": "げんぶん",
+                  "w": "原文",
+                  "m": "gloss",
+                  "n": "optional note",
+                  "pos": "名詞",
+                  "key": "原文\u001fゲンブン\u001f名詞",
+                  "new": true
+                }
+              ],
+              "grammar": [
+                {
+                  "pattern": "〜ている",
+                  "explanation": "Short learner-facing explanation.",
+                  "example_jp": "原文の例。",
+                  "s": 1
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "grammar": [
+        {
+          "pattern": "〜ている",
+          "explanation": "Short learner-facing explanation.",
+          "example_jp": "原文の例。",
+          "s": 1
+        }
+      ]
+    }
+  ]
+}
+```
+
+Required fields:
+- Top level: `schema` exactly `reading/2`, `source_id`, `title`, `lang`,
+  `prompt_version`, and ordered `chapters`.
+- Chapter: canonical `chapter` label, ordered `paragraphs`, and chapter-level
+  `grammar` list.
+- Paragraph: ordered `sentences`.
+- Sentence: Japanese source text `jp`, target-language translation `en`,
+  ordered tokenizer output `tokens`, and sentence-anchored `grammar`.
+- Token: every token has surface text `t`. Kanji-bearing tokens may include
+  hiragana ruby text `rt`. Content-word tokens with a gloss also include lexeme
+  surface `w`, meaning `m`, note `n`, coarse POS `pos`, stable lexeme `key`
+  `(lemma, lForm, pos1)` joined with U+001F, and first-occurrence boolean `new`.
+- Grammar item: `pattern`, `explanation`, `example_jp`, and `s`, where `s` is
+  the 1-based sentence number within the chapter or `0` for a general note.
 
 Split into finer taxonomy only if it starts to hurt.
 

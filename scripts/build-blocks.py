@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """build-blocks.py — extract readable source documents into the Source-Reader
-block contract (docs/SOURCE-READER-DESIGN.md).
+block contract documented in pipeline/schema.md.
 
 For each committed source in vault/sources/ that is an epub, mobi/azw, pdf,
 markdown, or plain text file, emit
@@ -11,8 +11,9 @@ vault/.blocks/<source_id>.blocks.json:
 
 - Block id hashes ONLY type + normalized text (position-independent).
 - section_id is non-positional (hash of the chapter heading text).
-- Chapter membership = the most recent `第N章`-style heading while walking the
-  epub spine; sub-headings (第N节, …) are kept as `type:heading` blocks under it.
+- Chapter membership = the most recent chapter heading while walking the epub
+  spine; by default this matches CJK `第N章` and English `Chapter`/`Part`
+  headings, and can be overridden with PW_CHAPTER_HEADING_RX.
 
 Full-text guard: on a PUBLIC build (PW_PUBLIC_BUILD=1) this refuses to emit book
 text unless PW_ALLOW_FULL_TEXT=1. Local builds are unaffected.
@@ -41,13 +42,52 @@ MIN_FIG_W = 200  # px; smaller <img> are inline footnote/decoration markers, not
 PUBLIC = os.environ.get("PW_PUBLIC_BUILD") == "1"
 ALLOW_FULL = os.environ.get("PW_ALLOW_FULL_TEXT") == "1"
 
-CHAP_RE = re.compile(r"^第[〇零一二三四五六七八九十百千两\d]+章")
+_CJK_NUM = r"[\d〇零一二三四五六七八九十百千两]"
+
+
+def _compile_env_rx(env_name: str, default: str) -> re.Pattern:
+    return re.compile(os.environ.get(env_name) or default, re.IGNORECASE)
+
+
+CHAP_RE = _compile_env_rx(
+    "PW_CHAPTER_HEADING_RX", rf"(?:第{_CJK_NUM}+章)|(?:^\s*(?:chapter|part)\b)"
+)
 HEADING_TAGS = {"h1", "h2", "h3", "h4"}
 PARA_TAGS = {"p", "li", "blockquote", "dd"}
-SKIP_DOC = re.compile(r"(cover|toc|nav|copyright|title)", re.I)
+SKIP_DOC_COMPONENTS = {"cover", "toc", "nav", "copyright", "title", "titlepage"}
+SKIP_DOC_BOUNDARY = re.compile(
+    r"^(cover|toc|nav|copyright)(?:$|[-._\s])|^title(?:$|[-.\s]|_page(?:$|[-._\s]))",
+    re.I,
+)
 
 _sha8 = lambda s: hashlib.sha256(s.encode("utf-8")).hexdigest()[:8]
-_norm = lambda t: re.sub(r"\s+", "", t or "").strip()
+_norm = lambda t: re.sub(r"\s+", "", (t or "").replace("\ufeff", "")).strip()
+
+
+def should_skip_epub_doc(doc: str) -> bool:
+    for component in re.split(r"[\\/]+", doc):
+        if not component:
+            continue
+        name = component.casefold()
+        stem = posixpath.splitext(name)[0]
+        if name in SKIP_DOC_COMPONENTS or stem in SKIP_DOC_COMPONENTS:
+            return True
+        if SKIP_DOC_BOUNDARY.match(name) or SKIP_DOC_BOUNDARY.match(stem):
+            return True
+    return False
+
+
+def block_id(kind: str, text: str) -> str:
+    pfx = "h-" if kind == "heading" else "p-"
+    return pfx + _sha8(kind + "\x1f" + _norm(text))
+
+
+def section_id(section: str) -> str:
+    return "s-" + _sha8("SEC\x1f" + _norm(section))
+
+
+def is_chapter_heading(text: str) -> bool:
+    return bool(CHAP_RE.search(text or ""))
 
 
 def parse_frontmatter(raw: str) -> dict:
@@ -168,7 +208,7 @@ def extract_epub(path: Path, sid: str) -> list[dict]:
     raw_blocks = []            # (kind, text, section[, page, src])
     current = None
     for doc in epub_docs(zf):
-        if SKIP_DOC.search(doc):
+        if should_skip_epub_doc(doc):
             continue
         try:
             html_txt = zf.read(doc).decode("utf-8", "replace")
@@ -184,7 +224,7 @@ def extract_epub(path: Path, sid: str) -> list[dict]:
                 continue
             kind, txt = entry
             if kind == "heading":
-                if CHAP_RE.match(txt):
+                if is_chapter_heading(txt):
                     current = txt
                 elif current is None:
                     current = txt          # front matter heading
@@ -220,7 +260,7 @@ def extract_html(path: Path) -> list[dict]:
             continue  # MOBI6 HTML reader path is text-only in v1.
         kind, txt = entry
         if kind == "heading":
-            if CHAP_RE.match(txt):
+            if is_chapter_heading(txt):
                 current = txt
             elif current is None:
                 current = txt
@@ -258,7 +298,7 @@ def extract_mobi(asset: Path, sid: str) -> list[dict]:
 def extract_markdown(path: Path) -> list[dict]:
     raw_text = strip_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
     raw = []
-    current = ""
+    current = None
     para: list[str] = []
     in_fence = False
 
@@ -268,7 +308,7 @@ def extract_markdown(path: Path) -> list[dict]:
             return
         text = clean_markdown_text(" ".join(para))
         if text:
-            raw.append(("paragraph", text, current))
+            raw.append(("paragraph", text, current or ""))
         para = []
 
     for line in raw_text.splitlines():
@@ -289,8 +329,11 @@ def extract_markdown(path: Path) -> list[dict]:
             flush_para()
             text = clean_markdown_text(hm.group(2))
             if text:
-                current = text
-                raw.append(("heading", text, current))
+                if is_chapter_heading(text):
+                    current = text
+                elif current is None:
+                    current = text
+                raw.append(("heading", text, current or text))
             continue
         para.append(stripped)
     flush_para()
@@ -304,15 +347,14 @@ def to_blocks(raw) -> list[dict]:
         kind, text, section = item[0], item[1], item[2]
         page = item[3] if len(item) > 3 else None
         src = item[4] if len(item) > 4 else None
-        section_id = "s-" + _sha8("SEC\x1f" + _norm(section))
+        sid = section_id(section)
         if kind == "image":
             b = {"id": "i-" + _sha8("image\x1f" + (src or text)), "type": "image",
-                 "section_id": section_id, "section": section, "order": order,
+                 "section_id": sid, "section": section, "order": order,
                  "text": text, "src": src}
         else:
-            pfx = "h-" if kind == "heading" else "p-"
-            b = {"id": pfx + _sha8(kind + "\x1f" + _norm(text)), "type": kind,
-                 "section_id": section_id, "section": section, "order": order, "text": text}
+            b = {"id": block_id(kind, text), "type": kind,
+                 "section_id": sid, "section": section, "order": order, "text": text}
         if page is not None:
             b["page"] = page
         blocks.append(b); order += 1

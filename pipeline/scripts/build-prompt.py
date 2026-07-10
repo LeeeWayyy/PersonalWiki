@@ -20,9 +20,9 @@ Inputs (all from ingest.py variables / files):
     --dest            the source asset path (for <dest>.assets/_manifest.md)
 
 Reads from the content repo ($VAULT_CONTENT_DIR): wiki/_taxonomy.md. Reads from
-the tooling repo (TOOLING_ROOT): prompts/ingest.md, schema.md.
-Shells out to scripts/page-digest.py and scripts/render-images-block.py
-(also tooling) exactly as the original bash implementation did.
+the tooling repo (TOOLING_ROOT): prompts/ingest.md. Shells out to
+scripts/page-digest.py and scripts/render-images-block.py (also tooling)
+exactly as the original bash implementation did.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from pathlib import Path
 
 from _util import default_vault_root
 
-TOOLING_ROOT = Path(__file__).resolve().parent.parent  # tooling repo (scripts/, schema.md)
+TOOLING_ROOT = Path(__file__).resolve().parent.parent  # tooling repo (scripts/, prompts/)
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
 SCRIPTS = TOOLING_ROOT / "scripts"
 
@@ -90,11 +90,11 @@ def main() -> int:
     expand_nonempty = expand_file.is_file() and expand_file.stat().st_size > 0
 
     out = sys.stdout
-    # 1. ingest prompt + 2. SCHEMA
+    # Keep stable high-reuse instructions first; source/candidate run data
+    # follows so provider prefix caches can reuse the invariant prompt prefix.
+    # 1. ingest prompt
     out.write(_read(TOOLING_ROOT / "prompts" / "ingest.md"))
-    out.write("\n\n---\n\n## SCHEMA\n")
-    out.write(_read(TOOLING_ROOT / "schema.md"))
-    # 3. SOURCE_META
+    # 2. SOURCE_META
     out.write("\n\n---\n\n## SOURCE_META\n")
     out.write(
         f"source_id: {args.source_id}\n"
@@ -104,13 +104,13 @@ def main() -> int:
         f"origin_ref: {args.origin_ref}\n"
         f"basename: {args.basename}\n"
     )
-    # 4. SECTION_LABEL — bash default embeds the source_id.
+    # 3. SECTION_LABEL — bash default embeds the source_id.
     section = args.section_label or f"<none — cite as bare [src:{args.source_id}]>"
     out.write(f"\n## SECTION_LABEL\n{section}\n")
-    # 5. SOURCE_TEXT
+    # 4. SOURCE_TEXT
     out.write("\n## SOURCE_TEXT\n")
     out.write(_read(Path(args.text_file)))
-    # 6. CANDIDATE_PAGES header
+    # 5. CANDIDATE_PAGES header
     out.write("\n\n---\n\n## CANDIDATE_PAGES")
     if expand_nonempty:
         # bash uses `wc -l` (counts trailing newlines); match exactly.
@@ -120,12 +120,12 @@ def main() -> int:
         out.write(" (digests only — emit expand action if you need full content)")
     out.write("\n")
     build_candidate_blob(Path(args.candidates_file), expand_file, out)
-    # 7. ALL_SOURCE_IDS
+    # 6. ALL_SOURCE_IDS
     out.write(f"\n---\n\n## ALL_SOURCE_IDS\n{args.all_source_ids}\n")
-    # 8. TAXONOMY
+    # 7. TAXONOMY
     out.write("\n---\n\n## TAXONOMY\n")
     out.write(_read(VAULT_ROOT / "wiki" / "_taxonomy.md"))
-    # 9. IMAGES
+    # 8. IMAGES
     out.write("\n---\n\n## IMAGES\n")
     manifest = Path(f"{args.dest}.assets") / "_manifest.md"
     if manifest.is_file():
@@ -139,7 +139,7 @@ def main() -> int:
             out.write("(images-block render failed; LLM proceeds without image table)\n")
     else:
         out.write("(no images extracted from this source)\n")
-    # 10. trailer
+    # 9. trailer
     if expand_nonempty:
         out.write("\n---\n\nNow emit the unified diff. Reminder: only modify\n")
         out.write("candidates shown in full or candidates whose digest has\n")

@@ -6,12 +6,14 @@ study/job read auth, and the AI-assist / translate graceful-degradation paths
 (no LLM configured).
 """
 import asyncio
+import datetime as dt
 import json
 import os
 import shlex
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -39,6 +41,27 @@ def test_db_connection_pragmas_and_indexes():
         }
         assert "idx_items_state_due" in indexes
         assert "idx_reviews_item" in indexes
+    finally:
+        conn.close()
+
+
+def test_db_schema_initializes_once_per_database(monkeypatch, tmp_path):
+    from app import db
+
+    test_db = tmp_path / "study.db"
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", test_db)
+
+    conn = db.connect()
+    conn.close()
+
+    monkeypatch.setattr(
+        db, "_MIGRATIONS", ["ALTER TABLE missing_table ADD COLUMN bad TEXT"]
+    )
+
+    conn = db.connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
     finally:
         conn.close()
 
@@ -99,6 +122,55 @@ def test_db_migrates_legacy_reviews_table_to_foreign_key(monkeypatch, tmp_path):
         conn.execute("DELETE FROM items WHERE id=1")
         conn.commit()
         assert conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_db_migrates_translation_context(monkeypatch, tmp_path):
+    from app import db
+
+    legacy_db = tmp_path / "study.db"
+    raw = sqlite3.connect(legacy_db)
+    raw.executescript(
+        """
+        CREATE TABLE translations (
+          text_hash TEXT PRIMARY KEY,
+          lang TEXT,
+          translation TEXT,
+          prompt_version TEXT,
+          llm_provider TEXT,
+          llm_model TEXT,
+          created TEXT
+        );
+        INSERT INTO translations(text_hash,lang,translation,prompt_version,created)
+          VALUES('t1','Simplified Chinese','translated','translate:v1','2026-01-01T00:00:00Z'),
+                ('a1','summarize','assisted','assist:v1','2026-01-01T00:00:00Z');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", legacy_db)
+
+    conn = db.connect()
+    try:
+        rows = {
+            r["text_hash"]: dict(r)
+            for r in conn.execute(
+                "SELECT text_hash,context,lang FROM translations ORDER BY text_hash"
+            ).fetchall()
+        }
+        assert rows["t1"] == {
+            "text_hash": "t1",
+            "context": "translate",
+            "lang": "Simplified Chinese",
+        }
+        assert rows["a1"] == {
+            "text_hash": "a1",
+            "context": "summarize",
+            "lang": None,
+        }
     finally:
         conn.close()
 
@@ -248,6 +320,20 @@ def test_preflight_allows_untracked_taxonomy_scaffold(client, auth, content_dir)
         page.unlink(missing_ok=True)
 
 
+def test_preflight_reports_cjk_leftover_artifact(client, auth, content_dir):
+    from app import ingest_runner as ir
+
+    dirty = content_dir / "wiki" / "entities" / "漢字.failed"
+    dirty.write_text("leftover", encoding="utf-8")
+    try:
+        ok, msg, offending = ir.preflight({"kind": "auto"})
+        assert ok is False
+        assert "Leftover artifacts" in msg
+        assert "wiki/entities/漢字.failed" in offending
+    finally:
+        dirty.unlink(missing_ok=True)
+
+
 def test_preflight_blocks_on_git_status_failure(client, auth, monkeypatch):
     from app import ingest_runner as ir
 
@@ -327,6 +413,182 @@ def test_job_logs_are_bounded(client, auth, monkeypatch):
         ir.JOBS.pop(job.id, None)
 
 
+def test_job_emit_persists_to_disk_and_keeps_ring_on_log_failure(tmp_path, monkeypatch):
+    from app import ingest_runner as ir
+
+    log_dir = tmp_path / "logs"
+    monkeypatch.setattr(ir, "JOB_LOG_DIR", log_dir)
+    job = ir.Job("persistjob")
+    job.emit("first")
+    job.emit("__END__")
+
+    durable = (log_dir / "persistjob.log").read_text(encoding="utf-8").splitlines()
+    assert durable[0].endswith(" first")
+    assert durable[1].endswith(" __END__")
+    assert job.visible_lines() == ["first", "__END__"]
+
+    blocked_parent = tmp_path / "not-a-dir"
+    blocked_parent.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(ir, "JOB_LOG_DIR", blocked_parent)
+    broken = ir.Job("brokenjob")
+    broken.emit("still live")
+
+    assert broken.visible_lines() == ["still live"]
+    assert broken.log_failed is True
+
+
+def test_start_job_keeps_task_reference(monkeypatch):
+    from app import ingest_runner as ir
+
+    async def fake_run_job(job, target, options):
+        job.status = "done"
+        job.result = {"status": "done", "target": target, "options": options}
+
+    async def run():
+        monkeypatch.setattr(ir, "run_job", fake_run_job)
+        job_id = ir.start_job("https://example.com", {"kind": "auto"})
+        job = ir.JOBS[job_id]
+        try:
+            assert job.task is not None
+            await job.task
+            assert job.status == "done"
+            assert job.result["target"] == "https://example.com"
+        finally:
+            ir.JOBS.pop(job_id, None)
+
+    asyncio.run(run())
+
+
+def test_run_job_passes_run_id_uses_threads_and_removes_stage_upload(tmp_path, monkeypatch):
+    from app import ingest_runner as ir
+    from app import settings
+
+    content = tmp_path / "content"
+    content.mkdir()
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    upload = stage / "upload.txt"
+    upload.write_text("uploaded", encoding="utf-8")
+    script = tmp_path / "ingest_stub.py"
+    script.write_text(
+        "import os\n"
+        "print('run-id=' + os.environ.get('PW_RUN_ID', ''))\n"
+        "print('content-dir=' + os.environ.get('PW_CONTENT_DIR', ''))\n",
+        encoding="utf-8",
+    )
+    main_thread = threading.get_ident()
+    seen = {}
+
+    def fake_ensure_content_git(content_arg):
+        seen["ensure_thread"] = threading.get_ident()
+        seen["content"] = content_arg
+        return True, ""
+
+    def fake_preflight(options):
+        seen["preflight_thread"] = threading.get_ident()
+        seen["options"] = options
+        return True, "clean", []
+
+    async def run():
+        monkeypatch.setattr(settings, "STAGE_DIR", stage)
+        monkeypatch.setattr(ir, "CONTENT_DIR", content)
+        monkeypatch.setattr(ir, "INGEST_CMD", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+        monkeypatch.setattr(ir, "REBUILD_CMD", "")
+        monkeypatch.setattr(ir, "STUB", False)
+        monkeypatch.setattr(ir, "JOB_LOG_DIR", tmp_path / "logs")
+        monkeypatch.setattr(ir, "ensure_content_git", fake_ensure_content_git)
+        monkeypatch.setattr(ir, "preflight", fake_preflight)
+        job = ir.Job("runidjob")
+        await ir.run_job(job, str(upload), {"kind": "auto"})
+        return job
+
+    job = asyncio.run(run())
+
+    assert job.status == "done"
+    assert job.result == {"status": "done"}
+    assert not upload.exists()
+    assert f"run-id={job.id}" in job.visible_lines()
+    assert f"content-dir={content}" in job.visible_lines()
+    assert seen["content"] == content
+    assert seen["options"] == {"kind": "auto"}
+    assert seen["ensure_thread"] != main_thread
+    assert seen["preflight_thread"] != main_thread
+    assert "run-id=runidjob" in (tmp_path / "logs" / "runidjob.log").read_text(encoding="utf-8")
+
+
+def test_run_job_catches_unhandled_exception_ends_and_cleans_stage_upload(tmp_path, monkeypatch):
+    from app import ingest_runner as ir
+    from app import settings
+
+    content = tmp_path / "content"
+    content.mkdir()
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    upload = stage / "upload.txt"
+    upload.write_text("uploaded", encoding="utf-8")
+
+    def boom(_content):
+        raise RuntimeError("unexpected preflight crash")
+
+    async def run():
+        monkeypatch.setattr(settings, "STAGE_DIR", stage)
+        monkeypatch.setattr(ir, "CONTENT_DIR", content)
+        monkeypatch.setattr(ir, "JOB_LOG_DIR", tmp_path / "logs")
+        monkeypatch.setattr(ir, "ensure_content_git", boom)
+        job = ir.Job("crashjob")
+        await ir.run_job(job, str(upload), {"kind": "auto"})
+        return job
+
+    job = asyncio.run(run())
+
+    assert job.status == "error"
+    assert job.result["status"] == "error"
+    assert not upload.exists()
+    assert job.visible_lines()[-1] == "__END__"
+    durable = (tmp_path / "logs" / "crashjob.log").read_text(encoding="utf-8")
+    assert "unexpected preflight crash" in durable
+    assert "__END__" in durable
+
+
+def test_run_job_cancel_after_process_assignment_kills_ingest(tmp_path, monkeypatch):
+    from app import ingest_runner as ir
+
+    content = tmp_path / "content"
+    content.mkdir()
+    script = tmp_path / "sleep.py"
+    script.write_text("import time\nprint('started', flush=True)\ntime.sleep(30)\n", encoding="utf-8")
+    launched = {}
+
+    async def run():
+        monkeypatch.setattr(ir, "CONTENT_DIR", content)
+        monkeypatch.setattr(ir, "INGEST_CMD", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+        monkeypatch.setattr(ir, "REBUILD_CMD", "")
+        monkeypatch.setattr(ir, "STUB", False)
+        monkeypatch.setattr(ir, "ensure_content_git", lambda _content: (True, ""))
+        monkeypatch.setattr(ir, "preflight", lambda _options: (True, "clean", []))
+        original_create = asyncio.create_subprocess_exec
+
+        async def create_and_cancel(*args, **kwargs):
+            proc = await original_create(*args, **kwargs)
+            launched["proc"] = proc
+            launched["limit"] = kwargs.get("limit")
+            job.cancel_requested = True
+            return proc
+
+        monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", create_and_cancel)
+        job = ir.Job("cancelracejob")
+        await ir.run_job(job, str(tmp_path / "target.txt"), {"kind": "auto"})
+        return job
+
+    job = asyncio.run(run())
+
+    assert job.status == "canceled"
+    assert job.result == {"status": "canceled"}
+    assert launched["limit"] == 2**20
+    assert launched["proc"].returncode is not None
+    assert job.visible_lines()[-2:] == ["canceled by request", "__END__"]
+
+
 def test_terminal_jobs_are_reaped(monkeypatch):
     from app import ingest_runner as ir
 
@@ -389,6 +651,7 @@ def test_timeout_cleanup_kills_and_awaits_process_group(monkeypatch):
     from app import ingest_runner as ir
 
     async def run():
+        monkeypatch.setattr(ir, "PROCESS_TERMINATE_GRACE_S", 2)
         monkeypatch.setattr(ir, "PROCESS_CLEANUP_TIMEOUT_S", 2)
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -400,6 +663,76 @@ def test_timeout_cleanup_kills_and_awaits_process_group(monkeypatch):
         await ir._kill_process_group(proc, job, "test")
         assert proc.returncode is not None
         assert "did not exit" not in "\n".join(job.visible_lines())
+
+    asyncio.run(run())
+
+
+def test_timeout_cleanup_allows_sigterm_cleanup(monkeypatch, tmp_path):
+    from app import ingest_runner as ir
+
+    script = tmp_path / "term_cleanup.py"
+    marker = tmp_path / "started"
+    cleaned = tmp_path / "cleaned"
+    script.write_text(
+        "import pathlib, signal, sys, time\n"
+        f"marker = pathlib.Path({str(marker)!r})\n"
+        f"cleaned = pathlib.Path({str(cleaned)!r})\n"
+        "marker.write_text('started', encoding='utf-8')\n"
+        "def term(_sig, _frame):\n"
+        "    cleaned.write_text('cleaned', encoding='utf-8')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM, term)\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n",
+        encoding="utf-8",
+    )
+
+    async def run():
+        monkeypatch.setattr(ir, "PROCESS_TERMINATE_GRACE_S", 2)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            start_new_session=True,
+        )
+        deadline = time.time() + 2
+        while not marker.exists() and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        assert marker.exists()
+        job = ir.Job("termcleanupjob")
+        await ir._kill_process_group(proc, job, "test")
+        assert proc.returncode == 0
+        assert cleaned.read_text(encoding="utf-8") == "cleaned"
+        assert "SIGKILL" not in "\n".join(job.visible_lines())
+
+    asyncio.run(run())
+
+
+def test_timeout_cleanup_escalates_to_sigkill(monkeypatch, tmp_path):
+    from app import ingest_runner as ir
+
+    marker = tmp_path / "stubborn-ready"
+
+    async def run():
+        monkeypatch.setattr(ir, "PROCESS_TERMINATE_GRACE_S", 0.1)
+        monkeypatch.setattr(ir, "PROCESS_CLEANUP_TIMEOUT_S", 2)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import pathlib, signal, sys, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "pathlib.Path(sys.argv[1]).write_text('ready', encoding='utf-8'); "
+            "time.sleep(30)",
+            str(marker),
+            start_new_session=True,
+        )
+        deadline = time.time() + 2
+        while not marker.exists() and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        assert marker.exists()
+        job = ir.Job("stubbornkilljob")
+        await ir._kill_process_group(proc, job, "test")
+        assert proc.returncode is not None
+        assert "escalating to SIGKILL" in "\n".join(job.visible_lines())
 
     asyncio.run(run())
 
@@ -496,6 +829,25 @@ def test_ingest_media_alias_maps_to_video_kind(client, auth, monkeypatch):
     assert argv[-3:] == ["--kind", "video", "target"]
 
 
+def test_ingest_url_rejects_non_http_targets(client, auth, monkeypatch):
+    from app import ingest_runner as ir
+
+    calls = []
+
+    def fake_start_job(target, options):
+        calls.append((target, options))
+        return "should-not-start"
+
+    monkeypatch.setattr(ir, "start_job", fake_start_job)
+
+    for target in ("ftp://example.com/file", "file:///tmp/source.txt", "example.com/source"):
+        r = client.post("/ingest", json={"url": target, "options": {}}, headers=auth)
+        assert r.status_code == 400
+        assert "http:// or https://" in r.text
+
+    assert calls == []
+
+
 def test_json_routes_reject_malformed_or_non_object_payloads(client, auth):
     json_headers = {**auth, "Content-Type": "application/json"}
 
@@ -566,6 +918,54 @@ def test_mark_known_removes_vocab_item_from_review_queue(client, auth):
     assert all(i["id"] != item_id for i in queue)
 
 
+def test_review_after_mark_known_uses_first_review_path(client, auth):
+    add = client.post(
+        "/vocab",
+        json={"kind": "word", "lemma": "known-then-reviewed-test-word", "gloss": "known"},
+        headers=auth,
+    )
+    assert add.status_code == 200
+    item_id = add.json()["id"]
+    assert client.patch(f"/vocab/{item_id}", json={"status": "known"}, headers=auth).status_code == 200
+
+    reviewed = client.post(f"/review/{item_id}/grade", json={"grade": 3}, headers=auth)
+
+    assert reviewed.status_code == 200
+    item = next(i for i in client.get("/vocab", headers=auth).json() if i["id"] == item_id)
+    assert item["stability"] > 0
+    assert item["reps"] == 1
+
+
+def test_vocab_patch_can_clear_editor_fields(client, auth):
+    add = client.post(
+        "/vocab",
+        json={
+            "kind": "word",
+            "lemma": "clear-fields-test-word",
+            "reading": "old reading",
+            "pos": "noun",
+            "gloss": "old gloss",
+            "example": "old example",
+        },
+        headers=auth,
+    )
+    assert add.status_code == 200
+    item_id = add.json()["id"]
+
+    patch = client.patch(
+        f"/vocab/{item_id}",
+        json={"reading": "", "pos": "", "gloss": "", "example": ""},
+        headers=auth,
+    )
+
+    assert patch.status_code == 200
+    item = next(i for i in client.get("/vocab", headers=auth).json() if i["id"] == item_id)
+    assert item["reading"] == ""
+    assert item["pos"] == ""
+    assert item["gloss"] == ""
+    assert item["example"] == ""
+
+
 def test_duplicate_vocab_save_merges_new_context_without_resetting_schedule(client, auth):
     lemma = "context-merge-test-word"
     first = client.post(
@@ -623,6 +1023,63 @@ def test_review_grade_rejects_out_of_range_values(client, auth):
     assert ok.status_code == 200
 
 
+def test_review_elapsed_days_uses_local_date(monkeypatch, client, auth):
+    from app import db
+    from app.fsrs import Card
+    from app.routers import study
+
+    conn = db.connect()
+    try:
+        cur = conn.execute(
+            """INSERT INTO items(kind,norm_key,lemma,status,stability,difficulty,state,reps,lapses,due,last_review,created)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "word",
+                "word:local-date-elapsed",
+                "local-date-elapsed",
+                "learning",
+                2.0,
+                5.0,
+                1,
+                1,
+                0,
+                "2026-01-02",
+                "2026-01-02T07:30:00Z",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        item_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    seen = {}
+
+    def fake_schedule(card, grade, elapsed_days):
+        seen["elapsed_days"] = elapsed_days
+        return Card(stability=card.stability, difficulty=card.difficulty, state=1, reps=card.reps + 1, lapses=card.lapses), 2
+
+    original_tz = os.environ.get("TZ")
+    try:
+        monkeypatch.setattr(db, "today", lambda: dt.date(2026, 1, 2))
+        monkeypatch.setenv("TZ", "America/Los_Angeles")
+        if hasattr(time, "tzset"):
+            time.tzset()
+        monkeypatch.setattr(study, "schedule", fake_schedule)
+
+        r = client.post(f"/review/{item_id}/grade", json={"grade": 3}, headers=auth)
+
+        assert r.status_code == 200
+        assert seen["elapsed_days"] == 1
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
 def test_export_rejects_unsupported_formats(client, auth):
     assert client.get("/export?format=csv", headers=auth).status_code == 200
     r = client.get("/export?format=anki", headers=auth)
@@ -662,7 +1119,20 @@ def test_llm_health_runs_codex_provider(client, auth, monkeypatch, tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     codex = bin_dir / "codex"
-    codex.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+    codex.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        "out = ''\n"
+        "for i, arg in enumerate(args):\n"
+        "    if arg == '-o' and i + 1 < len(args):\n"
+        "        out = args[i + 1]\n"
+        "if out:\n"
+        "    pathlib.Path(out).write_text('ok\\n', encoding='utf-8')\n"
+        "else:\n"
+        "    print('ok')\n",
+        encoding="utf-8",
+    )
     codex.chmod(0o755)
     monkeypatch.delenv("LLM_CMD", raising=False)
     monkeypatch.setenv("PW_LLM_PROVIDER", "codex")
@@ -822,6 +1292,61 @@ def test_promote_into_human_zone(client, auth, content_dir):
     assert page2.count(f"<!-- anno:{a['id']} -->") == 1
 
 
+def test_promote_replaces_note_with_regex_replacement_literals():
+    from app import promote
+
+    aid = "an_regex"
+    page = (
+        "# Page\n\n<!-- human-zone -->\n\n"
+        "<!-- anno:an_regex -->\n> old\n<!-- /anno:an_regex -->\n\n"
+        "<!-- /human-zone -->\n"
+    )
+    note = "<!-- anno:an_regex -->\n> body with \\1 and \\g<0>\n<!-- /anno:an_regex -->"
+
+    updated = promote.insert_note(page, aid, note)
+
+    assert "\\1 and \\g<0>" in updated
+    assert updated.count("<!-- anno:an_regex -->") == 1
+
+
+def test_promote_commit_is_limited_to_promoted_page(client, auth, content_dir):
+    page = content_dir / "wiki" / "entities" / "Pathspec.md"
+    page.write_text(
+        "# Pathspec\n\n<!-- human-zone -->\n<!-- /human-zone -->\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(content_dir), "add", "wiki/entities/Pathspec.md"], check=True)
+    subprocess.run(["git", "-C", str(content_dir), "commit", "-q", "-m", "add pathspec page"], check=True)
+    staged = content_dir / "wiki" / "entities" / "Staged.md"
+    staged.write_text("# staged but unrelated\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(content_dir), "add", "wiki/entities/Staged.md"], check=True)
+    payload = _mk(quote="pathspec", prefix="", suffix="", start=0, end=8)
+    payload["body"] = "pathspec body"
+    a = client.post("/annotations", json=payload, headers=auth).json()
+
+    r = client.post(
+        f"/annotations/{a['id']}/promote",
+        json={"wiki_rel": "entities/Pathspec", "source_title": "Pathspec"},
+        headers=auth,
+    )
+
+    assert r.status_code == 200
+    committed = subprocess.run(
+        ["git", "-C", str(content_dir), "show", "--name-only", "--format=", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert committed == ["wiki/entities/Pathspec.md"]
+    staged_status = subprocess.run(
+        ["git", "-C", str(content_dir), "status", "--short", "--", "wiki/entities/Staged.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert staged_status.startswith("A  wiki/entities/Staged.md")
+
+
 def test_promote_rejects_bad_paths(client, auth):
     a = client.post("/annotations", json=_mk(quote="x", start=0, end=1), headers=auth).json()
     # missing wiki_rel
@@ -845,6 +1370,48 @@ def test_assist_modes_and_validation(client, auth):
         assert j["mode"] == mode and j.get("configured") is False  # no LLM in tests
     assert client.post("/assist", json={"text": "x", "mode": "bogus"}, headers=auth).status_code == 400
     assert client.post("/assist", json={"text": "", "mode": "explain"}, headers=auth).status_code == 400
+
+
+def test_assist_cache_stores_mode_in_context(client, auth, monkeypatch, tmp_path):
+    script = tmp_path / "llm_stub.py"
+    script.write_text("import sys\nsys.stdin.read()\nprint('local assist')\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_CMD", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+    monkeypatch.setenv("PW_LLM_MODEL", "test-local-model")
+
+    r = client.post(
+        "/assist",
+        json={"text": "assist cache context test", "mode": "summarize", "lang": "Japanese"},
+        headers=auth,
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["result"] == "local assist"
+    assert body["mode"] == "summarize"
+    assert body["cached"] is False
+
+    cached = client.post(
+        "/assist",
+        json={"text": "assist cache context test", "mode": "summarize", "lang": "Japanese"},
+        headers=auth,
+    ).json()
+    assert cached["cached"] is True
+    assert cached["mode"] == "summarize"
+
+    from app import db
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT context,lang,prompt_version,llm_provider,llm_model FROM translations WHERE translation=?",
+        ("local assist",),
+    ).fetchone()
+    conn.close()
+    assert dict(row) == {
+        "context": "summarize",
+        "lang": "Japanese",
+        "prompt_version": "assist:v1",
+        "llm_provider": "command",
+        "llm_model": "test-local-model",
+    }
 
 
 def test_translate_graceful_without_llm(client, auth):
@@ -881,11 +1448,12 @@ def test_translate_prefers_local_llm_command(client, auth, monkeypatch, tmp_path
     from app import db
     conn = db.connect()
     row = conn.execute(
-        "SELECT lang,prompt_version,llm_provider,llm_model FROM translations WHERE translation=?",
+        "SELECT context,lang,prompt_version,llm_provider,llm_model FROM translations WHERE translation=?",
         ("local translation",),
     ).fetchone()
     conn.close()
     assert dict(row) == {
+        "context": "translate",
         "lang": "Simplified Chinese",
         "prompt_version": "translate:v1",
         "llm_provider": "command",

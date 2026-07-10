@@ -85,8 +85,7 @@ Rules:
 DEFAULT_BACKEND = "gemini"
 DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
-    "codex": None,  # None → use codex's own default model, exactly like the text
-                    # LLM path (llm_client): one model to authenticate/manage.
+    "codex": "gpt-5-mini",
     "claude": "claude-haiku-4-5-20251001",
     "agy": "Gemini 3.5 Flash (Low)",  # cheap vision model; agy fronts Gemini/Claude/GPT
 }
@@ -396,9 +395,8 @@ def _dispatch_gemini(model: str, prompt: str, image: Path) -> str:
 def _dispatch_codex(model: str | None, prompt: str, image: Path) -> str:
     """Codex CLI: `codex exec [-m <model>] -i <path> -`, prompt on stdin.
 
-    Mirrors the text LLM path (llm_client): same sandbox/color flags, and no
-    forced model unless CAPTION_MODEL is set, so captioning reuses whatever model
-    codex is already configured with — one CLI to authenticate and manage."""
+    Mirrors the text LLM path sandbox/color flags. The caller passes a mini
+    default unless CAPTION_MODEL/--model overrides it."""
     cmd = ["codex", "exec", "--skip-git-repo-check",
            "--sandbox", "read-only", "--color", "never"]
     if model:

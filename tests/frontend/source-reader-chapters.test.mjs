@@ -13,13 +13,14 @@ describe('source reader chapter helpers', () => {
     { id: 'p-b', section: 'Intro', section_id: 's-intro', text: 'B' },
     { id: 'p-c', section: '第一章', section_id: 's-one', text: 'C' },
     { id: 'p-d', section: 'Intro', section_id: 's-intro', text: 'D' },
+    { id: 'p-e', section: 'A = B & C', section_id: 's-symbols', text: 'E' },
   ];
 
   it('groups consecutive blocks and disambiguates duplicate section routes', () => {
     const chapters = sourceReaderSections(blocks);
 
-    assert.deepEqual(chapters.map((chapter) => chapter.title), ['Intro', '第一章', 'Intro']);
-    assert.deepEqual(chapters.map((chapter) => chapter.id), ['s-intro-1', 's-one', 's-intro-3']);
+    assert.deepEqual(chapters.map((chapter) => chapter.title), ['Intro', '第一章', 'Intro', 'A = B & C']);
+    assert.deepEqual(chapters.map((chapter) => chapter.id), ['s-intro-1', 's-one', 's-intro-3', 's-symbols']);
     assert.equal(chapters[0].block_count, 2);
   });
 
@@ -29,9 +30,14 @@ describe('source reader chapter helpers', () => {
     assert.equal(chapterForSourceAnchor(chapters, '第一章').id, 's-one');
     assert.equal(chapterForSourceAnchor(chapters, 'p-d').id, 's-intro-3');
     assert.equal(chapterForSourceAnchor(chapters, '#b=p-d').id, 's-intro-3');
+    assert.equal(chapterForSourceAnchor(chapters, '#sec=A%20%3D%20B%20%26%20C').id, 's-symbols');
     assert.equal(
       sourceReaderHrefForAnchor('S1', chapters, '第一章'),
       '/sources/S1/read/s-one#sec=%E7%AC%AC%E4%B8%80%E7%AB%A0',
+    );
+    assert.equal(
+      sourceReaderHrefForAnchor('S1', chapters, 'A = B & C'),
+      '/sources/S1/read/s-symbols#sec=A%20%3D%20B%20%26%20C',
     );
   });
 });

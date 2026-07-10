@@ -1,5 +1,7 @@
 import importlib.util
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import types
@@ -9,6 +11,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
+from _util import default_vault_root  # noqa: E402
 
 INGEST_SPEC = importlib.util.spec_from_file_location("ingest_mod", ROOT / "ingest.py")
 ingest = importlib.util.module_from_spec(INGEST_SPEC)
@@ -261,6 +264,218 @@ class SectionSizesTests(unittest.TestCase):
         self.assertEqual(sizes["Cover"], 0)
         self.assertEqual(sizes["Empty"], 0)
         self.assertGreater(sizes["第一节"], 20)
+
+
+class PipelineRecoveryTests(unittest.TestCase):
+    def test_default_vault_root_prefers_pw_content_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            pw = root / "pw-content"
+            legacy = root / "legacy-content"
+            pw.mkdir()
+            legacy.mkdir()
+            with patch.dict(os.environ, {
+                "PW_CONTENT_DIR": str(pw),
+                "VAULT_CONTENT_DIR": str(legacy),
+            }):
+                self.assertEqual(default_vault_root(root / "pipeline"), pw.resolve())
+
+    def test_log_prefix_includes_run_id(self):
+        with patch.dict(os.environ, {"PW_RUN_ID": "ab12cd"}):
+            self.assertEqual(ingest._log_prefix(), "ingest[ab12cd]")
+        with patch.dict(os.environ, {"PW_RUN_ID": ""}):
+            self.assertEqual(ingest._log_prefix(), "ingest")
+
+    def test_detects_extraction_truncation_marker(self):
+        self.assertTrue(ingest._has_extraction_truncation_marker(
+            "body\n\n[... truncated at 100000 chars ...]\n"))
+        self.assertFalse(ingest._has_extraction_truncation_marker("body without marker"))
+
+    def test_sigterm_handler_uses_die_cleanup_path(self):
+        old_terminating = ingest._TERMINATING
+        ingest._TERMINATING = False
+
+        def fake_die(msg):
+            raise RuntimeError(msg)
+
+        try:
+            with patch.object(ingest, "die", fake_die):
+                with self.assertRaisesRegex(RuntimeError, "terminated by SIGTERM"):
+                    ingest._handle_termination(signal.SIGTERM, None)
+            self.assertTrue(ingest._TERMINATING)
+        finally:
+            ingest._TERMINATING = old_terminating
+
+    def test_sigint_handler_uses_same_cleanup_path(self):
+        old_terminating = ingest._TERMINATING
+        ingest._TERMINATING = False
+
+        def fake_die(msg):
+            raise RuntimeError(msg)
+
+        try:
+            with patch.object(ingest, "die", fake_die):
+                with self.assertRaisesRegex(RuntimeError, "terminated by SIGINT"):
+                    ingest._handle_termination(signal.SIGINT, None)
+            self.assertTrue(ingest._TERMINATING)
+        finally:
+            ingest._TERMINATING = old_terminating
+
+    def test_section_label_validation_rejects_log_breakers(self):
+        self.assertEqual(ingest.validate_section_label("第1章"), "第1章")
+        with self.assertRaises(SystemExit):
+            ingest.validate_section_label("bad\nlabel")
+        with self.assertRaises(SystemExit):
+            ingest.validate_section_label("bad\tlabel")
+        with self.assertRaises(SystemExit):
+            ingest.validate_section_label("x" * (ingest.SECTION_LABEL_MAX_CHARS + 1))
+
+    def test_whole_source_already_logged_only_matches_unsectioned_marker(self):
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                (vault / ".wiki").mkdir()
+                sid = "01BOOKAAAAAAAAAAAAAAAAAAAA"
+                (vault / ".wiki" / "log.md").write_text(
+                    f"2026-01-01T00:00:00Z  {sid}#第1章  pages: wiki/a.md\n"
+                    f"2026-01-01T00:00:00Z  01OTHERAAAAAAAAAAAAAAAAAAA  pages: wiki/b.md\n",
+                    encoding="utf-8",
+                )
+                self.assertFalse(ingest.whole_source_already_logged(sid))
+                with open(vault / ".wiki" / "log.md", "a", encoding="utf-8") as f:
+                    f.write(f"2026-01-01T00:00:00Z  {sid}  pages: wiki/c.md\n")
+                self.assertTrue(ingest.whole_source_already_logged(sid))
+        finally:
+            os.chdir(old_cwd)
+
+    def test_images_only_log_does_not_mark_whole_source_done(self):
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                (vault / ".wiki").mkdir()
+                sid = "01BOOKAAAAAAAAAAAAAAAAAAAA"
+                lines = [
+                    f"2026-01-01T00:00:00Z  {sid}  pages: (images-only)",
+                ]
+                (vault / ".wiki" / "log.md").write_text(lines[0] + "\n", encoding="utf-8")
+
+                self.assertFalse(ingest.whole_source_already_logged(sid))
+                self.assertEqual(ingest._source_log_progress(lines, sid), (set(), False))
+
+                lines.append(f"2026-01-01T00:00:01Z  {sid}  pages: wiki/entities/x.md")
+                with open(vault / ".wiki" / "log.md", "a", encoding="utf-8") as f:
+                    f.write(lines[-1] + "\n")
+                self.assertTrue(ingest.whole_source_already_logged(sid))
+                self.assertEqual(ingest._source_log_progress(lines, sid), (set(), True))
+        finally:
+            os.chdir(old_cwd)
+
+    def test_collect_candidates_skips_alias_index_for_empty_or_small_vault(self):
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                (vault / "wiki" / "entities").mkdir(parents=True)
+                (vault / "wiki" / "topics").mkdir(parents=True)
+                (vault / "wiki" / "entities" / "A.md").write_text("# A\n", encoding="utf-8")
+                out_file = vault / "candidates.txt"
+                keywords_file = vault / "keywords.txt"
+                keywords_file.write_text("A\n", encoding="utf-8")
+                with patch.object(ingest, "run_stream") as run_stream:
+                    ingest.collect_candidates(str(keywords_file), str(out_file), 20)
+                run_stream.assert_not_called()
+                self.assertEqual(out_file.read_text(encoding="utf-8"), "wiki/entities/A.md\n")
+
+                (vault / "wiki" / "entities" / "A.md").unlink()
+                ingest.collect_candidates(str(keywords_file), str(out_file), 20)
+                self.assertEqual(out_file.read_text(encoding="utf-8"), "")
+        finally:
+            os.chdir(old_cwd)
+
+    def test_cleanup_removes_only_registered_new_untracked_artifacts(self):
+        old_cwd = os.getcwd()
+        old_files = set(ingest._RUN_CREATED_FILES)
+        old_dirs = set(ingest._RUN_CREATED_DIRS)
+        old_snapshot = set(ingest._PREEXISTING_SOURCE_PATHS)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                subprocess.run(["git", "init", "-q"], check=True)
+                (vault / "sources").mkdir()
+                (vault / "sources" / "preexisting.md").write_text("keep", encoding="utf-8")
+                (vault / "sources" / "tracked.md").write_text("keep", encoding="utf-8")
+                subprocess.run(["git", "add", "sources/tracked.md"], check=True)
+
+                ingest._RUN_CREATED_FILES.clear()
+                ingest._RUN_CREATED_DIRS.clear()
+                ingest._PREEXISTING_SOURCE_PATHS = ingest._source_path_snapshot()
+
+                (vault / "sources" / "new.txt").write_text("remove", encoding="utf-8")
+                (vault / "sources" / "new.txt.md").write_text("remove", encoding="utf-8")
+                assets = vault / "sources" / "new.txt.assets"
+                assets.mkdir()
+                (assets / "_manifest.md").write_text("remove", encoding="utf-8")
+
+                ingest.SRC.clear()
+                ingest.SRC.update({"SIDECAR": "sources/new.txt.md",
+                                   "AUDIT_JSON": "sources/new.txt.transcript.json"})
+                (vault / "sources" / "new.txt.transcript.json").write_text("remove", encoding="utf-8")
+                ingest._register_new_source_artifacts("sources/new.txt")
+                ingest._register_run_created_file("sources/preexisting.md")
+                ingest._register_run_created_file("sources/tracked.md")
+                ingest._cleanup_run_created_artifacts()
+
+                self.assertFalse((vault / "sources" / "new.txt").exists())
+                self.assertFalse((vault / "sources" / "new.txt.md").exists())
+                self.assertFalse((vault / "sources" / "new.txt.transcript.json").exists())
+                self.assertFalse(assets.exists())
+                self.assertTrue((vault / "sources" / "preexisting.md").exists())
+                self.assertTrue((vault / "sources" / "tracked.md").exists())
+        finally:
+            os.chdir(old_cwd)
+            ingest._RUN_CREATED_FILES.clear()
+            ingest._RUN_CREATED_FILES.update(old_files)
+            ingest._RUN_CREATED_DIRS.clear()
+            ingest._RUN_CREATED_DIRS.update(old_dirs)
+            ingest._PREEXISTING_SOURCE_PATHS = old_snapshot
+
+    def test_post_apply_failure_rollback_clears_staged_wiki_changes(self):
+        old_cwd = os.getcwd()
+        old_flag = ingest._ROLLBACK_ON_FAILURE
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                subprocess.run(["git", "init", "-q"], check=True)
+                subprocess.run(["git", "config", "user.email", "t@t"], check=True)
+                subprocess.run(["git", "config", "user.name", "t"], check=True)
+                (vault / "wiki" / "entities").mkdir(parents=True)
+                (vault / ".wiki").mkdir()
+                page = vault / "wiki" / "entities" / "x.md"
+                page.write_text("# X\n", encoding="utf-8")
+                log = vault / ".wiki" / "log.md"
+                log.write_text("", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-qm", "init"], check=True)
+
+                page.write_text("# X\n\n[src:01NEWAAAAAAAAAAAAAAAAAAAA]\n", encoding="utf-8")
+                log.write_text("2026-01-01T00:00:00Z  01NEWAAAAAAAAAAAAAAAAAAAA  pages: wiki/entities/x.md\n",
+                               encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                ingest._ROLLBACK_ON_FAILURE = True
+                ingest._rollback_after_apply_failure()
+                status = subprocess.run(["git", "status", "--short"], text=True,
+                                        capture_output=True, check=True).stdout
+                self.assertEqual(status, "")
+        finally:
+            ingest._ROLLBACK_ON_FAILURE = old_flag
+            os.chdir(old_cwd)
 
 
 if __name__ == "__main__":

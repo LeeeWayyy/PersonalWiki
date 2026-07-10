@@ -12,7 +12,7 @@
 # below to match, then re-run.
 
 set -euo pipefail
-# Layout: schema.md + scripts/ live in the tooling root. The test creates a
+# Layout: prompts/ + scripts/ live in the tooling root. The test creates a
 # throwaway content repo and runs from it, mirroring how ingest invokes
 # build-prompt.py with cwd = content/.
 TOOLING_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -78,8 +78,6 @@ build_prompt() {
   local out="$2"
   {
     cat "$TOOLING_ROOT/prompts/ingest.md"
-    printf '\n\n---\n\n## SCHEMA\n'
-    cat "$TOOLING_ROOT/schema.md"
     printf '\n\n---\n\n## SOURCE_META\n'
     printf 'source_id: %s\nsha256: %s\nadded: %s\norigin_type: %s\norigin_ref: %s\nbasename: %s\n' \
       "$SOURCE_ID" "$SHA256" "$ADDED" "$ORIGIN_TYPE" "$ORIGIN_REF" "$DEST_BASENAME"

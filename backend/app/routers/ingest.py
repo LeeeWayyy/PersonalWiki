@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -57,6 +58,9 @@ async def ingest(
         opts = normalize_ingest_options(body.get("options"))
         if not target:
             raise HTTPException(400, "provide a file or a url")
+        parsed = urlparse(target)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(400, "url must start with http:// or https://")
     job_id = ir.start_job(target, opts)
     return {"job_id": job_id}
 

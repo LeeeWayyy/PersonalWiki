@@ -16,6 +16,17 @@ SPEC.loader.exec_module(build_blocks)
 
 
 class BuildBlocksMobiTests(unittest.TestCase):
+    def test_epub_skip_docs_match_path_components_not_substrings(self):
+        self.assertTrue(build_blocks.should_skip_epub_doc("OPS/nav.xhtml"))
+        self.assertTrue(build_blocks.should_skip_epub_doc("OPS/toc.xhtml"))
+        self.assertTrue(build_blocks.should_skip_epub_doc("OPS/title-page.xhtml"))
+        self.assertTrue(build_blocks.should_skip_epub_doc("OPS/title_page.xhtml"))
+        self.assertTrue(build_blocks.should_skip_epub_doc("OPS/titlepage.xhtml"))
+
+        self.assertFalse(build_blocks.should_skip_epub_doc("OPS/tocqueville.xhtml"))
+        self.assertFalse(build_blocks.should_skip_epub_doc("OPS/navigating/chapter.xhtml"))
+        self.assertFalse(build_blocks.should_skip_epub_doc("OPS/title_ix.xhtml"))
+
     def test_main_emits_blocks_for_mobi_converted_to_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

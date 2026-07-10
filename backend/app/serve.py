@@ -49,12 +49,10 @@ def configure_environment(
             env,
             validate_content=validate_content,
             error_cls=ServeConfigError,
-            content_prefix="backend: ",
             content_hint=(
                 "Set PW_CONTENT_DIR=/abs/path/to/wiki in backend/.env, "
                 "or run python3 scripts/vendor_content.py."
             ),
-            content_hint_indent="         ",
         )
     except OSError as exc:
         raise ServeConfigError(f"backend: failed to prepare backend/.env: {exc}") from exc

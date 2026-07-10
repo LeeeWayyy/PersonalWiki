@@ -7,10 +7,9 @@ FSRS spaced repetition** and a **source reader with annotations**. The vault
 content lives in a configurable local wiki folder (`PW_CONTENT_DIR`), so each
 machine/user can use different private content while sharing the same app code.
 Served locally on your Mac, reached only by you over Tailscale. See
-[`docs/LOCAL-WIKI-FOLDER-ARCHITECTURE.md`](./docs/LOCAL-WIKI-FOLDER-ARCHITECTURE.md),
-[`docs/PLAN.md`](./docs/PLAN.md), and
-[`docs/SOURCE-READER-DESIGN.md`](./docs/SOURCE-READER-DESIGN.md) for the full design +
-review history.
+[`pipeline/schema.md`](./pipeline/schema.md) for the current vault and ingest
+contracts, and [`docs/SHELL-TO-LOCAL-APP-MIGRATION.md`](./docs/SHELL-TO-LOCAL-APP-MIGRATION.md)
+for the runtime migration notes.
 
 ## What works today
 
@@ -23,21 +22,21 @@ review history.
   conflicts.
 - **Search** — Pagefind, full-text, with built-in CJK segmentation (verified on
   the Chinese vault).
-- **Ingest console** (`/ingest`) — add a file or URL, pick options, run the
-  pipeline, watch live logs over SSE, auto-rebuild on success.
+- **Ingest console** (dashboard/root page, `/`) — add a file or URL, pick
+  options, run the pipeline, watch live logs over SSE, auto-rebuild on success.
 - **Language reader** (`/reader`) — Miraa-style immersion reading: sentence-aligned
   bilingual text, furigana ruby, tap-a-word dictionary sheet with save-to-bank,
   per-sentence grammar + on-demand translation, new-word highlighting, and a reading
   toolbar (furigana / translation-mode / font size). Renders from a structured
   `_reading/<id>.reading.json` — emitted by the ingest pipeline
-  (`generate-language-pages.py`, now updated) or by the `scripts/build-reading.py`
-  fallback (fugashi) over committed data.
+  (`generate-language-pages.py`).
 - **Review** (`/reader/review`) — FSRS spaced repetition over your saved items.
 - **Source reader + annotations** (`/sources/<id>/read`) — read the original
   source in-app (epub/mobi/pdf extracted into blocks, or language-source text), select
   text to highlight/comment, a marginalia rail, and `[src:]` citation chips that
   deep-link into the exact chapter. Notes live in the backend (private, fail-closed
-  auth). See [`docs/SOURCE-READER-DESIGN.md`](./docs/SOURCE-READER-DESIGN.md).
+  auth). The reader block/citation contract is covered by
+  [`pipeline/schema.md`](./pipeline/schema.md).
 - **Backend** — ingest control plane (preflight dirty-tree guard, single
   serialized lock, leftover-artifact detection, per-job timeout, SSE), the
   SQLite word bank, FSRS scheduler, annotations store, CSV/Anki export, on-demand
@@ -143,11 +142,10 @@ pipeline/ingest.py ──► PW_CONTENT_DIR (local wiki repo — private, never 
 
 ## Still needs your Mac / credentials (plan boundaries)
 
-1. **Language `_reading` sidecar** — the reader upgrades to the pipeline's
-   structured `_reading/<id>.reading.json` when present, and otherwise falls back to
-   the committed vocab/grammar (via `scripts/build-reading.py`). Reconcile
-   `pipeline/generate-language-pages.py` with `pipeline/schema.md` before relying on the
-   language module (plan §3a).
+1. **Language `_reading` sidecar** — the pipeline's structured
+   `_reading/<id>.reading.json` is the authoritative reader contract. Legacy
+   `_vocab`/`_grammar` markdown is no longer used by the app; re-ingest old
+   language sources with `--profile lang` to generate current reader JSON.
 2. **codex / LLM auth** — `PW_LLM_PROVIDER=codex` must run non-interactively
    under a daemon. If local Codex auth is not viable, set `LLM_CMD` to a custom
    stdin-to-stdout command or manually enable the OpenAI-compatible backup with

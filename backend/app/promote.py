@@ -11,8 +11,10 @@ so it can't race an ingest commit). Pure helpers (`render_note`, `insert_note`)
 are kept side-effect-free so they can be unit-tested without a repo.
 """
 from __future__ import annotations
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from urllib.parse import quote as _q
 
@@ -93,7 +95,7 @@ def insert_note(page_text: str, aid: str, note_md: str) -> str:
     """
     existing = _anno_block_re(aid)
     if existing.search(page_text):
-        return existing.sub("\n" + note_md + "\n", page_text)
+        return existing.sub(lambda _m: "\n" + note_md + "\n", page_text)
 
     if HUMAN_CLOSE in page_text:
         idx = page_text.index(HUMAN_CLOSE)
@@ -133,11 +135,28 @@ def promote_to_page(anno: dict, source_title: str, content_dir: Path, wiki_rel: 
     updated = insert_note(original, aid, note_md)
     committed = False
     if updated != original:
-        path.write_text(updated, encoding="utf-8")
+        _atomic_write_text(path, updated)
         committed = _git_commit(content_dir, path, aid, wiki_rel)
     href = "/wiki/" + wiki_rel.strip("/").removesuffix(".md")
     return {"ok": True, "wiki_rel": wiki_rel, "href": href,
             "created_zone": created_zone, "committed": committed}
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with open(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _git_commit(content_dir: Path, path: Path, aid: str, wiki_rel: str) -> bool:
@@ -155,7 +174,7 @@ def _git_commit(content_dir: Path, path: Path, aid: str, wiki_rel: str) -> bool:
         if st.returncode == 0:
             return False
         subprocess.run(["git", "-C", str(content_dir), "commit", "-m",
-                        f"human-zone: promote annotation {aid} → wiki/{wiki_rel}"],
+                        f"human-zone: promote annotation {aid} → wiki/{wiki_rel}", "--", rel],
                        check=True, capture_output=True, text=True, timeout=30)
         return True
     except subprocess.CalledProcessError as e:  # noqa

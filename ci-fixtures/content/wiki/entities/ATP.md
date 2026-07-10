@@ -1,6 +1,6 @@
 ---
 type: Entity
-aliases: [Adenosine triphosphate]
+aliases: [Adenosine triphosphate, Masse]
 tags: [biology/energy]
 sources: [S1FIXTURE000000000000000000]
 ---

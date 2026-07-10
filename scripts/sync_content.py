@@ -190,18 +190,6 @@ def _run_post_builders(root: Path, vault: Path, env: Mapping[str, str], log: Cal
     builder_env = dict(env)
     builder_env["PW_VAULT"] = str(vault)
 
-    build_reading = root / "scripts" / "build-reading.py"
-    uv = shutil.which("uv")
-    if uv:
-        _run_best_effort([uv, "run", str(build_reading)], builder_env, "sync: build-reading skipped", log)
-    else:
-        _run_best_effort(
-            [sys.executable, str(build_reading)],
-            builder_env,
-            "sync: build-reading skipped (install fugashi unidic-lite, or use uv)",
-            log,
-        )
-
     build_blocks = root / "scripts" / "build-blocks.py"
     _run_best_effort([sys.executable, str(build_blocks)], builder_env, "sync: build-blocks skipped", log)
 

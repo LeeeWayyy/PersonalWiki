@@ -22,39 +22,46 @@ import signal
 import sys
 import uuid
 import asyncio
+import logging
 import subprocess
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
+
+from . import settings
 
 REPO = Path(__file__).resolve().parents[2]  # personal_wiki root
 SCRIPTS_DIR = REPO / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+import app_config  # noqa: E402
 from vendor_content import init_git_snapshot, init_empty_content  # noqa: E402
 
 
-def _repo_relative_path(env_name: str, default: Path) -> Path:
-    raw = os.environ.get(env_name)
-    path = Path(raw) if raw else default
-    return path if path.is_absolute() else (REPO / path).resolve()
-
-
-CONTENT_DIR = _repo_relative_path("PW_CONTENT_DIR", REPO / "content")      # local wiki folder
+CONTENT_DIR = app_config.content_dir(REPO).expanduser().resolve(strict=False)      # local wiki folder
 DEFAULT_INGEST_SCRIPT = REPO / "pipeline" / "ingest.py"
 INGEST_CMD = os.environ.get("INGEST_CMD", f"python3 {shlex.quote(str(DEFAULT_INGEST_SCRIPT))}")
 REBUILD_CMD = os.environ.get("REBUILD_CMD", "")  # e.g. "npm --prefix /path/to/personal_wiki run build"
 JOB_TIMEOUT_S = 1800
 PROCESS_CLEANUP_TIMEOUT_S = 10
+PROCESS_TERMINATE_GRACE_S = 5
 JOB_LOG_LIMIT = 2000
 JOB_TTL_S = 86400
+DATA_DIR = app_config.abs_path(REPO, os.environ.get("PW_DATA_DIR") or str(REPO / "backend" / "data")).resolve(strict=False)
+JOB_LOG_DIR = DATA_DIR / "logs"
 STUB = os.environ.get("PW_INGEST_STUB") == "1"
 AUTO_INIT_GIT = os.environ.get("PW_INGEST_NO_AUTO_GIT") != "1"
 
 LOCK = asyncio.Lock()
 JOBS: dict[str, "Job"] = {}
+TERMINAL_STATUSES = {"blocked", "done", "error", "canceled"}
+LOGGER = logging.getLogger(__name__)
 
+# Keep these backend preflight constants next to the guard while ingest.py lacks
+# a stable --preflight CLI. They intentionally mirror ingest.py's dirty scopes.
 _WATCHED = ("wiki/", "sources/", ".wiki/log.md")
 _LANG_WATCHED = ("lang/",)
 _LEFTOVER = re.compile(r"\.(rejected|failed(\.\d+)?|apply-err(\.\d+)?)$")
@@ -76,8 +83,11 @@ class Job:
         self.next_seq = 0
         self.result: dict = {}
         self.process: asyncio.subprocess.Process | None = None
+        self.task: asyncio.Task | None = None
         self.cancel_requested = False
         self.ended = False
+        self.log_path = JOB_LOG_DIR / f"{job_id}.log"
+        self.log_failed = False
 
     def emit(self, line: str):
         if self.ended:
@@ -85,6 +95,22 @@ class Job:
         self.updated_at = time.time()
         self.lines.append((self.next_seq, line))
         self.next_seq += 1
+        self._append_log_line(line)
+
+    def _append_log_line(self, line: str) -> None:
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as f:
+                f.write(f"{_log_timestamp()} {line}\n")
+        except Exception as e:  # noqa
+            if not self.log_failed:
+                LOGGER.warning(
+                    "failed to append job log job_id=%s path=%s: %s",
+                    self.id,
+                    self.log_path,
+                    e,
+                )
+                self.log_failed = True
 
     @property
     def dropped_lines(self) -> int:
@@ -108,16 +134,33 @@ class Job:
             return
         self.status = "canceled"
         self.result = {"status": "canceled"}
+        LOGGER.info("ingest job terminal job_id=%s status=canceled", self.id)
         self.emit("canceled by request")
         self.emit("__END__")
         self.ended = True
 
+    def finish_terminal(self, status: str, result: dict, lines: list[str] | None = None) -> None:
+        if self.ended:
+            return
+        self.status = status
+        self.result = result
+        LOGGER.info("ingest job terminal job_id=%s status=%s", self.id, status)
+        for line in lines or []:
+            self.emit(line)
+        self.emit("__END__")
+        self.ended = True
+
+
+def _log_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 def reap_jobs(now: float | None = None) -> None:
     now = time.time() if now is None else now
-    terminal = {"blocked", "done", "error", "canceled"}
     for job_id, job in list(JOBS.items()):
-        if job.status in terminal and now - job.updated_at > JOB_TTL_S:
+        if job.status in TERMINAL_STATUSES and now - job.updated_at > JOB_TTL_S:
+            # Durable job logs are intentionally kept as an audit trail after
+            # in-memory job metadata is reaped.
             JOBS.pop(job_id, None)
 
 
@@ -184,8 +227,8 @@ def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
         return False, f"wiki folder is not a git repo ({content}) — ingest needs git so it can commit changes", []
     try:
         result = subprocess.run(
-            ["git", "-C", str(content), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=30,
+            ["git", "-C", str(content), "-c", "core.quotepath=false", "status", "--porcelain"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
     except Exception as e:  # noqa
         return False, f"git status failed: {e}", []
@@ -243,6 +286,17 @@ async def _kill_process_group(proc: asyncio.subprocess.Process, job: Job, label:
     if proc.returncode is not None:
         return
     try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:  # noqa
+        proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=PROCESS_TERMINATE_GRACE_S)
+        return
+    except asyncio.TimeoutError:
+        job.emit(f"warn: {label} did not exit after SIGTERM; escalating to SIGKILL")
+    if proc.returncode is not None:
+        return
+    try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except Exception:  # noqa
         proc.kill()
@@ -266,120 +320,177 @@ async def cancel_job(job_id: str) -> Job | None:
     return job
 
 
+def _staged_target_path(target: str) -> Path | None:
+    if urlparse(target).scheme:
+        return None
+    target_path = Path(target)
+    if not target_path.is_absolute():
+        return None
+    try:
+        target_resolved = target_path.resolve(strict=False)
+        stage_resolved = settings.STAGE_DIR.resolve(strict=False)
+        target_resolved.relative_to(stage_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return target_path
+
+
+def _cleanup_staged_target(target: str, job_id: str) -> None:
+    target_path = _staged_target_path(target)
+    if target_path is None:
+        return
+    try:
+        if target_path.is_file() or target_path.is_symlink():
+            target_path.unlink(missing_ok=True)
+    except Exception as e:  # noqa
+        LOGGER.warning(
+            "failed to remove staged ingest upload job_id=%s path=%s: %s",
+            job_id,
+            target_path,
+            e,
+        )
+
+
 async def run_job(job: Job, target: str, options: dict):
-    async with LOCK:
-        if job.cancel_requested:
-            job.finish_canceled()
-            return
-        job.status = "running"
-        git_ok, git_msg = ensure_content_git(CONTENT_DIR)
-        if not git_ok:
-            job.status = "blocked"
-            job.emit("BLOCKED: " + git_msg)
-            job.result = {"status": "blocked", "offending": []}
-            job.emit("__END__")
-            return
-        if git_msg:
-            job.emit(git_msg)
-        ok, msg, offending = preflight(options)
-        if not ok:
-            job.status = "blocked"
-            job.emit("BLOCKED: " + msg)
-            for p in offending:
-                job.emit("  · " + p)
-            job.result = {"status": "blocked", "offending": offending}
-            job.emit("__END__")
-            return
-
-        if job.cancel_requested:
-            job.finish_canceled()
-            return
-
-        job.emit(f"preflight: clean · target={target} · opts={json.dumps(options)}")
-
-        if STUB:
-            for step in ["sidecar", "extract text", "keyword pre-pass",
-                         "LLM diff", "lint", "commit"]:
-                if job.cancel_requested:
-                    job.finish_canceled()
-                    return
-                await asyncio.sleep(0.2)
-                job.emit(f"[stub] {step} ✓")
-            job.status = "done"
-            job.result = {"status": "done", "stub": True}
-            job.emit("__END__")
-            return
-
-        argv = _build_argv(target, options)
-        job.emit("$ " + " ".join(shlex.quote(a) for a in argv))
-        proc_env = {**os.environ, "VAULT_CONTENT_DIR": str(CONTENT_DIR), "PYTHONUNBUFFERED": "1"}
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv, cwd=str(CONTENT_DIR),  # pipeline runs with cwd = the local wiki repo
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                env=proc_env,
-                start_new_session=True,
-            )
-            job.process = proc
-        except FileNotFoundError as e:
-            job.status = "error"
-            job.emit(f"error: cannot launch ingest ({e})")
-            job.emit("__END__")
-            return
-        try:
-            rc = await _stream_until_exit(proc, job)
-        except asyncio.TimeoutError:
-            await _kill_process_group(proc, job, "ingest")
-            job.status = "error"
-            job.emit(f"error: ingest produced no output for {JOB_TIMEOUT_S}s — killed")
-            job.emit("__END__")
-            return
-        finally:
-            if job.process is proc:
-                job.process = None
-
-        if job.cancel_requested:
-            job.finish_canceled()
-            return
-
-        if rc != 0:
-            job.status = "error"
-            job.emit(f"ingest exited with code {rc}")
-            job.result = {"status": "error", "code": rc}
-            job.emit("__END__")
-            return
-
-        job.emit("ingest committed ✓")
-        if REBUILD_CMD:
-            job.emit("$ " + REBUILD_CMD)
-            rp = await asyncio.create_subprocess_shell(
-                REBUILD_CMD, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True)
-            job.process = rp
-            try:
-                rebuild_rc = await _stream_until_exit(rp, job)
-            except asyncio.TimeoutError:
-                await _kill_process_group(rp, job, "rebuild")
-                job.status = "error"
-                job.emit(f"error: rebuild produced no output for {JOB_TIMEOUT_S}s — killed")
-                job.emit("__END__")
-                return
-            finally:
-                if job.process is rp:
-                    job.process = None
+    try:
+        async with LOCK:
             if job.cancel_requested:
                 job.finish_canceled()
                 return
-            if rebuild_rc != 0:
-                job.status = "error"
-                job.emit(f"rebuild exited with code {rebuild_rc}")
-                job.result = {"status": "error", "rebuild_code": rebuild_rc}
-                job.emit("__END__")
+            job.status = "running"
+            LOGGER.info("ingest job start job_id=%s target=%s options=%s", job.id, target, options)
+            git_ok, git_msg = await asyncio.to_thread(ensure_content_git, CONTENT_DIR)
+            if job.cancel_requested:
+                job.finish_canceled()
                 return
-            job.emit("site rebuilt ✓")
-        job.status = "done"
-        job.result = {"status": "done"}
-        job.emit("__END__")
+            if not git_ok:
+                job.finish_terminal("blocked", {"status": "blocked", "offending": []}, ["BLOCKED: " + git_msg])
+                return
+            if git_msg:
+                job.emit(git_msg)
+            ok, msg, offending = await asyncio.to_thread(preflight, options)
+            if job.cancel_requested:
+                job.finish_canceled()
+                return
+            if not ok:
+                job.finish_terminal(
+                    "blocked",
+                    {"status": "blocked", "offending": offending},
+                    ["BLOCKED: " + msg, *[f"  · {p}" for p in offending]],
+                )
+                return
+
+            if job.cancel_requested:
+                job.finish_canceled()
+                return
+
+            job.emit(f"preflight: clean · target={target} · opts={json.dumps(options)}")
+
+            if STUB:
+                for step in ["sidecar", "extract text", "keyword pre-pass",
+                             "LLM diff", "lint", "commit"]:
+                    if job.cancel_requested:
+                        job.finish_canceled()
+                        return
+                    await asyncio.sleep(0.2)
+                    job.emit(f"[stub] {step} ✓")
+                job.finish_terminal("done", {"status": "done", "stub": True})
+                return
+
+            argv = _build_argv(target, options)
+            job.emit("$ " + " ".join(shlex.quote(a) for a in argv))
+            proc_env = {
+                **os.environ,
+                "PW_CONTENT_DIR": str(CONTENT_DIR),
+                "VAULT_CONTENT_DIR": str(CONTENT_DIR),
+                "PYTHONUNBUFFERED": "1",
+                "PW_RUN_ID": job.id,
+            }
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, cwd=str(CONTENT_DIR),  # pipeline runs with cwd = the local wiki repo
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                    env=proc_env,
+                    start_new_session=True,
+                    limit=2**20,
+                )
+                job.process = proc
+                if job.cancel_requested:
+                    await _kill_process_group(proc, job, "cancel")
+                    job.finish_canceled()
+                    return
+            except FileNotFoundError as e:
+                job.finish_terminal("error", {"status": "error"}, [f"error: cannot launch ingest ({e})"])
+                return
+            try:
+                rc = await _stream_until_exit(proc, job)
+            except asyncio.TimeoutError:
+                await _kill_process_group(proc, job, "ingest")
+                job.finish_terminal(
+                    "error",
+                    {"status": "error", "timeout": True},
+                    [f"error: ingest produced no output for {JOB_TIMEOUT_S}s - killed"],
+                )
+                return
+            finally:
+                if job.process is proc:
+                    job.process = None
+
+            if job.cancel_requested:
+                job.finish_canceled()
+                return
+
+            if rc != 0:
+                job.finish_terminal("error", {"status": "error", "code": rc}, [f"ingest exited with code {rc}"])
+                return
+
+            job.emit("ingest committed ✓")
+            if REBUILD_CMD:
+                job.emit("$ " + REBUILD_CMD)
+                rp = await asyncio.create_subprocess_shell(
+                    REBUILD_CMD, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                    limit=2**20)
+                job.process = rp
+                if job.cancel_requested:
+                    await _kill_process_group(rp, job, "cancel")
+                    job.finish_canceled()
+                    return
+                try:
+                    rebuild_rc = await _stream_until_exit(rp, job)
+                except asyncio.TimeoutError:
+                    await _kill_process_group(rp, job, "rebuild")
+                    job.finish_terminal(
+                        "error",
+                        {"status": "error", "rebuild_timeout": True},
+                        [f"error: rebuild produced no output for {JOB_TIMEOUT_S}s - killed"],
+                    )
+                    return
+                finally:
+                    if job.process is rp:
+                        job.process = None
+                if job.cancel_requested:
+                    job.finish_canceled()
+                    return
+                if rebuild_rc != 0:
+                    job.finish_terminal(
+                        "error",
+                        {"status": "error", "rebuild_code": rebuild_rc},
+                        [f"rebuild exited with code {rebuild_rc}"],
+                    )
+                    return
+                job.emit("site rebuilt ✓")
+            job.finish_terminal("done", {"status": "done"})
+    except Exception as e:  # noqa
+        LOGGER.exception("ingest job failed job_id=%s", job.id)
+        proc = job.process
+        if proc and proc.returncode is None:
+            await _kill_process_group(proc, job, "ingest")
+        job.process = None
+        job.finish_terminal("error", {"status": "error", "error": str(e)}, [f"error: {e}"])
+    finally:
+        if job.status in TERMINAL_STATUSES:
+            await asyncio.to_thread(_cleanup_staged_target, target, job.id)
 
 
 def start_job(target: str, options: dict) -> str:
@@ -387,5 +498,5 @@ def start_job(target: str, options: dict) -> str:
     job_id = uuid.uuid4().hex[:12]
     job = Job(job_id)
     JOBS[job_id] = job
-    asyncio.create_task(run_job(job, target, options))
+    job.task = asyncio.create_task(run_job(job, target, options))
     return job_id

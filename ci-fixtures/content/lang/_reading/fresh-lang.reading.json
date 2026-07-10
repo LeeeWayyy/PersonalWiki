@@ -1,0 +1,18 @@
+{
+  "schema": "reading/2",
+  "source_id": "S1FRESHLANG00000000000000",
+  "title": "Fresh Pipeline Reading",
+  "lang": "ja",
+  "chapters": [
+    {
+      "chapter": "Fresh Chapter",
+      "paragraphs": [
+        {
+          "sentences": [
+            { "jp": "新しい読書データ。" }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -11,9 +11,8 @@ char limit, etc. as arguments instead of closing over module globals — so a
 caller picks its own cache namespace (e.g. `lang/.wiki/lang-cache/`) and never
 inherits another generator's cache or prompt version.
 
-generate-mindmap.py / generate-mocs.py predate this module and keep their own
-copies; only the language generator consumes it today. The implementations
-here are the proven mindmap versions, made pure.
+Language pages, mindmaps, and MOCs consume these helpers directly; JS reader
+code remains a separate runtime boundary.
 """
 
 from __future__ import annotations
@@ -231,6 +230,35 @@ def save_cache(cache_dir: Path, prompt_version: str, source_id: str, sha: str,
     )
 
 
+def flat_cache_path(cache_dir: Path, prompt_version: str, source_id: str,
+                    sha: str) -> Path:
+    """Cache filename for single-result derived views.
+
+    This preserves the historical mindmap cache shape:
+    `<source_id>.<sha12>.<prompt_version>.json`.
+    """
+    return cache_dir / f"{source_id}.{(sha or '0')[:12]}.{prompt_version}.json"
+
+
+def load_flat_cache(cache_dir: Path, prompt_version: str, source_id: str,
+                    sha: str) -> dict | None:
+    p = flat_cache_path(cache_dir, prompt_version, source_id, sha)
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def save_flat_cache(cache_dir: Path, prompt_version: str, source_id: str,
+                    sha: str, data: dict) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    flat_cache_path(cache_dir, prompt_version, source_id, sha).write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def atomic_write(path: Path, content: str, dry_run: bool) -> bool:
     """Write `content` to `path` via temp+rename. Skip if unchanged. Returns
     True if a write happened (or would, under dry_run)."""
@@ -274,6 +302,9 @@ def demo() -> None:
 
     assert extract_json('prefix {"a": 1} suffix') == {"a": 1}
     assert extract_json('```json\n{"b": 2}\n```') == {"b": 2}
+
+    assert flat_cache_path(Path(".cache"), "v1", "S", "abcdef1234567890").as_posix() == \
+        ".cache/S.abcdef123456.v1.json"
 
     z = render_human_zone(None, "study-zone")
     assert "study-zone" in z and z.startswith("<!-- human-zone -->")

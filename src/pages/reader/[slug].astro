@@ -213,7 +213,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
         </script>
       </>
     ) : (
-      <div class="card"><p class="muted">No structured reading data. Run <code>python3 scripts/build-reading.py</code> (needs fugashi) or re-ingest with the updated pipeline.</p></div>
+      <div class="card"><p class="muted">No structured reading data. Re-ingest this source with the language profile.</p></div>
     )}
   </div>
 </Base>

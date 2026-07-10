@@ -38,6 +38,27 @@ export const cleanTitle = (t) => (t || '').replace(/^\d{4}-\d{2}-\d{2}-/, '').re
 // enOf: first Latin-script alias, used as an English subtitle.
 export const enOf = (p) => (p.aliases || []).find((a) => /[A-Za-z]/.test(a) && a !== p.title) || '';
 
+function splitWikilinkTarget(target) {
+  const raw = String(target || '').trim();
+  const hash = raw.indexOf('#');
+  if (hash < 0) return { base: raw, anchor: '' };
+  return { base: raw.slice(0, hash).trim(), anchor: raw.slice(hash + 1).trim() };
+}
+
+function normalizeWikilinkKey(target) {
+  const { base } = splitWikilinkTarget(target);
+  return base
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    // Match the common non-lowercase folds Python casefold() applies in
+    // pipeline alias/lint resolution.
+    .replace(/\u00df/g, 'ss')
+    .replace(/\u03c2/g, '\u03c3')
+    .replace(/\u017f/g, 's')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Tiny frontmatter parser — handles `key: value`, quoted strings, and inline
 // flow arrays `[a, b, c]`. Sufficient for this vault's canonical frontmatter.
 function parseFrontmatter(raw) {
@@ -100,7 +121,10 @@ export function loadVault() {
 
     if (kind === 'entity' || kind === 'topic') {
       const keys = new Set([rel.split('/').pop(), title, ...(data.aliases || [])]);
-      for (const k of keys) if (k) aliasMap.set(String(k), page.href);
+      for (const k of keys) {
+        const key = normalizeWikilinkKey(k);
+        if (key) aliasMap.set(key, page.href);
+      }
     }
   }
 
@@ -134,7 +158,7 @@ export function loadVault() {
     while ((mm = linkRe.exec(page.body))) {
       if (mm[0].startsWith('!')) continue; // embed, not a link
       const target = mm[1].split('|')[0].trim();
-      const href = aliasMap.get(target);
+      const href = aliasMap.get(normalizeWikilinkKey(target));
       if (href && href !== page.href) {
         if (!backlinks.has(href)) backlinks.set(href, new Set());
         backlinks.get(href).add(page.href);
@@ -149,89 +173,38 @@ export function loadVault() {
 }
 
 // --- Language module -------------------------------------------------------
-// Interim reader source: joins the committed lang artifacts by source_id.
-// When the pipeline emits a structured `_reading/<slug>.json` sidecar (plan §3a,
-// Option B), prefer it; until then we parse the committed vocab/grammar/text.
+// Current reader source: pipeline-emitted `_reading/<slug>.reading.json`.
 const LANG = join(VAULT, 'lang');
-
-function parseVocab(body) {
-  const rows = [];
-  for (const line of body.split('\n')) {
-    const m = line.match(/^\|\s*(.+?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*$/);
-    if (!m) continue;
-    const [, word, reading, pos, meaning] = m;
-    if (word === 'Word' || /^-+$/.test(word)) continue;
-    rows.push({ word, reading, pos, meaning });
-  }
-  return rows;
-}
-function parseGrammar(body) {
-  const out = [];
-  const parts = body.split(/^###\s+/m).slice(1);
-  for (const chunk of parts) {
-    const lines = chunk.split('\n');
-    const pattern = lines[0].replace(/\s*\[src:[^\]]*\]\s*$/, '').trim();
-    const desc = (lines.find((l, i) => i > 0 && l.trim() && !l.startsWith('>')) || '').trim();
-    const example = (lines.find((l) => l.trim().startsWith('>')) || '').replace(/^>\s*/, '').trim();
-    if (pattern) out.push({ pattern, desc, example });
-  }
-  return out;
-}
 
 let _lang = null;
 export function loadLang() {
   if (_lang) return _lang;
   const out = [];
-  const vdir = join(LANG, '_vocab');
-  const gdir = join(LANG, '_grammar');
-  const sdir = join(LANG, 'sources');
-  if (existsSync(vdir)) {
-    for (const vf of walk(vdir)) {
-      const { data, body } = parseFrontmatter(readFileSync(vf, 'utf8'));
-      const slug = relative(vdir, vf).replace(/\.md$/, '');
-      const id = data.source_id;
-      const vocab = parseVocab(body);
-      // grammar with same source_id
-      let grammar = [];
-      if (existsSync(gdir)) {
-        for (const gf of walk(gdir)) {
-          const g = parseFrontmatter(readFileSync(gf, 'utf8'));
-          if (g.data.source_id === id) { grammar = parseGrammar(g.body); break; }
-        }
-      }
-      // source text: sidecar <text>.md with matching source_id → text file is sidecar minus .md
-      let title = slug, chapters = [];
-      if (existsSync(sdir)) {
-        for (const sf of walk(sdir)) {
-          if (!sf.endsWith('.md.md')) continue;
-          const s = parseFrontmatter(readFileSync(sf, 'utf8'));
-          if (s.data.source_id !== id) continue;
-          const textFile = sf.replace(/\.md$/, '');
-          if (existsSync(textFile)) {
-            const text = readFileSync(textFile, 'utf8');
-            title = (text.match(/^#\s+(.+)$/m) || [, slug])[1].trim();
-            const secs = text.split(/^##\s+/m);
-            chapters = secs.slice(1).map((c) => {
-              const l = c.split('\n');
-              return { heading: l[0].trim(), text: l.slice(1).join('\n').trim() };
-            });
-            if (!chapters.length) chapters = [{ heading: '', text: text.replace(/^#.*$/m, '').trim() }];
-          }
-          break;
-        }
-      }
-      out.push({ id, slug, title, vocab, grammar, chapters, reading: null });
-    }
-  }
-  // Attach structured reading JSON (pipeline-emitted or fallback), keyed by source_id.
   const rdir = join(LANG, '_reading');
+
   if (existsSync(rdir)) {
     for (const rf of readdirSync(rdir)) {
       if (!rf.endsWith('.reading.json')) continue;
       try {
         const doc = JSON.parse(readFileSync(join(rdir, rf), 'utf8'));
-        const entry = out.find((e) => e.id === doc.source_id);
-        if (entry) entry.reading = doc;
+        const slug = rf.replace(/\.reading\.json$/, '');
+        const id = doc.source_id || slug;
+        if (!id) continue;
+        out.push({
+          id,
+          slug,
+          title: doc.title || slug,
+          vocab: [],
+          grammar: [],
+          chapters: (doc.chapters || []).map((ch) => ({
+            heading: ch.chapter || ch.heading || '',
+            text: (ch.paragraphs || [])
+              .map((p) => (p.sentences || []).map((s) => s.jp || s.text || '').join(''))
+              .filter(Boolean)
+              .join('\n\n'),
+          })),
+          reading: doc,
+        });
       } catch { /* ignore malformed */ }
     }
   }
@@ -239,12 +212,21 @@ export function loadLang() {
   return out;
 }
 
-// --- Source Reader blocks (docs/SOURCE-READER-DESIGN.md contract) ------------
+// --- Source Reader blocks (contract documented in pipeline/schema.md) --------
 // Block identity hashes ONLY type + normalized text (nothing positional/section-
 // scoped). section_id is non-positional (hash of the heading-text). Canonical
 // block.text is the paragraph's sentence `jp` joined with no separator.
 const _sha8 = (s) => createHash('sha256').update(s).digest('hex').slice(0, 8);
-const _normHash = (t) => (t || '').replace(/\s+/g, '').trim();
+const _normHash = (t) => (t || '').replace(/\uFEFF/g, '').replace(/\s+/g, '').trim();
+
+export function sourceReaderBlockId(type, text) {
+  const prefix = type === 'heading' ? 'h-' : 'p-';
+  return prefix + _sha8(`${type}\x1f${_normHash(text)}`);
+}
+
+export function sourceReaderSectionId(section) {
+  return 's-' + _sha8(`SEC\x1f${_normHash(section)}`);
+}
 
 export function blocksForSource(sourceId) {
   // Prefer an extracted blocks artifact (documents: epub/pdf via build-blocks.py).
@@ -268,12 +250,12 @@ export function blocksForSource(sourceId) {
   let order = 0;
   for (const ch of doc.chapters) {
     const section = ch.chapter || '';
-    const section_id = 's-' + _sha8('SEC\x1f' + _normHash(section));
+    const section_id = sourceReaderSectionId(section);
     const paras = ch.paragraphs || [{ sentences: ch.sentences || [] }];
     for (const p of paras) {
       const text = (p.sentences || []).map((s) => s.jp).join(''); // canonical, frozen
       if (!text) continue;
-      const id = 'p-' + _sha8('paragraph\x1f' + _normHash(text));
+      const id = sourceReaderBlockId('paragraph', text);
       blocks.push({ id, type: 'paragraph', section_id, section, order: order++, text });
     }
   }
@@ -300,7 +282,7 @@ export function sourceReaderHref(sourceId, anchor = '') {
   return sourceReaderHrefForAnchor(sourceId, chaptersForSource(sourceId), anchor);
 }
 
-// --- AI-citation index (docs/SOURCE-READER-DESIGN.md P3) --------------------
+// --- AI-citation index (contract documented in pipeline/schema.md) -----------
 // Walk each wiki page's mdast to find every `[src:<id>#anchor]` and the text of
 // its ENCLOSING block node (paragraph / heading / list item / blockquote callout
 // / table cell — citations appear in all of these, so we key off the nearest
@@ -373,7 +355,9 @@ export function citationsForSource(sourceId) {
 
 export function resolveWikilink(target) {
   const { aliasMap } = loadVault();
-  return aliasMap.get(String(target).trim()) || null;
+  const { anchor } = splitWikilinkTarget(target);
+  const href = aliasMap.get(normalizeWikilinkKey(target));
+  return href && anchor ? `${href}#${encodeURIComponent(anchor)}` : href || null;
 }
 export function resolveSource(id) {
   const { sourceMap } = loadVault();

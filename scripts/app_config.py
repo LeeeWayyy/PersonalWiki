@@ -98,21 +98,19 @@ def validate_content_dir(
     path: Path,
     *,
     error_cls: type[Exception] = AppConfigError,
-    prefix: str = "",
     hint: str = (
         "Set PW_CONTENT_DIR=/abs/path/to/wiki in backend/.env, or vendor once with "
         "python3 scripts/vendor_content.py."
     ),
-    hint_indent: str = "",
 ) -> None:
     if not path.is_dir():
-        raise error_cls(f"{prefix}wiki folder not found at {path}\n{hint_indent}{hint}")
+        raise error_cls(f"wiki folder not found at {path}\n{hint}")
     try:
         next(path.iterdir())
     except StopIteration as exc:
-        raise error_cls(f"{prefix}wiki folder is empty at {path}\n{hint_indent}{hint}") from exc
+        raise error_cls(f"wiki folder is empty at {path}\n{hint}") from exc
     except OSError as exc:
-        raise error_cls(f"{prefix}cannot read wiki folder at {path}: {exc}") from exc
+        raise error_cls(f"cannot read wiki folder at {path}: {exc}") from exc
 
 
 def bootstrap_local_env(
@@ -121,12 +119,10 @@ def bootstrap_local_env(
     *,
     validate_content: bool = True,
     error_cls: type[Exception] = AppConfigError,
-    content_prefix: str = "",
     content_hint: str = (
         "Set PW_CONTENT_DIR=/abs/path/to/wiki in backend/.env, or vendor once with "
         "python3 scripts/vendor_content.py."
     ),
-    content_hint_indent: str = "",
 ) -> tuple[Path, list[str]]:
     """Prepare local env-file config and return the resolved wiki folder.
 
@@ -148,9 +144,7 @@ def bootstrap_local_env(
         validate_content_dir(
             resolved,
             error_cls=error_cls,
-            prefix=content_prefix,
             hint=content_hint,
-            hint_indent=content_hint_indent,
         )
     return resolved, messages
 

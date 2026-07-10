@@ -62,7 +62,7 @@ class Card:
 def schedule(card: Card, grade: int, elapsed_days: float) -> tuple[Card, int]:
     """Return (updated_card, interval_days)."""
     grade = int(_clamp(grade, 1, 4))
-    if card.state == 0:  # first review
+    if card.state == 0 or card.stability <= 0:  # first review
         s = _init_stability(grade)
         d = _init_difficulty(grade)
         card = Card(stability=s, difficulty=d, state=1,

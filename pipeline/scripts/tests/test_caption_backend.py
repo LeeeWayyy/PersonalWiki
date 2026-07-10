@@ -31,6 +31,9 @@ class CaptionBackendTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(caption._default_backend(), "gemini")
 
+    def test_codex_default_is_mini_model(self):
+        self.assertEqual(caption.DEFAULT_MODELS["codex"], "gpt-5-mini")
+
     def test_codex_dispatch_omits_model_when_none(self):
         seen = {}
 

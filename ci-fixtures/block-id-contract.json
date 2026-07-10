@@ -1,0 +1,29 @@
+{
+  "blocks": [
+    {
+      "type": "paragraph",
+      "text": "ATP stores energy.",
+      "expected_id": "p-5f5e6d26"
+    },
+    {
+      "type": "paragraph",
+      "text": "ATP stores\nenergy.",
+      "expected_id": "p-5f5e6d26"
+    },
+    {
+      "type": "paragraph",
+      "text": "\ufeffATP stores energy.",
+      "expected_id": "p-5f5e6d26"
+    },
+    {
+      "type": "heading",
+      "text": "\u7b2c1\u7ae0  \u5c0e\u5165",
+      "expected_id": "h-726a6de9"
+    },
+    {
+      "type": "paragraph",
+      "text": "\u9175\u7d20\u3000\u306f \u50cd\u304f\u3002",
+      "expected_id": "p-f8ea23fa"
+    }
+  ]
+}

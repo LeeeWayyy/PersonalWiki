@@ -73,12 +73,8 @@ def _upsert_line(fm_body: str, key: str, new_value: str) -> tuple[str, bool]:
     (new_body, changed) — second value is True iff the body actually
     changed.
 
-    NOTE: this is a near-twin of `_upsert_line` in
-    `scripts/backfill-tags.py`. Same mechanics, but a DIFFERENT
-    second-return-value contract there (it returns `found`, not
-    `changed`, because its caller needs to choose between
-    replace-in-place vs. insert-after-aliases). Keep mechanics in
-    sync; do NOT merge the second return-value semantics."""
+    Returns whether the frontmatter body changed so callers can avoid
+    unnecessary writes."""
     new_line = f"{key}: {new_value}"
     lines = fm_body.split("\n")
     out: list[str] = []

@@ -5,16 +5,14 @@ vault. Your job is to integrate a new source into the existing wiki.
 
 ## Inputs you will receive
 
-1. `SCHEMA` — contents of `schema.md`. This is the rulebook. Obey it
-   absolutely.
-2. `SOURCE_META` — frontmatter for the new source's sidecar, including
+1. `SOURCE_META` — frontmatter for the new source's sidecar, including
    the `source_id` you must cite.
-3. `SECTION_LABEL` — optional. If present, only this section of the
+2. `SECTION_LABEL` — optional. If present, only this section of the
    source was extracted. **Every citation you emit in this run must
    carry this section as an anchor**: `[src:<id>#<SECTION_LABEL>]`.
    If absent, use plain `[src:<id>]`.
-4. `SOURCE_TEXT` — full text (or extracted chunks) of the new source.
-5. `CANDIDATE_PAGES` — a small set of existing wiki pages (entities
+3. `SOURCE_TEXT` — full text (or extracted chunks) of the new source.
+4. `CANDIDATE_PAGES` — a small set of existing wiki pages (entities
    and topics) that may be relevant, pulled from the vault by
    keyword/ripgrep pre-pass. **Each candidate is shown as a digest by
    default**: full frontmatter + H1 + headings + the first few body
@@ -28,14 +26,14 @@ vault. Your job is to integrate a new source into the existing wiki.
    new pages, OR (b) modifying pages whose digest shows the entire
    body (no truncation marker present). Expansion is allowed at most
    once per pass; the harness re-runs with full content.
-6. `ALL_SOURCE_IDS` — the list of every valid `source_id` currently
+5. `ALL_SOURCE_IDS` — the list of every valid `source_id` currently
    in the vault (so you can cite prior sources when needed).
-7. `TAXONOMY` — verbatim contents of `wiki/_taxonomy.md`. The
+6. `TAXONOMY` — verbatim contents of `wiki/_taxonomy.md`. The
    complete set of allowed `tags:` values, organized into Domain,
    Form, and Reserved sections. **You may not invent new tags.**
    Pick from this file when emitting `tags:` on new or modified
    pages.
-8. `IMAGES` — a markdown table of every image extracted from this
+7. `IMAGES` — a markdown table of every image extracted from this
    source's manifest, filtered to non-decorative entries that have a
    caption. Columns: `path` (vault-relative path under
    `sources/<asset>.assets/`), `caption` (1–3 sentence description),

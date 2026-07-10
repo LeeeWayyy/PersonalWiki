@@ -1182,9 +1182,8 @@ def check_tags() -> tuple[bool, list[str]]:
 
 def check_required_tags() -> tuple[bool, list[str]]:
     """13th check: every entity/topic page MUST have a non-empty
-    `tags:` list. Enabled in step 5 of the migration (after backfill
-    has tagged every existing page). check_tags() above handles
-    syntax/membership/cardinality validation; this check just ensures
+    `tags:` list. check_tags() above handles syntax/membership/cardinality
+    validation; this check just ensures
     presence."""
     notes: list[str] = []
     bad: list[Path] = []
@@ -1202,7 +1201,7 @@ def check_required_tags() -> tuple[bool, list[str]]:
     notes.append(f"  ✗ {len(bad)} page(s) missing tags:")
     for p in bad:
         notes.append(f"    {p.relative_to(VAULT_ROOT)}")
-    notes.append("    → fix: add tags: [...] to frontmatter, OR run scripts/backfill-tags.py")
+    notes.append("    → fix: add tags: [...] to frontmatter")
     return False, notes
 
 

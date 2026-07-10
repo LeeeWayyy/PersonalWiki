@@ -34,7 +34,7 @@ def die(msg: str) -> None:
 
 def default_vault_root(tooling_root: str | Path) -> Path:
     """Resolve the content repo for both current and legacy layouts."""
-    override = os.environ.get("VAULT_CONTENT_DIR")
+    override = os.environ.get("PW_CONTENT_DIR") or os.environ.get("VAULT_CONTENT_DIR")
     if override:
         return Path(override).expanduser().resolve()
 

@@ -55,6 +55,7 @@ import Base from '../../layouts/Base.astro';
     const $ = (id) => document.getElementById(id);
 
     let queue = [], cur = null, revealed = false, reviewed = 0;
+    let offlineDetail = '', grading = false;
     const wrap = $('rv-cardwrap');
 
     // grade defs: color + generic FSRS-ish interval hint (real interval comes back from the API)
@@ -69,6 +70,9 @@ import Base from '../../layouts/Base.astro';
       if (!due) return '今天';
       const d = Math.round((new Date(due + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
       return d <= 0 ? '今天' : d + ' 天后';
+    }
+    function offlineHtml(detail = 'Start it to review.', padding = '12px 0 18px') {
+      return `<p class="muted" style="text-align:center;padding:${padding}">Study backend offline (${esc(BACKEND)}). ${esc(detail)}</p>`;
     }
 
     function renderProgress() {
@@ -101,7 +105,7 @@ import Base from '../../layouts/Base.astro';
             `<button data-g="${d.g}" style="background:color-mix(in srgb,${d.col} 15%,var(--bg-2));border:1px solid color-mix(in srgb,${d.col} 40%,var(--border));color:${d.col}">
               <span class="g-l">${d.label}</span><span class="g-i">${d.iv}</span><span class="g-k">${i + 1}</span></button>`).join('')}</div>`
         : `<button class="rv-reveal" id="rv-revealbtn">显示答案 <span class="k">空格</span></button>`;
-      wrap.innerHTML = `<div class="rv-card" id="rv-cardface">
+      wrap.innerHTML = `${offlineDetail ? offlineHtml(offlineDetail) : ''}<div class="rv-card" id="rv-cardface">
           <div class="meta">${pos ? `<span class="pos">${esc(pos)}</span>` : ''}${src}</div>
           <div class="lemma">${esc(cur.lemma || '')}</div>${answer}
         </div>${foot}`;
@@ -135,12 +139,23 @@ import Base from '../../layouts/Base.astro';
     function reveal() { if (!cur || revealed) return; revealed = true; renderCard(); }
 
     async function grade(g) {
-      if (!cur) return;
+      if (!cur || grading) return;
       const card = cur;
-      try { await fetch(`${BACKEND}/review/${card.id}/grade`, { method: 'POST', headers: H, body: JSON.stringify({ grade: g }) }); } catch {}
+      grading = true;
+      try {
+        const r = await fetch(`${BACKEND}/review/${card.id}/grade`, { method: 'POST', headers: H, body: JSON.stringify({ grade: g }) });
+        if (!r.ok) throw new Error();
+      } catch {
+        offlineDetail = 'Grade not saved; card kept in the queue.';
+        grading = false;
+        renderCard();
+        return;
+      }
       queue.shift();
       if (g === 1) queue.push({ ...card }); // "重来" re-queues at the end
       reviewed++;
+      offlineDetail = '';
+      grading = false;
       revealed = false;
       renderCard();
       refreshStats();
@@ -154,9 +169,10 @@ import Base from '../../layouts/Base.astro';
         if (!r.ok) throw new Error();
         queue = await r.json();
       } catch {
-        wrap.innerHTML = `<p class="muted" style="text-align:center;padding:40px 0">Study backend offline (${esc(BACKEND)}). Start it to review.</p>`;
+        wrap.innerHTML = offlineHtml('Start it to review.', '40px 0');
         return;
       }
+      offlineDetail = '';
       revealed = false; renderCard();
     }
 
@@ -202,7 +218,7 @@ import Base from '../../layouts/Base.astro';
     }
     function refreshStats() { fetchStats(); fetchForecast(); }
 
-    // Editable panel — debounced upsert via POST /vocab (updates reading/gloss/example/pos)
+    // Editable panel — debounced explicit update so cleared fields persist.
     let saveTimer = null;
     function scheduleSave() {
       const c = queue[0]; if (!c) return;
@@ -210,9 +226,10 @@ import Base from '../../layouts/Base.astro';
       clearTimeout(saveTimer);
       saveTimer = setTimeout(async () => {
         try {
-          await fetch(`${BACKEND}/vocab`, { method: 'POST', headers: H, body: JSON.stringify({
-            kind: c.kind || 'word', lemma: c.lemma, reading: c.reading, gloss: c.gloss, example: c.example, pos: c.pos,
+          const r = await fetch(`${BACKEND}/vocab/${c.id}`, { method: 'PATCH', headers: H, body: JSON.stringify({
+            reading: c.reading, gloss: c.gloss, example: c.example, pos: c.pos,
           }) });
+          if (!r.ok) throw new Error('save failed');
           saved.textContent = '· 已保存';
         } catch { saved.textContent = '· 离线'; }
       }, 600);

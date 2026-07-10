@@ -5,6 +5,7 @@ import {
   blocksForSource,
   cleanTitle,
   citationsForSource,
+  loadLang,
   loadVault,
   resolveWikilink,
   sourceReaderHref,
@@ -21,7 +22,21 @@ describe('vault frontend contracts', () => {
     assert.equal(vault.sources.some((source) => source.id === MD_SOURCE_ID), true);
     assert.equal(resolveWikilink('ATP'), '/wiki/entities/ATP');
     assert.equal(resolveWikilink('Adenosine triphosphate'), '/wiki/entities/ATP');
+    assert.equal(resolveWikilink('  adenosine   triphosphate  '), '/wiki/entities/ATP');
+    assert.equal(resolveWikilink('ＡＴＰ'), '/wiki/entities/ATP');
+    assert.equal(resolveWikilink('Maße'), '/wiki/entities/ATP');
+    assert.equal(resolveWikilink('ATP#Energy charge'), '/wiki/entities/ATP#Energy%20charge');
     assert.deepEqual([...vault.forward.get('/wiki/entities/ATP')], ['/wiki/topics/Energy metabolism']);
+  });
+
+  it('loads fresh structured reading output without vocab pages', () => {
+    const langs = loadLang();
+    const entry = langs.find((lang) => lang.id === 'S1FRESHLANG00000000000000');
+
+    assert.equal(entry?.slug, 'fresh-lang');
+    assert.equal(entry?.title, 'Fresh Pipeline Reading');
+    assert.equal(entry?.reading?.title, 'Fresh Pipeline Reading');
+    assert.equal(entry?.chapters[0].heading, 'Fresh Chapter');
   });
 
   it('cleans ebook source titles for display', () => {
