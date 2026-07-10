@@ -146,10 +146,13 @@ pipeline/ingest.py ──► PW_CONTENT_DIR (local wiki repo — private, never 
    `_reading/<id>.reading.json` is the authoritative reader contract. Legacy
    `_vocab`/`_grammar` markdown is no longer used by the app; re-ingest old
    language sources with `--profile lang` to generate current reader JSON.
-2. **codex / LLM auth** — `PW_LLM_PROVIDER=codex` must run non-interactively
-   under a daemon. If local Codex auth is not viable, set `LLM_CMD` to a custom
-   stdin-to-stdout command or manually enable the OpenAI-compatible backup with
-   `PW_LLM_API_ENABLED=1` and `PW_LLM_API_KEY`. Debug daemon auth with
+2. **codex / LLM auth** — `PW_LLM_PROVIDER=codex` is the agentic,
+   subscription-backed default and must run non-interactively under a daemon. To
+   force non-agentic single-completion mode, set `PW_LLM_PROVIDER=api` (or
+   `openai`) with `PW_LLM_API_KEY`. If local Codex auth is not viable, you can
+   also set `LLM_CMD` to a custom stdin-to-stdout command or keep the legacy
+   OpenAI-compatible backup path with `PW_LLM_API_ENABLED=1` and
+   `PW_LLM_API_KEY`. Debug daemon auth with
    `GET /health/llm` using `X-Auth-Token`; it probes only the local provider,
    never the API fallback. Without one configured, real ingest and `/translate`
    won't run (the UI degrades gracefully). Static builds do not call the LLM for

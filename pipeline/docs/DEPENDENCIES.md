@@ -43,12 +43,26 @@ Used by `ingest.py` and the `scripts/`. All present on this machine.
 
 `ingest.py`, language-page generation, and `scripts/generate-mindmap.py` use the
 shared Python LLM client. Default local provider: `PW_LLM_PROVIDER=codex`, which
-invokes `codex exec` directly without a shell adapter. `LLM_CMD` is still
-available for a custom stdin-to-stdout command:
+invokes `codex exec` directly without a shell adapter. This is the agentic,
+subscription-backed mode: Codex can inspect and edit the isolated workdir seeded
+by ingest.
+
+For non-agentic single-completion mode, set `PW_LLM_PROVIDER=api` (or `openai`)
+with `PW_LLM_API_KEY`; `PW_LLM_MODEL` selects the chat-completions model and
+`PW_LLM_BASE_URL` can point at another OpenAI-compatible endpoint. The older
+fallback switch, `PW_LLM_API_ENABLED=1`, still works when no local provider is
+configured, but the provider value is the clearer way to choose API mode.
+
+`LLM_CMD` is still available as an advanced custom stdin-to-stdout command:
 
 ```bash
 LLM_CMD="gemini -p" python3 ingest.py <path-or-url>
 ```
+
+Ingest's expansion pass and its single apply-failure retry rebuild and re-send
+the full prompt today. That keeps every provider stateless and makes the retry
+see the exact current candidate/expanded page set, but it spends the full prompt
+budget again. Keep the retry count low unless that contract changes.
 
 ### Script libraries (auto-installed by `uv`, no action needed)
 

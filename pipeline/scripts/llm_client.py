@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import signal
 import shlex
@@ -18,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -27,14 +29,25 @@ DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_API_MODEL = "gpt-4o-mini"
 DEFAULT_CODEX_MODEL = "codex"
 CODEX_ARGS = ("exec", "--skip-git-repo-check", "--color", "never")
+API_PROVIDERS = {"api", "openai"}
+CODEX_PROVIDERS = {"codex"}
+_STDOUT_DONE = object()
 
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _provider_choice() -> str:
+    return _env("PW_LLM_PROVIDER").lower()
+
+
+def _api_requested() -> bool:
+    return _provider_choice() in API_PROVIDERS
+
+
 def _api_enabled() -> bool:
-    return _env("PW_LLM_API_ENABLED").lower() in TRUTHY
+    return _api_requested() or _env("PW_LLM_API_ENABLED").lower() in TRUTHY
 
 
 def _api_key() -> str:
@@ -65,7 +78,21 @@ def _codex_bin() -> str:
 
 
 def codex_requested() -> bool:
-    return _env("PW_LLM_PROVIDER").lower() == "codex" or _legacy_codex_bridge(raw_command())
+    if _api_requested():
+        return False
+    return _provider_choice() in CODEX_PROVIDERS or _legacy_codex_bridge(raw_command())
+
+
+def _provider_error() -> str | None:
+    choice = _provider_choice()
+    if choice and choice not in API_PROVIDERS | CODEX_PROVIDERS:
+        return (
+            f"unsupported PW_LLM_PROVIDER={choice!r}; "
+            "use 'codex' for agentic Codex or 'api'/'openai' for API single-completion mode"
+        )
+    if _api_requested() and not _api_key():
+        return "PW_LLM_PROVIDER=api/openai requires PW_LLM_API_KEY"
+    return None
 
 
 def codex_configured() -> bool:
@@ -73,14 +100,20 @@ def codex_configured() -> bool:
 
 
 def command_configured() -> bool:
+    if _api_requested():
+        return False
     return bool(command() or codex_configured())
 
 
 def configured() -> bool:
-    return bool(command_configured() or (_api_enabled() and _api_key()))
+    return bool(_provider_error() is None and (command_configured() or (_api_enabled() and _api_key())))
 
 
 def provider() -> str | None:
+    if _provider_error() and not _api_requested():
+        return None
+    if _api_requested():
+        return "api"
     if command():
         return "command"
     if codex_configured():
@@ -94,6 +127,8 @@ def model() -> str | None:
     configured_model = _env("PW_LLM_MODEL")
     if configured_model:
         return configured_model
+    if _api_requested():
+        return DEFAULT_API_MODEL
     cmd = command()
     if cmd:
         try:
@@ -125,6 +160,16 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except Exception:
         proc.kill()
+
+
+def _enqueue_stdout_lines(stdout, lines: "queue.Queue[object]") -> None:
+    try:
+        for line in stdout:
+            lines.put(line)
+    except Exception:
+        pass
+    finally:
+        lines.put(_STDOUT_DONE)
 
 
 def _run_local(argv_or_cmd: list[str] | str, prompt: str, timeout: int, *, shell: bool, cwd: str | None) -> str | None:
@@ -201,9 +246,9 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
     """Run codex with --json (events → stdout → live progress) and -o (final
     message = the diff → a file). Streams heartbeats to stderr in the main
     thread — no rollout-file tailing. PW_CODEX_PROGRESS=0 silences the prints
-    (events are still drained so the pipe can't stall). The timeout bounds the
-    streaming case; a codex that emits nothing at all is caught by the backend's
-    idle-output timeout at the job level."""
+    (events are still drained so the pipe can't stall). A helper thread drains
+    stdout so the caller can enforce proc.wait(timeout=...) even when Codex is
+    silent; this keeps backend asyncio.to_thread workers from hanging forever."""
     show = _env("PW_CODEX_PROGRESS") != "0"
     fd, diff_file = tempfile.mkstemp(prefix="pw-codex-msg-")
     os.close(fd)
@@ -211,28 +256,64 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
     os.close(efd)
     argv = [*base_argv, "--json", "-o", diff_file, prompt]
     proc = None
+    stdout_thread = None
+    stdout_lines: queue.Queue[object] = queue.Queue()
+    state: dict = {}
+
+    def flush_stdout_lines() -> bool:
+        stdout_done = False
+        while True:
+            try:
+                item = stdout_lines.get_nowait()
+            except queue.Empty:
+                return stdout_done
+            if item is _STDOUT_DONE:
+                stdout_done = True
+                continue
+            line = str(item)
+            if show:
+                try:
+                    msg = _codex_progress_line(json.loads(line), state)
+                except Exception:
+                    msg = None
+                if msg:
+                    print(f"  {msg}", file=sys.stderr, flush=True)
+
     try:
         with open(err_file, "w") as errf:
             proc = subprocess.Popen(
                 argv, stdout=subprocess.PIPE, stderr=errf, text=True,
                 cwd=cwd, start_new_session=True)
-        deadline = time.monotonic() + timeout
-        state: dict = {}
+        assert proc.stdout is not None
+        stdout_thread = threading.Thread(
+            target=_enqueue_stdout_lines,
+            args=(proc.stdout, stdout_lines),
+            daemon=True,
+            name="codex-stdout-drain",
+        )
+        stdout_thread.start()
         try:
-            for line in proc.stdout:
-                if show:
-                    try:
-                        msg = _codex_progress_line(json.loads(line), state)
-                    except Exception:
-                        msg = None
-                    if msg:
-                        print(f"  {msg}", file=sys.stderr, flush=True)
-                if time.monotonic() > deadline:
-                    raise TimeoutError
-            proc.wait(timeout=max(1, int(deadline - time.monotonic())))
-        except (subprocess.TimeoutExpired, TimeoutError) as exc:
+            deadline = time.monotonic() + timeout
+            while proc.poll() is None:
+                flush_stdout_lines()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    proc.wait(timeout=min(0.2, remaining))
+                except subprocess.TimeoutExpired:
+                    pass
+            if stdout_thread is not None:
+                stdout_thread.join(timeout=1)
+            flush_stdout_lines()
+        except subprocess.TimeoutExpired as exc:
             _kill_process_group(proc)
             proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if stdout_thread is not None:
+                stdout_thread.join(timeout=1)
+            flush_stdout_lines()
             raise RuntimeError(f"LLM command timed out after {timeout}s") from exc
         if proc.returncode != 0:
             err = Path(err_file).read_text(errors="replace").strip()
@@ -285,32 +366,48 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
     return None
 
 
+def _complete_api(prompt: str, timeout: int, *, model: str | None) -> str | None:
+    base_url = _env("PW_LLM_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/")
+    model_name = (model or "").strip() or _env("PW_LLM_MODEL", DEFAULT_API_MODEL)
+    body = json.dumps({
+        "model": model_name,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {_api_key()}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        data = json.loads(response.read())
+    try:
+        return (data["choices"][0]["message"]["content"] or "").strip() or None
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("unexpected LLM API response shape") from exc
+
+
 def complete(prompt: str, timeout: int = 60, *, model: str | None = None) -> str | None:
-    """Run one completion, preferring local providers over explicit API fallback."""
+    """Run one completion.
+
+    `PW_LLM_PROVIDER=codex` is the agentic, subscription-backed path used by the
+    app default. `PW_LLM_PROVIDER=api` or `openai` is non-agentic: one chat
+    completion over the OpenAI-compatible API. For compatibility,
+    `PW_LLM_API_ENABLED=1` still acts as an API fallback when no local provider
+    is configured, and `LLM_CMD` remains an advanced local command override.
+    """
+    err = _provider_error()
+    if err:
+        raise RuntimeError(err)
+    if _api_requested():
+        return _complete_api(prompt, timeout, model=model)
     if command_configured():
         return complete_command(prompt, timeout=timeout, model=model)
     if _api_enabled() and _api_key():
-        base_url = _env("PW_LLM_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/")
-        model_name = (model or "").strip() or _env("PW_LLM_MODEL", DEFAULT_API_MODEL)
-        body = json.dumps({
-            "model": model_name,
-            "temperature": 0,
-            "messages": [{"role": "user", "content": prompt}],
-        }).encode()
-        req = urllib.request.Request(
-            f"{base_url}/chat/completions",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {_api_key()}",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            data = json.loads(response.read())
-        try:
-            return (data["choices"][0]["message"]["content"] or "").strip() or None
-        except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError("unexpected LLM API response shape") from exc
+        return _complete_api(prompt, timeout, model=model)
     return None
 
 

@@ -1,8 +1,10 @@
+import json
 import importlib.util
 import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -54,6 +56,24 @@ def _fake_codex(emit_events: bool = False) -> str:
         "payload = ' '.join(argv) + '\\nCWD=' + os.getcwd()\n"
         "open(out, 'w').write(payload) if out else sys.stdout.write(payload)\n"
     )
+
+
+def _silent_codex() -> str:
+    return "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
+
+
+class _FakeApiResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode()
 
 
 class LlmClientTests(unittest.TestCase):
@@ -188,6 +208,22 @@ class LlmClientTests(unittest.TestCase):
             self.assertIn("writing pages", progress)   # assistant message → heartbeat
             self.assertIn("hello", out)                # diff still returned (from -o)
 
+    def test_codex_timeout_kills_silent_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _silent_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_PROGRESS": "0",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            start = time.monotonic()
+            with patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(RuntimeError, "LLM command timed out after 1s"):
+                    llm_client.complete_command("hello", timeout=1)
+            self.assertLess(time.monotonic() - start, 5)
+
     def test_codex_progress_line_reads_turn_ctx_message_and_tool(self):
         state = {}
         # window comes from task_started, then token_count reports per-turn ctx
@@ -246,6 +282,48 @@ class LlmClientTests(unittest.TestCase):
                 self.assertEqual(llm_client.command(), "")
                 self.assertEqual(llm_client.provider(), "codex")
                 self.assertIn("prompt", llm_client.complete_command("prompt", timeout=5))
+
+    def test_explicit_api_provider_uses_chat_completion_without_enable_flag(self):
+        seen = {}
+
+        def fake_urlopen(req, timeout):
+            seen["url"] = req.full_url
+            seen["timeout"] = timeout
+            seen["auth"] = req.get_header("Authorization")
+            seen["body"] = json.loads(req.data.decode())
+            return _FakeApiResponse({"choices": [{"message": {"content": " api answer \n"}}]})
+
+        env = {
+            "PW_LLM_PROVIDER": "openai",
+            "PW_LLM_API_KEY": "sk-test",
+            "PW_LLM_MODEL": "api-model",
+            "LLM_CMD": "printf command-should-not-run",
+        }
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen", fake_urlopen):
+            self.assertTrue(llm_client.configured())
+            self.assertFalse(llm_client.command_configured())
+            self.assertEqual(llm_client.provider(), "api")
+            self.assertEqual(llm_client.model(), "api-model")
+            self.assertEqual(llm_client.complete("hello", timeout=7, model="call-model"), "api answer")
+        self.assertEqual(seen["url"], "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(seen["timeout"], 7)
+        self.assertEqual(seen["auth"], "Bearer sk-test")
+        self.assertEqual(seen["body"]["model"], "call-model")
+        self.assertEqual(seen["body"]["messages"], [{"role": "user", "content": "hello"}])
+
+    def test_explicit_api_provider_requires_key(self):
+        with patch.dict(os.environ, {"PW_LLM_PROVIDER": "api"}, clear=True):
+            self.assertFalse(llm_client.configured())
+            self.assertEqual(llm_client.provider(), "api")
+            with self.assertRaisesRegex(RuntimeError, "requires PW_LLM_API_KEY"):
+                llm_client.complete("hello")
+
+    def test_unknown_provider_errors(self):
+        with patch.dict(os.environ, {"PW_LLM_PROVIDER": "banana"}, clear=True):
+            self.assertFalse(llm_client.configured())
+            self.assertIsNone(llm_client.provider())
+            with self.assertRaisesRegex(RuntimeError, "unsupported PW_LLM_PROVIDER"):
+                llm_client.complete("hello")
 
     def test_api_key_requires_explicit_enable(self):
         with patch.dict(os.environ, {"PW_LLM_API_KEY": "unused"}, clear=True):
