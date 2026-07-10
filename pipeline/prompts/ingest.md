@@ -5,21 +5,29 @@ vault. Your job is to integrate a new source into the existing wiki.
 
 ## Inputs you will receive
 
-1. `ALL_SOURCE_IDS` — the list of every valid `source_id` currently
+1. `SCHEMA` — the runtime subset of `schema.md` that applies to wiki
+   ingest. It is binding; treat it as the fuller contract behind the
+   abbreviated hard rules below.
+2. `ALL_SOURCE_IDS` — the list of every valid `source_id` currently
    in the vault (so you can cite prior sources when needed).
-2. `TAXONOMY` — verbatim contents of `wiki/_taxonomy.md`. The
+3. `TAXONOMY` — verbatim contents of `wiki/_taxonomy.md`. The
    complete set of allowed `tags:` values, organized into Domain,
    Form, and Reserved sections. **You may not invent new tags.**
    Pick from this file when emitting `tags:` on new or modified
    pages.
-3. `SOURCE_META` — frontmatter for the new source's sidecar, including
+4. `SOURCE_META` — frontmatter for the new source's sidecar, including
    the `source_id` you must cite.
-4. `SECTION_LABEL` — optional. If present, only this section of the
+5. `SOURCE_KEY_TERMS` — salient terms extracted from this source or
+   section. Use it as a recall checklist for coverage and candidate
+   matching, **not as a cap**. If `SOURCE_TEXT` contains additional
+   important reusable entities, mechanisms, hypotheses, organisms,
+   enzymes, people, or topics, create/update pages for those too.
+6. `SECTION_LABEL` — optional. If present, only this section of the
    source was extracted. **Every citation you emit in this run must
    carry this section as an anchor**: `[src:<id>#<SECTION_LABEL>]`.
    If absent, use plain `[src:<id>]`.
-5. `SOURCE_TEXT` — full text (or extracted chunks) of the new source.
-6. `CANDIDATE_PAGES` — a small set of existing wiki pages (entities
+7. `SOURCE_TEXT` — full text (or extracted chunks) of the new source.
+8. `CANDIDATE_PAGES` — a small set of existing wiki pages (entities
    and topics) that may be relevant, pulled from the vault by
    keyword/ripgrep pre-pass. **Each candidate is shown as a digest by
    default**: full frontmatter + H1 + headings + the first few body
@@ -33,7 +41,7 @@ vault. Your job is to integrate a new source into the existing wiki.
    new pages, OR (b) modifying pages whose digest shows the entire
    body (no truncation marker present). Expansion is allowed at most
    once per pass; the harness re-runs with full content.
-7. `IMAGES` — a markdown table of every image extracted from this
+9. `IMAGES` — a markdown table of every image extracted from this
    source's manifest, filtered to non-decorative entries that have a
    caption. Columns: `path` (vault-relative path under
    `sources/<asset>.assets/`), `caption` (1–3 sentence description),
@@ -53,11 +61,15 @@ Emit a **unified diff** that:
 
 1. Updates any `CANDIDATE_PAGES` whose content should change to reflect
    the new source.
-2. Creates new entity pages (`wiki/entities/<filename>.md`) for any
-   important new entity the source introduces that doesn't already
-   have a page. **Filename = the page's native title in the source's
-   language** — kebab-case ASCII for English (`mitochondria.md`), the
-   bare term for Chinese (`线粒体.md`). See "Language" rules below.
+2. Creates new entity pages (`wiki/entities/<filename>.md`) for the
+   important reusable entities the source introduces that don't already
+   have pages. This is **not limited to five** and not limited to
+   `SOURCE_KEY_TERMS`: cover all central recurring concepts,
+   mechanisms, hypotheses, organisms, enzymes/proteins, people,
+   methods, and named theories that deserve graph nodes. **Filename =
+   the page's native title in the source's language** — kebab-case
+   ASCII for English (`mitochondria.md`), the bare term for Chinese
+   (`线粒体.md`). See "Language" rules below.
 3. Creates or updates topic pages (`wiki/topics/<filename>.md`) when
    synthesis across multiple entities is warranted (same filename
    rule as entities).

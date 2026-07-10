@@ -543,7 +543,8 @@ def _audit_extra() -> list[str]:
 
 
 def build_prompt(expand_file: str, out_file: str, all_source_ids: str,
-                 text_file: str, candidates_file: str, section_label: str) -> None:
+                 text_file: str, candidates_file: str, source_terms_file: str,
+                 section_label: str) -> None:
     with open(out_file, "w", encoding="utf-8") as f:
         r = subprocess.run(
             [f"{SCRIPTS}/build-prompt.py",
@@ -551,6 +552,7 @@ def build_prompt(expand_file: str, out_file: str, all_source_ids: str,
              "--added", SRC["ADDED"], "--origin-type", SRC["ORIGIN_TYPE"],
              "--origin-ref", SRC["ORIGIN_REF"], "--basename", SRC["DEST_BASENAME"],
              "--section-label", section_label, "--all-source-ids", all_source_ids,
+             "--source-terms-file", source_terms_file,
              "--text-file", text_file, "--candidates-file", candidates_file,
              "--expand-file", expand_file, "--dest", SRC["DEST"]],
             stdout=f)
@@ -1253,47 +1255,54 @@ def main() -> int:
             "--chapters for chaptered ingest or raise --limit so the source is "
             "not logged as complete from truncated text")
 
-    # ── §5 keyword pre-pass / §6 collect candidates ──
+    # ── §5 source-term pre-pass / §6 collect candidates ──
     cap = int(os.environ.get("CAND_CAP", "20"))
+    source_terms_file = mktemp()
     candidates_file = mktemp()
     pages = wiki_page_paths()
-    if len(pages) <= cap:
-        write(candidates_file, "".join(f"{p}\n" for p in pages))
-        out(f"{len(pages)} candidate pages (full vault, cap={cap}; skipped keyword pre-pass)")
+    source_head = text[:KEYWORD_SOURCE_HEAD_CHARS]
+    kw_prompt = (
+        "Extract all salient entity and concept names (people, products,\n"
+        "projects, concepts, methods, organisms, enzymes, proteins,\n"
+        "hypotheses, mechanisms, organizations, places) from the text below.\n"
+        "Include every distinct, non-trivial name or concept that is central,\n"
+        "recurring, or likely to deserve a reusable wiki node; do not stop at\n"
+        "a fixed count. Output a newline-separated list with no numbering, no\n"
+        "commentary, just one name per line. Use the same language as the\n"
+        "source text (do not translate).\n\n"
+        f"---\n{source_head}\n---\n"
+    )
+    out("extracting source key terms...")
+    write(source_terms_file, llm(kw_prompt, soft=True, model=args.keyword_model or None))
+    kw = read(source_terms_file)
+    nonws = sum(1 for c in kw if not c.isspace())
+    klines = kw.split("\n")
+    nonempty = sum(1 for ln in klines if ln.strip())
+    maxline = max((len(ln) for ln in klines), default=0)
+    kw_valid = nonws >= 5 and nonempty >= 2 and maxline <= 100
+    if not kw_valid:
+        eout("source key-term pre-pass output looks like an error/prose, not keywords.")
+        eout(f"  non-whitespace chars: {nonws} (need >=5)")
+        eout(f"  non-empty lines:      {nonempty} (need >=2)")
+        eout(f"  longest line:         {maxline} chars (need <=100)")
+        eout("  raw output:")
+        for ln in kw.splitlines():
+            print(f"  | {ln}", file=sys.stderr)
+        write(source_terms_file, "")
+        if len(pages) > cap:
+            die("source key-term pre-pass produced no usable output (LLM call failed?). "
+                "Aborting before candidate selection would run blind.")
+        eout("warn — continuing without source key terms because the full vault fits in the candidate cap")
     else:
-        keywords_file = mktemp()
-        source_head = text[:KEYWORD_SOURCE_HEAD_CHARS]
-        kw_prompt = (
-            "Extract all salient entity and concept names (people, products,\n"
-            "projects, concepts, methods, organizations, places) that would help\n"
-            "retrieve related wiki pages from the text below. Include every\n"
-            "distinct, non-trivial name or concept that is central or recurring;\n"
-            "do not stop at a fixed count. Output a newline-separated list with\n"
-            "no numbering, no commentary, just one name per line. Use the same\n"
-            "language as the source text (do not translate).\n\n"
-            f"---\n{source_head}\n---\n"
-        )
-        out("extracting key entities...")
-        write(keywords_file, llm(kw_prompt, soft=True, model=args.keyword_model or None))
-        kw = read(keywords_file)
-        nonws = sum(1 for c in kw if not c.isspace())
-        klines = kw.split("\n")
-        nonempty = sum(1 for ln in klines if ln.strip())
-        maxline = max((len(ln) for ln in klines), default=0)
-        if nonws < 5 or nonempty < 2 or maxline > 100:
-            eout("keyword pre-pass output looks like an error/prose, not keywords.")
-            eout(f"  non-whitespace chars: {nonws} (need >=5)")
-            eout(f"  non-empty lines:      {nonempty} (need >=2)")
-            eout(f"  longest line:         {maxline} chars (need <=100)")
-            eout("  raw output:")
-            for ln in kw.splitlines():
-                print(f"  | {ln}", file=sys.stderr)
-            die("keyword pre-pass produced no usable output (LLM call failed?). "
-                "Aborting before the main edit pass would run blind.")
-        out("keywords:")
+        out("source key terms:")
         for ln in kw.splitlines():
             print(f"  - {ln}")
-        collect_candidates(keywords_file, candidates_file, cap)
+
+    if len(pages) <= cap:
+        write(candidates_file, "".join(f"{p}\n" for p in pages))
+        out(f"{len(pages)} candidate pages (full vault, cap={cap})")
+    else:
+        collect_candidates(source_terms_file, candidates_file, cap)
 
     # ── §7 main ingest call ──
     # Sidecars only. git's `*` matches `/`, so "sources/*.md" also catches
@@ -1317,7 +1326,7 @@ def main() -> int:
     codex_workdir = mktempdir()
     os.environ["PW_CODEX_WORKDIR"] = codex_workdir
 
-    build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, section_label)
+    build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label)
     out(f"calling LLM (digest mode, {Path(prompt_file).stat().st_size} bytes)...")
     _seed_workset(codex_workdir, candidates_file, expand_file)
     write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
@@ -1328,7 +1337,7 @@ def main() -> int:
         out(f"LLM requested expansion of {n} file(s):")
         for ln in read(expand_file).splitlines():
             print(f"  - {ln}")
-        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, section_label)
+        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label)
         out(f"re-calling LLM with expanded content ({Path(prompt_file).stat().st_size} bytes)...")
         _seed_workset(codex_workdir, candidates_file, expand_file)
         write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
@@ -1410,7 +1419,7 @@ def main() -> int:
             write(fpath, "".join(x + "\n" for x in merged))
 
         eout(f"patch failed; auto-retry with {len(retry_set)} expanded path(s)...")
-        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, section_label)
+        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label)
         _seed_workset(codex_workdir, candidates_file, expand_file)
         write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))  # bash: || die "LLM call failed (retry)"
         handle_no_changes_or_continue(diff_raw, section_label)

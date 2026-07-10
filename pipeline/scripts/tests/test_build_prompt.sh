@@ -78,12 +78,22 @@ build_prompt() {
   local out="$2"
   {
     cat "$TOOLING_ROOT/prompts/ingest.md"
+    printf '\n\n---\n\n## SCHEMA\n'
+    cat "$TOOLING_ROOT/prompts/schema-ingest.md"
     printf '\n\n---\n\n## ALL_SOURCE_IDS\n%s\n' "$ALL_SOURCE_IDS"
     printf '\n---\n\n## TAXONOMY\n'
     cat wiki/_taxonomy.md
     printf '\n\n---\n\n## SOURCE_META\n'
     printf 'source_id: %s\nsha256: %s\nadded: %s\norigin_type: %s\norigin_ref: %s\nbasename: %s\n' \
       "$SOURCE_ID" "$SHA256" "$ADDED" "$ORIGIN_TYPE" "$ORIGIN_REF" "$DEST_BASENAME"
+    printf '\n## SOURCE_KEY_TERMS\n'
+    if [[ -s "$SOURCE_TERMS_FILE" ]]; then
+      terms="$(cat "$SOURCE_TERMS_FILE")"
+      printf '%s' "$terms"
+    else
+      printf '(not available)'
+    fi
+    printf '\n'
     printf '\n## SECTION_LABEL\n%s\n' "${SECTION_LABEL:-<none — cite as bare [src:$SOURCE_ID]>}"
     printf '\n## SOURCE_TEXT\n'
     cat "$TEXT_FILE"
@@ -125,6 +135,8 @@ export DEST_BASENAME="2026-05-28-test.epub"
 export ALL_SOURCE_IDS=$'01KQD4EYT6AR0DE208D70TCWCQ\n01TESTSOURCEID0000000000AB'
 TEXT_FILE="$TMP/text.md"; export TEXT_FILE
 printf '## 第一章\n这是一段用于测试 build-prompt 的源文本，含 ATP 与线粒体。\n' > "$TEXT_FILE"
+SOURCE_TERMS_FILE="$TMP/source-terms"; export SOURCE_TERMS_FILE
+printf 'ATP\n线粒体\n化学渗透偶联\n' > "$SOURCE_TERMS_FILE"
 CANDIDATES_FILE="$TMP/cands"; export CANDIDATES_FILE
 printf 'wiki/entities/mitochondria.md\nwiki/topics/eukaryotes.md\n' > "$CANDIDATES_FILE"
 export DEST="sources/test.epub"
@@ -137,6 +149,7 @@ run_case() {
     --source-id "$SOURCE_ID" --sha256 "$SHA256" --added "$ADDED" \
     --origin-type "$ORIGIN_TYPE" --origin-ref "$ORIGIN_REF" --basename "$DEST_BASENAME" \
     --section-label "$SECTION_LABEL" --all-source-ids "$ALL_SOURCE_IDS" \
+    --source-terms-file "$SOURCE_TERMS_FILE" \
     --text-file "$TEXT_FILE" --candidates-file "$CANDIDATES_FILE" \
     --expand-file "$expand_file" --dest "$DEST" > "$TMP/py"
   if diff -u "$TMP/golden" "$TMP/py" > "$TMP/diff"; then
