@@ -207,8 +207,8 @@ def sync_content(
     if not source_candidate.is_dir() or _is_empty_dir(source_candidate):
         raise SyncError(
             f"sync: wiki folder is empty or missing: {source_candidate}\n"
-            "      Set PW_CONTENT_DIR=/abs/path/to/wiki in backend/.env, "
-            "or run python3 scripts/vendor_content.py."
+            "      Run ./run.sh once to create repo-local content/, or set "
+            "PW_CONTENT_DIR=/abs/path/to/wiki for a different folder."
         )
 
     source = _resolve_existing_dir(source_candidate)

@@ -93,7 +93,7 @@ scripts/generate-mindmap.py --refresh  # re-call the LLM
 
 Transcription is **delegated to the external `script_generation` service**
 (`~/Documents/SourceCode/script_generation`, WhisperX large-v3 + pyannote
-diarization on a remote GPU host). **DailyNotes holds no media bytes and needs
+diarization on a remote GPU host). **The local wiki holds no media bytes and needs
 NO local `yt-dlp`/`ffmpeg`/`whisper`** — those live on the remote host. The
 vault side only needs the thin client + env. (expansion-plan §7.)
 

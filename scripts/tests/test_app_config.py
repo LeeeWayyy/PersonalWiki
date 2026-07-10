@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,6 +87,26 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(resolved, content.resolve())
             self.assertEqual(messages, [])
             self.assertFalse((root / "backend" / ".env").exists())
+
+    def test_bootstrap_local_env_creates_default_content_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "backend").mkdir()
+            (root / "backend" / ".env.example").write_text("PW_AUTH_TOKEN=\n", encoding="utf-8")
+            env: dict[str, str] = {}
+
+            resolved, messages = app_config.bootstrap_local_env(root, env)
+
+            self.assertEqual(resolved, (root / "content").resolve())
+            self.assertEqual(env["PW_CONTENT_DIR"], str((root / "content").resolve()))
+            self.assertTrue((root / "content" / ".git").is_dir())
+            self.assertTrue(any("created an empty wiki vault" in message for message in messages))
+            status = subprocess.run(
+                ["git", "-C", str(root / "content"), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertEqual(status.strip(), "")
 
 
 if __name__ == "__main__":

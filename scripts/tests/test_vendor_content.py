@@ -98,6 +98,19 @@ class VendorContentTests(unittest.TestCase):
             self.assertIn("not empty", msg)
             self.assertEqual((dest / "keep.md").read_text(encoding="utf-8"), "mine\n")
 
+    def test_cli_without_source_creates_empty_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "content"
+
+            rc = vendor_content.main(["--dest", str(dest)])
+
+            self.assertEqual(rc, 0)
+            self.assertTrue((dest / ".git").is_dir())
+            status = subprocess.run(
+                ["git", "-C", str(dest), "status", "--porcelain"],
+                capture_output=True, text=True).stdout
+            self.assertEqual(status.strip(), "")
+
     def test_init_git_snapshot_keeps_existing_gitignore(self):
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp)

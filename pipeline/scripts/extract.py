@@ -75,7 +75,7 @@ PDF_RASTER_DPI = 300
 # Max vertical gap (PDF points) between a figure and its caption line.
 PDF_CAPTION_MAX_GAP = 60.0
 WEB_IMAGE_CAP = 20            # max image downloads per page
-WEB_USER_AGENT = "DailyNotes-ingest/1.0 (+local-vault)"
+WEB_USER_AGENT = "PersonalWiki-ingest/1.0 (+local-vault)"
 WEB_TIMEOUT = 30              # seconds
 WEB_MAX_FILESIZE = 5 * 1024 * 1024
 

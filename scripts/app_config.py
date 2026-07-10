@@ -6,6 +6,7 @@ bootstrap.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import secrets
@@ -75,6 +76,25 @@ def content_dir(root: Path, env: dict[str, str] | None = None) -> Path:
     return abs_path(root, value)
 
 
+def default_content_dir(root: Path) -> Path:
+    return root.resolve() / "content"
+
+
+def is_default_content_dir(root: Path, path: Path) -> bool:
+    return path.expanduser().resolve(strict=False) == default_content_dir(root)
+
+
+def _init_empty_content(path: Path) -> tuple[bool, str]:
+    """Create an empty git-backed content vault using vendor_content's helper."""
+    vendor_path = Path(__file__).resolve().parent / "vendor_content.py"
+    spec = importlib.util.spec_from_file_location("_personal_wiki_vendor_content", vendor_path)
+    if spec is None or spec.loader is None:
+        return False, f"cannot load {vendor_path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.init_empty_content(path)
+
+
 def parse_port(
     name: str,
     value: str,
@@ -99,8 +119,8 @@ def validate_content_dir(
     *,
     error_cls: type[Exception] = AppConfigError,
     hint: str = (
-        "Set PW_CONTENT_DIR=/abs/path/to/wiki in backend/.env, or vendor once with "
-        "python3 scripts/vendor_content.py."
+        "The default wiki folder is repo-local content/. Set PW_CONTENT_DIR=/abs/path/to/wiki "
+        "only when using a different folder."
     ),
 ) -> None:
     if not path.is_dir():
@@ -120,8 +140,8 @@ def bootstrap_local_env(
     validate_content: bool = True,
     error_cls: type[Exception] = AppConfigError,
     content_hint: str = (
-        "Set PW_CONTENT_DIR=/abs/path/to/wiki in backend/.env, or vendor once with "
-        "python3 scripts/vendor_content.py."
+        "The default wiki folder is repo-local content/. Set PW_CONTENT_DIR=/abs/path/to/wiki "
+        "only when using a different folder."
     ),
 ) -> tuple[Path, list[str]]:
     """Prepare local env-file config and return the resolved wiki folder.
@@ -141,6 +161,13 @@ def bootstrap_local_env(
     resolved = content_dir(root, env).expanduser().resolve(strict=False)
     env["PW_CONTENT_DIR"] = str(resolved)
     if validate_content:
+        if is_default_content_dir(root, resolved) and (
+            not resolved.exists() or (resolved.is_dir() and not any(resolved.iterdir()))
+        ):
+            ok, message = _init_empty_content(resolved)
+            if not ok:
+                raise error_cls(f"failed to create default wiki folder at {resolved}: {message}")
+            messages.append(message)
         validate_content_dir(
             resolved,
             error_cls=error_cls,

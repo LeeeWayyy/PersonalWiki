@@ -75,6 +75,17 @@ class AppStartTests(unittest.TestCase):
             self.assertEqual(config.env["PW_AUTH_TOKEN"], "explicit-token")
             self.assertEqual(config.content_dir, explicit.resolve())
 
+    def test_build_config_creates_default_content_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_backend(root)
+
+            config = app_start.build_config([], root, {})
+
+            self.assertEqual(config.content_dir, (root / "content").resolve())
+            self.assertTrue((root / "content" / ".git").is_dir())
+            self.assertTrue(any("created an empty wiki vault" in msg for msg in config.messages))
+
     def test_sigterm_handler_raises_keyboard_interrupt(self):
         with self.assertRaises(KeyboardInterrupt):
             app_start._terminate_on_sigterm()

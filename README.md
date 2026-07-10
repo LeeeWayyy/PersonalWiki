@@ -54,20 +54,19 @@ path with `PW_CONTENT_DIR`:
 - `content/` — the fallback local wiki folder inside this repo, gitignored so the
   full book text / epub / private notes stay out of git history.
 
-Recommended setup:
+Default setup:
 
 ```sh
 cp backend/.env.example backend/.env
-# then set:
-# PW_CONTENT_DIR=/absolute/path/to/your/wiki-content
+# PW_CONTENT_DIR can stay unset; ./run.sh creates ./content automatically.
 ```
 
 Optional one-time fallback setup (copies or clones an existing vault into
 gitignored `./content`; a git source lets the ingest console commit into it):
 
 ```sh
-python3 scripts/vendor_content.py ~/Documents/DailyNotes/content
-# or:  PW_CONTENT_SOURCE=/path/to/content python3 scripts/vendor_content.py
+python3 scripts/vendor_content.py /path/to/existing/wiki-content
+# or:  PW_CONTENT_SOURCE=/path/to/existing/wiki-content python3 scripts/vendor_content.py
 ```
 
 ## Quick start
@@ -81,9 +80,10 @@ python3 scripts/app_start.py --dev  # hot-reload dev server (no Pagefind search)
 ```
 
 Then open http://localhost:4321 (backend on http://localhost:8787). On first run it
-installs deps, creates `backend/.env`, enables the local Codex provider, and
-generates `PW_AUTH_TOKEN` automatically. If you are not using `./content`, set
-`PW_CONTENT_DIR` to your wiki folder. Use `--open` or
+installs deps, creates `backend/.env`, creates the gitignored `./content` vault
+when missing, enables the local Codex provider, and generates `PW_AUTH_TOKEN`
+automatically. If you are not using `./content`, set `PW_CONTENT_DIR` to your
+wiki folder. Use `--open` or
 `PW_OPEN_UI=1` to open the site automatically after startup.
 
 Or run the pieces separately:

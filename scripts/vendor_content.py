@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import an existing wiki folder into the gitignored fallback ./content."""
+"""Create or import a local wiki folder into the gitignored fallback ./content."""
 from __future__ import annotations
 
 import argparse
@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SOURCE = Path.home() / "Documents" / "DailyNotes" / "content"
 
 # Seeded into a freshly-initialized content repo so regenerable caches never
 # show as untracked. Without this, ingest leaves wiki/.alias-index.json (etc.)
@@ -191,7 +190,7 @@ def import_content(source: Path, dest: Path = ROOT / "content", root: Path = ROO
         raise VendorContentError(
             f"source not found: {source}\n"
             "Pass the path to your wiki content, for example:\n"
-            "  python3 scripts/vendor_content.py ~/Documents/DailyNotes/content"
+            "  python3 scripts/vendor_content.py /path/to/existing/wiki-content"
         )
 
     reject_overlap(source, dest)
@@ -218,12 +217,20 @@ def import_content(source: Path, dest: Path = ROOT / "content", root: Path = ROO
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Import a wiki folder into ./content")
-    parser.add_argument("source", nargs="?", type=Path, default=Path(os.environ.get("PW_CONTENT_SOURCE", DEFAULT_SOURCE)))
+    parser = argparse.ArgumentParser(description="Create ./content or import an existing wiki folder into it")
+    parser.add_argument("source", nargs="?", type=Path, default=None)
     parser.add_argument("--dest", type=Path, default=ROOT / "content")
     args = parser.parse_args(argv)
     try:
-        for message in import_content(args.source, args.dest):
+        env_source = os.environ.get("PW_CONTENT_SOURCE")
+        source = args.source or (Path(env_source) if env_source else None)
+        if source is None:
+            ok, message = init_empty_content(args.dest)
+            if not ok:
+                raise VendorContentError(message)
+            print(message)
+            return 0
+        for message in import_content(source, args.dest):
             print(message)
     except VendorContentError as exc:
         print(exc, file=sys.stderr)

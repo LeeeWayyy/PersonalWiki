@@ -50,8 +50,8 @@ def configure_environment(
             validate_content=validate_content,
             error_cls=ServeConfigError,
             content_hint=(
-                "Set PW_CONTENT_DIR=/abs/path/to/wiki in backend/.env, "
-                "or run python3 scripts/vendor_content.py."
+                "The default wiki folder is repo-local content/. Set "
+                "PW_CONTENT_DIR=/abs/path/to/wiki only when using a different folder."
             ),
         )
     except OSError as exc:

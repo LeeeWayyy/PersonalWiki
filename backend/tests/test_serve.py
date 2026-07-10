@@ -64,16 +64,18 @@ def test_configure_environment_preserves_explicit_env(tmp_path):
 
 def test_configure_environment_bootstraps_backend_env_token(tmp_path):
     _write_backend(tmp_path)
-    _write_content(tmp_path / "content")
     env: dict[str, str] = {}
 
     config = serve.configure_environment(tmp_path, env)
 
     token = env["PW_AUTH_TOKEN"]
     assert token
+    assert (tmp_path / "content" / ".git").is_dir()
+    assert config.content_dir == (tmp_path / "content").resolve()
     assert re.search(rf"^PW_AUTH_TOKEN={re.escape(token)}$", (tmp_path / "backend" / ".env").read_text(), re.M)
     assert "created backend/.env" in config.messages
     assert "generated backend auth token in backend/.env" in config.messages
+    assert any("created an empty wiki vault" in msg for msg in config.messages)
 
 
 def test_configure_environment_rejects_missing_content(tmp_path):
