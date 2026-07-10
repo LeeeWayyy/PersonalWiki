@@ -1544,6 +1544,8 @@ def main() -> int:
     modified = [ln for ln in git_capture("diff", "--cached", "--name-only", "--relative").splitlines()
                 if WIKI_PAGE_RX.match(ln)]
     if modified:
+        out("normalizing llm-zone formatting...")
+        run_stream([f"{SCRIPTS}/format-llm-zone.py", *modified])
         out("ensuring page_id on modified pages...")
         run_stream([f"{SCRIPTS}/add-page-id.py", *modified])
         out("syncing frontmatter on modified pages...")

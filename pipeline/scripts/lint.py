@@ -84,6 +84,19 @@ def extract_citations(text: str) -> list[str]:
     return out
 
 
+def extract_citation_keys(text: str) -> list[str]:
+    """Return source ids with optional anchors (`<id>` or `<id>#<label>`).
+    Used when section/chapter granularity matters."""
+    text = _FENCED_CODE_RX.sub("", text)
+    out: list[str] = []
+    for m in BRACKETED_CITATION_RX.finditer(text):
+        for part in m.group(1).split(","):
+            cm = re.search(r"src:([A-Z0-9]{26})(#[^\]]*)?", part.strip())
+            if cm:
+                out.append(cm.group(1) + (cm.group(2) or ""))
+    return out
+
+
 # Time-range media anchors: `src:<ULID>#H:MM:SS-H:MM:SS` (hours optional).
 TIME_ANCHOR_RX = re.compile(
     # trailing (?![\w:-]) end-boundary: `#0:00-0:05x` must not prefix-match as `0:00-0:05`
@@ -837,6 +850,8 @@ def check_wikilinks() -> tuple[bool, list[str]]:
         rel = str(page.relative_to(VAULT_ROOT))
         self_pid = page_id_by_path.get(rel)
         for m in WIKILINK_RX.finditer(text):
+            if m.start() > 0 and text[m.start() - 1] == "!":
+                continue
             ref = m.group(1).strip()
             if not ref:
                 continue
@@ -870,7 +885,7 @@ def check_wikilinks() -> tuple[bool, list[str]]:
 
 
 def check_two_tier_format() -> tuple[bool, list[str]]:
-    """Pages with ≥2 distinct source_ids should use the two-tier
+    """Pages with ≥2 distinct source ids or source anchors should use the two-tier
     llm-zone (rolling `### Synthesis` + append-only
     `### From src:<id>#<label>` sections). Warn-only: existing single-
     source pages convert on the ingest that adds a second source."""
@@ -887,8 +902,8 @@ def check_two_tier_format() -> tuple[bool, list[str]]:
         if not m:
             continue
         body = m.group(1)
-        sources = set(extract_citations(body))
-        if len(sources) < 2:
+        citation_keys = set(extract_citation_keys(body))
+        if len(citation_keys) < 2:
             continue
         missing: list[str] = []
         if not synth_rx.search(body):
@@ -896,7 +911,7 @@ def check_two_tier_format() -> tuple[bool, list[str]]:
         if not persrc_rx.search(body):
             missing.append("### From src:<id>#<label>")
         if missing:
-            bad.append((page, len(sources), missing))
+            bad.append((page, len(citation_keys), missing))
     if not bad:
         notes.append("  ✓ all multi-source pages use two-tier format")
         return True, notes
@@ -906,7 +921,7 @@ def check_two_tier_format() -> tuple[bool, list[str]]:
     )
     for page, n, missing in bad:
         notes.append(
-            f"    {page.relative_to(VAULT_ROOT)}  ({n} sources, missing: {', '.join(missing)})"
+            f"    {page.relative_to(VAULT_ROOT)}  ({n} citation anchors, missing: {', '.join(missing)})"
         )
     return True, notes  # warn-only
 
