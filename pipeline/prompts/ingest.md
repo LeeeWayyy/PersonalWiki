@@ -32,6 +32,10 @@ Do not summarize the chapter as a chapter. Build graph nodes and
 synthesis pages. Obey `SCHEMA` for coverage, voice, citations, zones,
 frontmatter, tags, naming, images, and candidate-editing rules.
 
+Write useful human-facing notes. Important pages should read like
+compact explanatory wiki entries with context and synthesis, not like
+one-sentence fact cards.
+
 ## Scope
 
 Only create or modify files under:

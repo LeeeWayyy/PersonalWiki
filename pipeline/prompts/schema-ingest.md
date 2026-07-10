@@ -14,6 +14,8 @@ follow the stricter rule.
 - Do not treat `SOURCE_KEY_TERMS` as a quota. It is a recall checklist.
   If `SOURCE_TEXT` contains additional important concepts not listed
   there, still create or update pages for them.
+- There is no per-chapter entity cap. Coverage is bounded by conceptual
+  importance and reusability, not by a fixed count.
 - Prefer a dedicated `Entity` page for a singular reusable node: a
   biological structure, molecule, enzyme, species/group, mechanism,
   named theory, named person, named method, or named dataset.
@@ -87,8 +89,9 @@ tags: [...]
 
 ## Citations
 
-- Every claim in `llm-zone` ends with one or more `[src:<id>]`
-  citations.
+- Every substantive paragraph in `llm-zone` must end with one or more
+  `[src:<id>]` citations. If a paragraph mixes claims from different
+  sources, cite each sentence or clause where the source changes.
 - If `SECTION_LABEL` is present, every citation to this run's source
   must include it as an anchor: `[src:<id>#<SECTION_LABEL>]`.
 - Multiple citations are allowed: `[src:a,src:b]`.
@@ -162,10 +165,24 @@ prose is reserved for real attribution or comparison.
 
 ## Prose Shape
 
-- One idea per paragraph, usually 2-4 sentences. Lead with the
-  headline claim, then add mechanism, evidence, or context.
+- Wiki pages are for a human reader revisiting the idea later. Write
+  explanatory notes, not dictionary cards, flashcards, or a list of
+  isolated extracted facts.
+- One idea per paragraph, usually 2-5 sentences. Lead with the
+  headline claim, then develop it with mechanism, evidence, context,
+  implications, tradeoffs, or contrast with nearby concepts.
+- Important entity/topic pages should normally contain several
+  substantive paragraphs. For a central concept, cover what it is, why
+  it matters in this source, how it works, what it enables or constrains,
+  and how it relates to linked entities.
+- Do not make every paragraph a single sentence. A one-sentence
+  paragraph is acceptable only for a genuinely small bridge, image
+  placement, or simple alias/definition that needs no further context.
 - Do not stack unrelated claims into one dense sentence. Do not split
   one mechanism across multiple tiny paragraphs.
+- Synthesize across cited paragraphs when useful. Prefer compact,
+  readable continuity over preserving a chapter-by-chapter or
+  fact-by-fact ledger.
 - Use subheadings only when a page has at least three thematic groups.
 - Wiki pages are summaries, not evidence. Use wikilinks for graph
   navigation, not as citations.
