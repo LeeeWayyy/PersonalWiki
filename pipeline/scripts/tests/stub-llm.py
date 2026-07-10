@@ -30,6 +30,11 @@ entity = os.environ.get("STUB_ENTITY", "e2e-entity")
 # = a bare [src:<id>] citation, which is what the document-path e2e expects.
 anchor = os.environ.get("STUB_CARD_ANCHOR", "")
 
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug or "section"
+
 # Language-profile prompt (generate-language-pages.py): "## SENTENCES" and
 # "## WORDS" blocks. Emit the JSON the generator expects: every sentence
 # translated, every listed word glossed, plus one deterministic grammar point.
@@ -59,6 +64,15 @@ if "## SOURCE_TEXT" not in prompt:
     # Keyword pre-pass: short retrieval seeds, one per line.
     print("\n".join(["mitochondria", "ATP", "energy", entity, "biology"]))
     sys.exit(0)
+
+if os.environ.get("STUB_ENTITY_FROM_SECTION"):
+    m = re.search(
+        r"^## SECTION_LABEL\n(.+?)\n## SOURCE_TEXT",
+        prompt,
+        re.MULTILINE | re.DOTALL,
+    )
+    if m:
+        entity = f"{os.environ.get('STUB_ENTITY_PREFIX', '')}{_slug(m.group(1))}"
 
 # $STUB_NO_CHANGES=1 forces the main call to return NO_CHANGES (the LLM had nothing to add) —
 # the expected outcome of an --add-frames supersede, whose transcript is byte-identical to the
