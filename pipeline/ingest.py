@@ -544,7 +544,7 @@ def _audit_extra() -> list[str]:
 
 def build_prompt(expand_file: str, out_file: str, all_source_ids: str,
                  text_file: str, candidates_file: str, source_terms_file: str,
-                 section_label: str) -> None:
+                 section_label: str, operation: str = "digest") -> None:
     with open(out_file, "w", encoding="utf-8") as f:
         r = subprocess.run(
             [f"{SCRIPTS}/build-prompt.py",
@@ -554,7 +554,8 @@ def build_prompt(expand_file: str, out_file: str, all_source_ids: str,
              "--section-label", section_label, "--all-source-ids", all_source_ids,
              "--source-terms-file", source_terms_file,
              "--text-file", text_file, "--candidates-file", candidates_file,
-             "--expand-file", expand_file, "--dest", SRC["DEST"]],
+             "--expand-file", expand_file, "--dest", SRC["DEST"],
+             "--operation", operation],
             stdout=f)
     if r.returncode != 0:
         die("build-prompt failed")
@@ -1326,7 +1327,7 @@ def main() -> int:
     codex_workdir = mktempdir()
     os.environ["PW_CODEX_WORKDIR"] = codex_workdir
 
-    build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label)
+    build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label, "digest")
     out(f"calling LLM (digest mode, {Path(prompt_file).stat().st_size} bytes)...")
     _seed_workset(codex_workdir, candidates_file, expand_file)
     write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
@@ -1337,7 +1338,7 @@ def main() -> int:
         out(f"LLM requested expansion of {n} file(s):")
         for ln in read(expand_file).splitlines():
             print(f"  - {ln}")
-        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label)
+        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label, "expand")
         out(f"re-calling LLM with expanded content ({Path(prompt_file).stat().st_size} bytes)...")
         _seed_workset(codex_workdir, candidates_file, expand_file)
         write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
@@ -1419,7 +1420,7 @@ def main() -> int:
             write(fpath, "".join(x + "\n" for x in merged))
 
         eout(f"patch failed; auto-retry with {len(retry_set)} expanded path(s)...")
-        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label)
+        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label, "retry")
         _seed_workset(codex_workdir, candidates_file, expand_file)
         write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))  # bash: || die "LLM call failed (retry)"
         handle_no_changes_or_continue(diff_raw, section_label)

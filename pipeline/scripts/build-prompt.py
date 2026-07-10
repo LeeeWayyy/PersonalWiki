@@ -3,10 +3,9 @@
 # requires-python = ">=3.11"
 # ///
 """
-Assemble the main ingest prompt. Extracted verbatim from ingest.sh's
-`build_prompt` + `build_candidate_blob` (§14 refactor) — this is a
-BEHAVIOR-PRESERVING move: the emitted bytes must match the old bash
-heredoc exactly (verified by scripts/tests/test_build_prompt.sh).
+Assemble the main ingest prompt. This keeps the deterministic
+`build_prompt` + `build_candidate_blob` contract in one place, with
+byte-level coverage from scripts/tests/test_build_prompt.sh.
 
 Writes the full prompt to stdout. ingest.py redirects it to a file.
 
@@ -19,11 +18,13 @@ Inputs (all from ingest.py variables / files):
     --candidates-file one candidate path per line (may be empty/missing)
     --expand-file     paths to inline FULL; others are digests (may be empty)
     --dest            the source asset path (for <dest>.assets/_manifest.md)
+    --operation       digest | expand | retry
 
 Reads from the content repo ($VAULT_CONTENT_DIR): wiki/_taxonomy.md. Reads from
 the tooling repo (TOOLING_ROOT): prompts/ingest.md and
-prompts/schema-ingest.md. Shells out to scripts/page-digest.py and
-scripts/render-images-block.py (also tooling).
+prompts/schema-ingest.md. Selects schema rule blocks for the current operation.
+Shells out to scripts/page-digest.py and scripts/render-images-block.py (also
+tooling).
 """
 
 from __future__ import annotations
@@ -39,9 +40,90 @@ TOOLING_ROOT = Path(__file__).resolve().parent.parent  # tooling repo (scripts/,
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
 SCRIPTS = TOOLING_ROOT / "scripts"
 
+CORE_SCHEMA_SECTIONS = [
+    "Page Selection And Coverage",
+    "Page Types",
+    "Frontmatter",
+    "Tags",
+    "Zones",
+    "Citations",
+    "Voice And Attribution",
+    "Language And Naming",
+    "Prose Shape",
+]
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def _nonempty_lines(path: Path) -> list[str]:
+    if not path.is_file() or path.stat().st_size == 0:
+        return []
+    return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _split_schema_blocks(text: str) -> tuple[str, dict[str, str]]:
+    preamble: list[str] = []
+    blocks: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            blocks[current] = [line]
+            continue
+        if current is None:
+            preamble.append(line)
+        else:
+            blocks[current].append(line)
+    return "\n".join(preamble).rstrip() + "\n", {
+        key: "\n".join(lines).rstrip() + "\n" for key, lines in blocks.items()
+    }
+
+
+def _render_images_block(dest: str) -> str:
+    manifest = Path(f"{dest}.assets") / "_manifest.md"
+    if not manifest.is_file():
+        return "(no images extracted from this source)\n"
+    res = subprocess.run(
+        [str(SCRIPTS / "render-images-block.py"), str(manifest), dest],
+        capture_output=True, text=True,
+    )
+    if res.returncode == 0:
+        return res.stdout
+    return "(images-block render failed; LLM proceeds without image table)\n"
+
+
+def _image_block_has_rows(block: str) -> bool:
+    text = block.strip()
+    return bool(text) and not text.startswith("(")
+
+
+def _selected_schema(operation: str, candidates_file: Path, expand_file: Path,
+                     image_block: str) -> str:
+    preamble, blocks = _split_schema_blocks(_read(TOOLING_ROOT / "prompts" / "schema-ingest.md"))
+    candidates = _nonempty_lines(candidates_file)
+    expanded = _nonempty_lines(expand_file)
+    sections = list(CORE_SCHEMA_SECTIONS)
+
+    if candidates:
+        sections.append("Candidate Pages")
+        if expanded:
+            sections.append("Expanded Candidate Editing")
+        else:
+            sections.append("Candidate Digests And Expansion")
+        sections.extend(["Multi-Source Synthesis", "Candidate Updates And Conflicts"])
+
+    if _image_block_has_rows(image_block):
+        sections.append("Images")
+
+    if operation == "retry":
+        sections.append("Patch Retry")
+
+    missing = [name for name in sections if name not in blocks]
+    if missing:
+        raise SystemExit(f"schema-ingest.md missing section(s): {', '.join(missing)}")
+    return preamble + "\n" + "\n".join(blocks[name] for name in sections)
 
 
 def build_candidate_blob(candidates_file: Path, expand_file: Path, out) -> None:
@@ -86,10 +168,13 @@ def main() -> int:
     ap.add_argument("--candidates-file", required=True)
     ap.add_argument("--expand-file", required=True)
     ap.add_argument("--dest", required=True)
+    ap.add_argument("--operation", choices=["digest", "expand", "retry"], default="digest")
     args = ap.parse_args()
 
     expand_file = Path(args.expand_file)
     expand_nonempty = expand_file.is_file() and expand_file.stat().st_size > 0
+    candidates_file = Path(args.candidates_file)
+    image_block = _render_images_block(args.dest)
 
     out = sys.stdout
     # Keep stable high-reuse instructions first; source/candidate run data
@@ -98,7 +183,7 @@ def main() -> int:
     out.write(_read(TOOLING_ROOT / "prompts" / "ingest.md"))
     # 2. schema excerpt
     out.write("\n\n---\n\n## SCHEMA\n")
-    out.write(_read(TOOLING_ROOT / "prompts" / "schema-ingest.md"))
+    out.write(_selected_schema(args.operation, candidates_file, expand_file, image_block))
     # 3. ALL_SOURCE_IDS
     out.write(f"\n\n---\n\n## ALL_SOURCE_IDS\n{args.all_source_ids}\n")
     # 4. TAXONOMY
@@ -134,21 +219,10 @@ def main() -> int:
     else:
         out.write(" (digests only — emit expand action if you need full content)")
     out.write("\n")
-    build_candidate_blob(Path(args.candidates_file), expand_file, out)
+    build_candidate_blob(candidates_file, expand_file, out)
     # 10. IMAGES
     out.write("\n---\n\n## IMAGES\n")
-    manifest = Path(f"{args.dest}.assets") / "_manifest.md"
-    if manifest.is_file():
-        res = subprocess.run(
-            [str(SCRIPTS / "render-images-block.py"), str(manifest), args.dest],
-            capture_output=True, text=True,
-        )
-        if res.returncode == 0:
-            out.write(res.stdout)
-        else:
-            out.write("(images-block render failed; LLM proceeds without image table)\n")
-    else:
-        out.write("(no images extracted from this source)\n")
+    out.write(image_block)
     # 11. trailer
     if expand_nonempty:
         out.write("\n---\n\nNow emit the unified diff. Reminder: only modify\n")

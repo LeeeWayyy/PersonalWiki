@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Regression oracle for the §14 build_prompt extraction.
+# Regression oracle for prompt assembly.
 #
-# Holds a frozen copy of the ORIGINAL (pre-port) bash build_prompt +
-# build_candidate_blob — an independent "golden" reimplementation — and diffs
-# its output, byte-for-byte, against scripts/build-prompt.py on identical
-# inputs, in both digest and expand modes. No LLM involved. Run from the tooling
-# root:
+# Holds an independent "golden" reimplementation of build_prompt +
+# build_candidate_blob and diffs its output, byte-for-byte, against
+# scripts/build-prompt.py on identical inputs. No LLM involved. Run from the
+# tooling root:
 #   scripts/tests/test_build_prompt.sh
 #
 # When build-prompt.py's prompt assembly legitimately changes, update the copy
@@ -54,7 +53,7 @@ Existing topic note about cells.
 MD
 cd "$VAULT_ROOT"
 
-# ── golden: verbatim copy of ingest.sh build_candidate_blob + build_prompt ──
+# ── golden: independent copy of build_candidate_blob + build_prompt ─────────
 build_candidate_blob() {
   local expand_list="$1"
   local p
@@ -73,13 +72,87 @@ build_candidate_blob() {
   done < "$CANDIDATES_FILE"
 }
 
+rstrip_blank_lines() {
+  awk '{ lines[++n] = $0 } END { while (n > 0 && lines[n] == "") n--; for (i = 1; i <= n; i++) print lines[i] }'
+}
+
+schema_preamble() {
+  awk '/^## / { exit } { print }' "$TOOLING_ROOT/prompts/schema-ingest.md" | rstrip_blank_lines
+}
+
+schema_section() {
+  local heading="$1"
+  awk -v want="## $heading" '
+    /^## / { emit = ($0 == want) }
+    emit { print }
+  ' "$TOOLING_ROOT/prompts/schema-ingest.md" | rstrip_blank_lines
+}
+
+image_block_has_rows() {
+  local image_block="$1"
+  local first=""
+  [[ -s "$image_block" ]] || return 1
+  IFS= read -r first < "$image_block" || return 1
+  [[ "$first" != \(* ]]
+}
+
+build_schema() {
+  local operation="$1" expand_list="$2" image_block="$3"
+  local sections=(
+    "Page Selection And Coverage"
+    "Page Types"
+    "Frontmatter"
+    "Tags"
+    "Zones"
+    "Citations"
+    "Voice And Attribution"
+    "Language And Naming"
+    "Prose Shape"
+  )
+  if [[ -s "$CANDIDATES_FILE" ]]; then
+    sections+=("Candidate Pages")
+    if [[ -s "$expand_list" ]]; then
+      sections+=("Expanded Candidate Editing")
+    else
+      sections+=("Candidate Digests And Expansion")
+    fi
+    sections+=("Multi-Source Synthesis" "Candidate Updates And Conflicts")
+  fi
+  if image_block_has_rows "$image_block"; then
+    sections+=("Images")
+  fi
+  if [[ "$operation" == "retry" ]]; then
+    sections+=("Patch Retry")
+  fi
+
+  schema_preamble
+  printf '\n'
+  local first=1 section
+  for section in "${sections[@]}"; do
+    if [[ "$first" -eq 0 ]]; then
+      printf '\n'
+    fi
+    schema_section "$section"
+    first=0
+  done
+}
+
 build_prompt() {
   local expand_list="$1"
   local out="$2"
+  local operation="$3"
+  local image_block="$TMP/image-block"
+  if [[ -f "${DEST}.assets/_manifest.md" ]]; then
+    "$TOOLING_ROOT"/scripts/render-images-block.py "${DEST}.assets/_manifest.md" "$DEST" \
+      > "$image_block" 2>/dev/null \
+      || printf '(images-block render failed; LLM proceeds without image table)\n' > "$image_block"
+  else
+    printf '(no images extracted from this source)\n' > "$image_block"
+  fi
   {
     cat "$TOOLING_ROOT/prompts/ingest.md"
     printf '\n\n---\n\n## SCHEMA\n'
-    cat "$TOOLING_ROOT/prompts/schema-ingest.md"
+    build_schema "$operation" "$expand_list" "$image_block"
     printf '\n\n---\n\n## ALL_SOURCE_IDS\n%s\n' "$ALL_SOURCE_IDS"
     printf '\n---\n\n## TAXONOMY\n'
     cat wiki/_taxonomy.md
@@ -106,12 +179,7 @@ build_prompt() {
     printf '\n'
     build_candidate_blob "$expand_list"
     printf '\n---\n\n## IMAGES\n'
-    if [[ -f "${DEST}.assets/_manifest.md" ]]; then
-      "$TOOLING_ROOT"/scripts/render-images-block.py "${DEST}.assets/_manifest.md" "$DEST" \
-        2>/dev/null || printf '(images-block render failed; LLM proceeds without image table)\n'
-    else
-      printf '(no images extracted from this source)\n'
-    fi
+    cat "$image_block"
     if [[ -s "$expand_list" ]]; then
       printf '\n---\n\nNow emit the unified diff. Reminder: only modify\n'
       printf 'candidates shown in full or candidates whose digest has\n'
@@ -142,16 +210,17 @@ printf 'wiki/entities/mitochondria.md\nwiki/topics/eukaryotes.md\n' > "$CANDIDAT
 export DEST="sources/test.epub"
 
 run_case() {
-  local name="$1" expand_file="$2" section="$3"
+  local name="$1" expand_file="$2" section="$3" operation="$4"
   SECTION_LABEL="$section"; export SECTION_LABEL
-  build_prompt "$expand_file" "$TMP/golden"
+  build_prompt "$expand_file" "$TMP/golden" "$operation"
   "$TOOLING_ROOT"/scripts/build-prompt.py \
     --source-id "$SOURCE_ID" --sha256 "$SHA256" --added "$ADDED" \
     --origin-type "$ORIGIN_TYPE" --origin-ref "$ORIGIN_REF" --basename "$DEST_BASENAME" \
     --section-label "$SECTION_LABEL" --all-source-ids "$ALL_SOURCE_IDS" \
     --source-terms-file "$SOURCE_TERMS_FILE" \
     --text-file "$TEXT_FILE" --candidates-file "$CANDIDATES_FILE" \
-    --expand-file "$expand_file" --dest "$DEST" > "$TMP/py"
+    --expand-file "$expand_file" --dest "$DEST" \
+    --operation "$operation" > "$TMP/py"
   if diff -u "$TMP/golden" "$TMP/py" > "$TMP/diff"; then
     echo "  ✓ $name: byte-identical ($(wc -c < "$TMP/golden" | tr -d ' ') bytes)"
   else
@@ -164,8 +233,30 @@ EXPAND="$TMP/expand"; printf 'wiki/entities/mitochondria.md\n' > "$EXPAND"
 
 rc=0
 echo "test_build_prompt:"
-run_case "digest mode, no section-label" "$EMPTY" "" || rc=1
-run_case "digest mode, with section-label" "$EMPTY" "第一章" || rc=1
-run_case "expand mode (1 file)" "$EXPAND" "第一章" || rc=1
+run_case "digest mode, no section-label" "$EMPTY" "" "digest" || rc=1
+run_case "digest mode, with section-label" "$EMPTY" "第一章" "digest" || rc=1
+run_case "expand mode (1 file)" "$EXPAND" "第一章" "expand" || rc=1
+
+mkdir -p "${DEST}.assets"
+cat > "${DEST}.assets/_manifest.md" <<'MD'
+---
+schema_version: 1
+source_id: SRC1
+images:
+  - file: fig1.png
+    sha256: 0123456789abcdef
+    bytes: 12345
+    dimensions: [640, 480]
+    origin_refs: []
+    decorative: false
+    caption: Test figure caption
+    caption_source: vision
+    caption_model: test
+    caption_at: 2026-05-28T00:00:00Z
+    caption_error: null
+    caption_error_kind: null
+---
+MD
+run_case "retry mode with image table" "$EXPAND" "第一章" "retry" || rc=1
 [[ $rc -eq 0 ]] && echo "  ALL PASS" || echo "  FAIL"
 exit $rc

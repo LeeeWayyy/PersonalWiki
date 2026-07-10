@@ -1,33 +1,28 @@
-# Schema Excerpt for Wiki Ingest
+# Schema Rule Blocks for Wiki Ingest
 
-This is the runtime subset of `schema.md` that applies to main wiki
-ingest. It is binding. If this excerpt and the shorter ingest prompt
-overlap, follow the stricter rule.
+This file is split into named rule blocks. `build-prompt.py` selects the
+blocks relevant to the current operation. If two selected blocks overlap,
+follow the stricter rule.
 
 ## Page Selection And Coverage
 
 - Integrate the source into a graph, not a chapter summary. Create or
-  update enough pages to cover the source's central entities, mechanisms,
-  hypotheses, processes, named organisms, named enzymes/proteins,
-  named people, named books, and recurring technical concepts.
-- Do not treat the keyword/source-term pre-pass as a quota. It is a
-  recall checklist. If `SOURCE_TEXT` contains additional important
-  concepts not listed in `SOURCE_KEY_TERMS`, still create or update
-  pages for them.
-- Prefer a dedicated `Entity` page for a singular concept that will be
-  useful as a reusable node: a biological structure, molecule, enzyme,
-  species/group, mechanism, named theory, named person, named method,
-  or named dataset.
-- Prefer a `Topic` page when the page synthesizes a question or theme
-  spanning multiple entities or sources: origin stories, tradeoffs,
-  disputes, causal chains, and comparative frameworks.
+  update enough pages to cover the source's central entities,
+  mechanisms, hypotheses, processes, named organisms, named
+  enzymes/proteins, named people, named books, and recurring technical
+  concepts.
+- Do not treat `SOURCE_KEY_TERMS` as a quota. It is a recall checklist.
+  If `SOURCE_TEXT` contains additional important concepts not listed
+  there, still create or update pages for them.
+- Prefer a dedicated `Entity` page for a singular reusable node: a
+  biological structure, molecule, enzyme, species/group, mechanism,
+  named theory, named person, named method, or named dataset.
+- Prefer a `Topic` page for a synthesis question or theme spanning
+  multiple entities or sources: origin stories, tradeoffs, disputes,
+  causal chains, and comparative frameworks.
 - Do not create pages for chapter titles, section titles, generic
   phrases, one-off examples, or source-local rhetorical labels unless
   they are also real reusable concepts.
-- Candidate recall is bounded. A needed new page may be absent from
-  `CANDIDATE_PAGES`; create it when the source clearly warrants it.
-  Alias uniqueness lint will catch duplicates outside the candidate
-  window.
 
 ## Page Types
 
@@ -58,8 +53,20 @@ tags: [...]
 - `aliases:` must include every important surface form seen in the
   source plus cross-language names when known. Do not invent unknown
   translations.
-- `tags:` must use only tags present in `TAXONOMY`. Emit flow style:
-  `tags: [concept, biology/cell]`.
+- `tags:` must use only tags present in `TAXONOMY`.
+
+## Tags
+
+- Every entity/topic page carries 2-4 tags drawn only from `TAXONOMY`.
+- Emit `tags:` in single-line flow style: `tags: [concept,
+  biology/cell]`.
+- Pick exactly one Form tag and at least one Domain tag.
+- Optional secondary tags may be Domain or Reserved tags.
+- Preserve existing page tags unless the new source meaningfully
+  changes the page's form or primary domain.
+- Use `taxonomy-gap` only alongside the closest available Domain tag
+  when the source clearly needs a missing Domain. It does not replace
+  the required Domain tag.
 
 ## Zones
 
@@ -68,12 +75,15 @@ tags: [...]
 - Never edit `human-zone`.
 - Every new or modified page must include the closing
   `<!-- /llm-zone -->` marker.
-- Single-source pages may use one simple callout. When a page has two
-  or more distinct sources, use a top `### Synthesis` section followed
-  by append-only `### From src:<id>#<label>` evidence sections.
-- Rewrite `### Synthesis` on each ingest so it integrates all sources
-  currently on the page. Edit an existing matching `### From ...`
-  section in place; never duplicate the same source+anchor heading.
+- New single-source pages may use one simple callout:
+
+```markdown
+<!-- llm-zone -->
+> [!AI] LLM Synthesis
+>
+> One idea, developed in prose, with a citation [src:<id>#<label>].
+<!-- /llm-zone -->
+```
 
 ## Citations
 
@@ -119,7 +129,7 @@ Good entity prose:
 ```
 
 Topic pages discuss how sources frame a subject, but source-narrating
-prose is still reserved for real attribution or comparison.
+prose is reserved for real attribution or comparison.
 
 - Default to declarative topic prose.
 - Do not use a chapter number as the grammatical subject. The citation
@@ -129,19 +139,6 @@ prose is still reserved for real attribution or comparison.
 - Distinguish authorial claims from relayed textbook knowledge. If the
   source merely reports established facts, write the fact
   declaratively and cite the source as provenance.
-
-Bad topic prose:
-
-```markdown
-> 第七章把利率病归因于危机应对的路径依赖 [src:x#第七章].
-```
-
-Good topic prose:
-
-```markdown
-> 付鹏在《见证逆潮》第七章中把利率病归因于危机应对的路径依赖 [src:x#第七章].
-> 金融化、货币政策与贫富差距可处于同一条链条上 [src:x#第七章].
-```
 
 ## Language And Naming
 
@@ -168,10 +165,76 @@ Good topic prose:
 - Wiki pages are summaries, not evidence. Use wikilinks for graph
   navigation, not as citations.
 
+## Candidate Pages
+
+- Before creating a new entity/topic page, check `CANDIDATE_PAGES`
+  carefully, including each candidate's `aliases:` frontmatter.
+- A page may already exist under a different surface form. Update that
+  existing page instead of creating a duplicate.
+- Candidate recall is bounded. If the source clearly warrants a page
+  that is absent from candidates, create it; alias-uniqueness lint will
+  catch duplicates outside the candidate window.
+- When prose mentions an existing entity from `CANDIDATE_PAGES` or any
+  declared alias, wikilink the mention. Use `[[stem|alias]]` when the
+  visible form differs from the target title.
+
+## Candidate Digests And Expansion
+
+- Candidate pages may be shown as digests. If a digest contains a
+  `<!-- digest: ... elided -->` marker and you intend to modify that
+  page, emit an expand request first.
+- Do not generate hunk context from a truncated digest. It will fail
+  `git apply`.
+- You may create new pages without expansion.
+- Expansion is allowed at most once per ingest pass.
+
+## Expanded Candidate Editing
+
+- Some candidates are shown in full because you requested expansion.
+  You may modify those pages directly.
+- Candidates still shown only as truncated digests must remain
+  unchanged.
+- Preserve human-owned text outside `llm-zone`.
+
+## Multi-Source Synthesis
+
+- When a page has two or more distinct sources, use a rolling
+  `### Synthesis` section followed by append-only
+  `### From src:<id>#<label>` evidence sections.
+- Rewrite `### Synthesis` on each ingest so it integrates all sources
+  currently on the page.
+- Edit an existing matching `### From ...` section in place; never
+  duplicate the same source+anchor heading.
+- Citations inside `### Synthesis` may combine sources. Citations
+  inside an evidence section cite only that source.
+- `### From src:<id>#<label>` is a section label, not a citation. Do
+  not put bracketed `[src:...]` syntax in the heading.
+
+## Candidate Updates And Conflicts
+
+- Preserve existing claims unless the new source provides a clear
+  correction.
+- If the source contradicts an existing claim, keep both and insert an
+  inline highlight near the affected line:
+  `==CONFLICT: <new_source_id> claims X; existing from <old_source_id> says Y.==`
+- Preserve existing page tags unless the new source changes the page's
+  scope.
+
 ## Images
 
 - Embed only images listed in `IMAGES`.
-- Use Obsidian transclude syntax `![[sources/<asset>.assets/<file>]]`.
+- Use Obsidian transclude syntax: `![[sources/<asset>.assets/<file>]]`.
   Markdown image syntax is forbidden in `llm-zone`.
 - Put image embeds in the evidence section that cites the matching
   source. Never place source-specific images in `### Synthesis`.
+- Never invent or modify captions. Use the caption text from `IMAGES`.
+- If prose references a figure absent from `IMAGES`, cite the prose
+  but omit the embed.
+
+## Patch Retry
+
+- This pass exists because the previous diff did not apply cleanly.
+- Prefer smaller, conservative hunks with exact context from the shown
+  candidate content.
+- Do not broaden the edit scope to compensate for patch failure.
+- Emit a raw unified diff only; no explanations.
