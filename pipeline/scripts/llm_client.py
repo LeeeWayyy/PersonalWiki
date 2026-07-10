@@ -77,6 +77,13 @@ def _codex_bin() -> str:
     return _env("PW_CODEX_BIN", "codex")
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in TRUTHY
+
+
 def codex_requested() -> bool:
     if _api_requested():
         return False
@@ -264,12 +271,21 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
     os.close(fd)
     efd, err_file = tempfile.mkstemp(prefix="pw-codex-err-")
     os.close(efd)
-    argv = [*base_argv, "--json", "-o", diff_file, prompt]
+    argv = [*base_argv, "--json", "-o", diff_file, "-"]
     proc = None
     stdout_thread = None
+    stdin_thread = None
     stdout_lines: queue.Queue[object] = queue.Queue()
     state: dict = {}
     heartbeat_s = _codex_heartbeat_interval()
+
+    def write_stdin() -> None:
+        try:
+            assert proc is not None and proc.stdin is not None
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
 
     def flush_stdout_lines() -> bool:
         stdout_done = False
@@ -293,15 +309,21 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
     try:
         with open(err_file, "w") as errf:
             proc = subprocess.Popen(
-                argv, stdout=subprocess.PIPE, stderr=errf, text=True,
+                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
                 cwd=cwd, start_new_session=True)
         assert proc.stdout is not None
+        stdin_thread = threading.Thread(
+            target=write_stdin,
+            daemon=True,
+            name="codex-stdin-write",
+        )
         stdout_thread = threading.Thread(
             target=_enqueue_stdout_lines,
             args=(proc.stdout, stdout_lines),
             daemon=True,
             name="codex-stdout-drain",
         )
+        stdin_thread.start()
         stdout_thread.start()
         try:
             started = time.monotonic()
@@ -331,8 +353,15 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
         except subprocess.TimeoutExpired as exc:
             _kill_process_group(proc)
             proc.wait()
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
             if proc.stdout is not None:
                 proc.stdout.close()
+            if stdin_thread is not None:
+                stdin_thread.join(timeout=1)
             if stdout_thread is not None:
                 stdout_thread.join(timeout=1)
             flush_stdout_lines()
@@ -343,6 +372,11 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
             raise RuntimeError(f"LLM command failed: {detail}")
         return Path(diff_file).read_text(encoding="utf-8", errors="replace").strip() or None
     finally:
+        if proc is not None and proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
         if proc is not None and proc.stdout is not None:
             proc.stdout.close()
         for p in (diff_file, err_file):
@@ -376,7 +410,25 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
         seeded = _env("PW_CODEX_WORKDIR")
         own = not (seeded and Path(seeded).is_dir())
         workdir = tempfile.mkdtemp(prefix="pw-codex-") if own else seeded
-        argv = [_codex_bin(), *CODEX_ARGS, "-C", workdir, "--sandbox", "workspace-write"]
+        argv = [_codex_bin(), *CODEX_ARGS]
+        if _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True):
+            argv.append("--ignore-user-config")
+        if _env_bool("PW_CODEX_IGNORE_RULES", True):
+            argv.append("--ignore-rules")
+        if _env_bool("PW_CODEX_EPHEMERAL", False):
+            argv.append("--ephemeral")
+        if _env_bool("PW_CODEX_DISABLE_SHELL", False):
+            argv += ["--disable", "shell_tool"]
+        reasoning = _env("PW_CODEX_REASONING_EFFORT", "medium")
+        if reasoning:
+            argv += ["-c", f"model_reasoning_effort={json.dumps(reasoning)}"]
+        verbosity = _env("PW_CODEX_VERBOSITY", "low")
+        if verbosity:
+            argv += ["-c", f"model_verbosity={json.dumps(verbosity)}"]
+        service_tier = _env("PW_CODEX_SERVICE_TIER")
+        if service_tier:
+            argv += ["-c", f"service_tier={json.dumps(service_tier)}"]
+        argv += ["-C", workdir, "--sandbox", "workspace-write"]
         model_name = (model or "").strip() or _env("PW_LLM_MODEL")
         if model_name:
             argv += ["-m", model_name]

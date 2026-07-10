@@ -51,9 +51,10 @@ def _fake_codex(emit_events: bool = False) -> str:
         "#!/usr/bin/env python3\n"
         "import os, sys, json\n"
         "argv = sys.argv[1:]\n"
+        "stdin = sys.stdin.read()\n"
         "out = argv[argv.index('-o') + 1] if '-o' in argv else None\n"
         f"{events}"
-        "payload = ' '.join(argv) + '\\nCWD=' + os.getcwd()\n"
+        "payload = ' '.join(argv) + '\\nSTDIN=' + stdin + '\\nCWD=' + os.getcwd()\n"
         "open(out, 'w').write(payload) if out else sys.stdout.write(payload)\n"
     )
 
@@ -144,8 +145,14 @@ class LlmClientTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=True):
                 self.assertEqual(llm_client.provider(), "codex")
-                # diff comes from the -o file, which echoes argv (prompt last)
-                self.assertIn("hello", llm_client.complete_command("hello", timeout=5))
+                out = llm_client.complete_command("hello", timeout=5)
+            self.assertIn("--ignore-user-config", out)
+            self.assertIn("--ignore-rules", out)
+            self.assertIn('model_reasoning_effort="medium"', out)
+            self.assertIn('model_verbosity="low"', out)
+            self.assertIn("-o ", out)
+            self.assertIn(" -", out)
+            self.assertIn("STDIN=hello", out)
 
     def test_codex_uses_pw_llm_model_when_set(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -160,7 +167,7 @@ class LlmClientTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 out = llm_client.complete_command("hello", timeout=5)
             self.assertIn("-m gpt-5-codex", out)  # model passed through
-            self.assertIn("hello", out)           # prompt passed through
+            self.assertIn("STDIN=hello", out)     # prompt passed through stdin
 
     def test_codex_call_model_override_takes_precedence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -176,6 +183,32 @@ class LlmClientTests(unittest.TestCase):
                 out = llm_client.complete_command("keywords", timeout=5, model="cheap-keyword-model")
             self.assertIn("-m cheap-keyword-model", out)
             self.assertNotIn("expensive-ingest-model", out)
+
+    def test_codex_automation_profile_can_be_overridden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_IGNORE_USER_CONFIG": "0",
+                "PW_CODEX_IGNORE_RULES": "0",
+                "PW_CODEX_EPHEMERAL": "1",
+                "PW_CODEX_DISABLE_SHELL": "1",
+                "PW_CODEX_REASONING_EFFORT": "low",
+                "PW_CODEX_VERBOSITY": "medium",
+                "PW_CODEX_SERVICE_TIER": "priority",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                out = llm_client.complete_command("hello", timeout=5)
+            self.assertNotIn("--ignore-user-config", out)
+            self.assertNotIn("--ignore-rules", out)
+            self.assertIn("--ephemeral", out)
+            self.assertIn("--disable shell_tool", out)
+            self.assertIn('model_reasoning_effort="low"', out)
+            self.assertIn('model_verbosity="medium"', out)
+            self.assertIn('service_tier="priority"', out)
 
     def test_codex_reuses_seeded_workdir_without_deleting_it(self):
         # When ingest seeds a workdir (candidate pages), codex must run there and
