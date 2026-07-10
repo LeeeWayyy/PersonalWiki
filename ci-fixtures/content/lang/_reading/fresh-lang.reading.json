@@ -9,9 +9,24 @@
       "paragraphs": [
         {
           "sentences": [
-            { "jp": "新しい読書データ。" }
+            {
+              "jp": "新しい読書データ。",
+              "en": "Fresh reading data.",
+              "tokens": [
+                { "t": "新しい", "rt": "あたらしい", "w": "新しい", "m": "new", "pos": "形容詞", "new": true },
+                { "t": "読書", "rt": "どくしょ", "w": "読書", "m": "reading", "pos": "名詞", "new": true },
+                { "t": "データ。" }
+              ],
+              "grammar": [
+                { "pattern": "名詞 + データ", "explanation": "A noun compound used as a topic phrase.", "example_jp": "読書データ。", "s": 1 }
+              ]
+            },
+            { "jp": "追加の文。" }
           ]
         }
+      ],
+      "grammar": [
+        { "pattern": "名詞 + データ", "explanation": "A noun compound used as a topic phrase.", "example_jp": "読書データ。", "s": 1 }
       ]
     }
   ]

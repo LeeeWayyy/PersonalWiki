@@ -28,6 +28,8 @@ describe('source reader chapter helpers', () => {
     const chapters = sourceReaderSections(blocks);
 
     assert.equal(chapterForSourceAnchor(chapters, '第一章').id, 's-one');
+    assert.equal(chapterForSourceAnchor(chapters, 'A = B').id, 's-symbols');
+    assert.equal(chapterForSourceAnchor(chapters, 'B & C').id, 's-symbols');
     assert.equal(chapterForSourceAnchor(chapters, 'p-d').id, 's-intro-3');
     assert.equal(chapterForSourceAnchor(chapters, '#b=p-d').id, 's-intro-3');
     assert.equal(chapterForSourceAnchor(chapters, '#sec=A%20%3D%20B%20%26%20C').id, 's-symbols');
