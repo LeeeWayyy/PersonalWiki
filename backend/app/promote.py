@@ -81,7 +81,9 @@ def render_note(anno: dict, source_title: str) -> str:
 
 def _anno_block_re(aid: str) -> re.Pattern:
     return re.compile(
-        r"\n?<!--\s*anno:" + re.escape(aid) + r"\s*-->.*?<!--\s*/anno:" + re.escape(aid) + r"\s*-->\n?",
+        r"\n?<!--\s*anno:" + re.escape(aid) + r"\s*-->"
+        r"(?:(?!<!--\s*/?anno:).)*"
+        r"<!--\s*/anno:" + re.escape(aid) + r"\s*-->\n?",
         re.DOTALL,
     )
 

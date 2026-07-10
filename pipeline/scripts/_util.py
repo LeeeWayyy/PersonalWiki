@@ -27,8 +27,13 @@ _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 LOG_LINE_RX = re.compile(r"^\S+\s+([0-9A-Z]{26})(?:#(.*))?\s{2,}pages:")
 
 
+def _log_prefix() -> str:
+    run_id = os.environ.get("PW_RUN_ID", "").strip()
+    return f"ingest[{run_id}]" if run_id else "ingest"
+
+
 def die(msg: str) -> None:
-    print(f"ingest: {msg}", file=sys.stderr)
+    print(f"{_log_prefix()}: {msg}", file=sys.stderr)
     raise SystemExit(1)
 
 
@@ -47,7 +52,7 @@ def default_vault_root(tooling_root: str | Path) -> Path:
 
 
 def progress(msg: str) -> None:
-    print(f"ingest: {msg}", file=sys.stderr)
+    print(f"{_log_prefix()}: {msg}", file=sys.stderr)
 
 
 def sha256_of(path: str | Path) -> str:

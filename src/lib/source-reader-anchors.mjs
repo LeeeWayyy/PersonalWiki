@@ -50,9 +50,29 @@ export function locateQuote(text, selector) {
     return { start, end: start + quote.length, exact: true };
   }
 
-  const idx = source.indexOf(quote);
-  if (idx >= 0) return { start: idx, end: idx + quote.length, exact: true };
-  return null;
+  const hits = [];
+  for (let idx = source.indexOf(quote); idx >= 0; idx = source.indexOf(quote, idx + 1)) {
+    hits.push(idx);
+  }
+  if (!hits.length) return null;
+  const prefix = selector?.prefix || '';
+  const suffix = selector?.suffix || '';
+  const preferred = typeof start === 'number' && start >= 0 ? start : null;
+  let best = hits[0];
+  let bestScore = -Infinity;
+  for (const idx of hits) {
+    const before = source.slice(Math.max(0, idx - prefix.length), idx);
+    const after = source.slice(idx + quote.length, idx + quote.length + suffix.length);
+    let score = 0;
+    if (prefix && before === prefix) score += 1000 + prefix.length;
+    if (suffix && after === suffix) score += 1000 + suffix.length;
+    if (preferred != null) score -= Math.abs(idx - preferred) / 1000;
+    if (score > bestScore) {
+      best = idx;
+      bestScore = score;
+    }
+  }
+  return { start: best, end: best + quote.length, exact: true };
 }
 
 function fuzzyLocateQuote(text, selector) {

@@ -56,7 +56,7 @@ if "## SENTENCES" in prompt and "## WORDS" in prompt:
 # The main ingest prompt contains the SOURCE_TEXT + CANDIDATE_PAGES blocks;
 # the keyword pre-pass prompt does not.
 if "## SOURCE_TEXT" not in prompt:
-    # Keyword pre-pass: 5 short keywords, one per line.
+    # Keyword pre-pass: short retrieval seeds, one per line.
     print("\n".join(["mitochondria", "ATP", "energy", entity, "biology"]))
     sys.exit(0)
 

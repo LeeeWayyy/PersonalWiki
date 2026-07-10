@@ -151,6 +151,25 @@ class Job:
         self.ended = True
 
 
+class _JobLogHandler(logging.Handler):
+    """Tee backend records emitted during one job into that job's durable log."""
+
+    def __init__(self, job: Job):
+        super().__init__(level=logging.INFO)
+        self.job = job
+        self._emitting = False
+        self.setFormatter(logging.Formatter("backend %(levelname)s %(name)s: %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._emitting or self.job.ended:
+            return
+        try:
+            self._emitting = True
+            self.job.emit(self.format(record))
+        finally:
+            self._emitting = False
+
+
 def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -279,7 +298,11 @@ async def _stream(proc: asyncio.subprocess.Process, job: Job, *, idle_timeout_s:
 
 async def _stream_until_exit(proc: asyncio.subprocess.Process, job: Job) -> int:
     await _stream(proc, job)
-    return await proc.wait()
+    try:
+        return await asyncio.wait_for(proc.wait(), timeout=PROCESS_CLEANUP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        await _kill_process_group(proc, job, "process with closed output")
+        raise
 
 
 async def _kill_process_group(proc: asyncio.subprocess.Process, job: Job, label: str) -> None:
@@ -351,7 +374,47 @@ def _cleanup_staged_target(target: str, job_id: str) -> None:
         )
 
 
+def sweep_stage_dir() -> None:
+    """Remove staged uploads left behind by a previous crashed backend."""
+    try:
+        entries = list(settings.STAGE_DIR.iterdir())
+    except FileNotFoundError:
+        return
+    except Exception as e:  # noqa
+        LOGGER.warning("failed to inspect staged ingest upload dir path=%s: %s", settings.STAGE_DIR, e)
+        return
+    for path in entries:
+        try:
+            if path.is_file() or path.is_symlink():
+                path.unlink(missing_ok=True)
+        except Exception as e:  # noqa
+            LOGGER.warning("failed to remove stale staged ingest upload path=%s: %s", path, e)
+
+
+async def shutdown_jobs() -> None:
+    """Terminate non-terminal ingest/rebuild processes before the app exits."""
+    active = [job for job in JOBS.values() if job.status not in TERMINAL_STATUSES]
+    for job in active:
+        job.cancel_requested = True
+        proc = job.process
+        if proc and proc.returncode is None:
+            job.emit("backend shutdown: terminating active process")
+            await _kill_process_group(proc, job, "shutdown")
+        if job.task and not job.task.done():
+            job.task.cancel()
+    if active:
+        await asyncio.gather(
+            *(job.task for job in active if job.task),
+            return_exceptions=True,
+        )
+    for job in active:
+        if not job.ended:
+            job.finish_terminal("canceled", {"status": "canceled", "shutdown": True}, ["canceled by backend shutdown"])
+
+
 async def run_job(job: Job, target: str, options: dict):
+    job_handler = _JobLogHandler(job)
+    logging.getLogger("app").addHandler(job_handler)
     try:
         async with LOCK:
             if job.cancel_requested:
@@ -481,6 +544,15 @@ async def run_job(job: Job, target: str, options: dict):
                     return
                 job.emit("site rebuilt ✓")
             job.finish_terminal("done", {"status": "done"})
+    except asyncio.CancelledError:
+        LOGGER.info("ingest job cancelled job_id=%s", job.id)
+        proc = job.process
+        if proc and proc.returncode is None:
+            await _kill_process_group(proc, job, "cancel")
+        job.process = None
+        if not job.ended:
+            job.finish_terminal("canceled", {"status": "canceled", "shutdown": True}, ["canceled by backend shutdown"])
+        raise
     except Exception as e:  # noqa
         LOGGER.exception("ingest job failed job_id=%s", job.id)
         proc = job.process
@@ -489,6 +561,7 @@ async def run_job(job: Job, target: str, options: dict):
         job.process = None
         job.finish_terminal("error", {"status": "error", "error": str(e)}, [f"error: {e}"])
     finally:
+        logging.getLogger("app").removeHandler(job_handler)
         if job.status in TERMINAL_STATUSES:
             await asyncio.to_thread(_cleanup_staged_target, target, job.id)
 

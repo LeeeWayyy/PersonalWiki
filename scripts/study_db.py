@@ -76,6 +76,12 @@ def restore(src: Path, db: Path = DEFAULT_DB, backup_dir: Path = DEFAULT_BACKUP_
     backup_dir.mkdir(parents=True, exist_ok=True)
     safety: Path | None = None
     if db.is_file():
+        try:
+            same_file = src.samefile(db)
+        except OSError:
+            same_file = src == db
+        if same_file:
+            raise StudyDbError("refusing to restore study db from itself")
         safety = _unique_path(backup_dir / f"pre-restore-{_timestamp()}.db")
         _safety_copy(db, safety)
     for suffix in ("-shm", "-wal"):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import uuid
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -60,6 +61,65 @@ def _validate_links(links) -> list[dict]:
             raise HTTPException(400, "invalid annotation link href")
         out.append({"type": "human-zone", "wiki_rel": wiki_rel, "href": href})
     return out
+
+
+def _optional_int(value, field: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HTTPException(400, f"{field} must be an integer")
+    if value < 0:
+        raise HTTPException(400, f"{field} must be >= 0")
+    return value
+
+
+def _validate_region(value) -> dict | None:
+    if value is None:
+        return None
+    region = optional_object(value, "target.selector.region")
+    out: dict[str, float] = {}
+    for key in ("x", "y", "w", "h"):
+        raw = region.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise HTTPException(400, f"target.selector.region.{key} must be a number")
+        val = float(raw)
+        if not math.isfinite(val) or val < 0 or val > 1:
+            raise HTTPException(400, f"target.selector.region.{key} must be between 0 and 1")
+        out[key] = val
+    if out["w"] <= 0 or out["h"] <= 0:
+        raise HTTPException(400, "target.selector.region width/height must be > 0")
+    if out["x"] + out["w"] > 1 or out["y"] + out["h"] > 1:
+        raise HTTPException(400, "target.selector.region must stay within image bounds")
+    return out
+
+
+def _validate_annotation_parts(target_raw: dict) -> tuple[dict, dict, dict]:
+    target = optional_object(target_raw, "target")
+    selector_raw = optional_object(target.get("selector"), "target.selector")
+    context_raw = optional_object(target.get("context"), "target.context")
+    context = {
+        "prev_block_id": optional_string(context_raw.get("prev_block_id"), "target.context.prev_block_id"),
+        "next_block_id": optional_string(context_raw.get("next_block_id"), "target.context.next_block_id"),
+    }
+    start = _optional_int(selector_raw.get("start"), "target.selector.start")
+    end = _optional_int(selector_raw.get("end"), "target.selector.end")
+    if start is not None and end is not None and start > end:
+        raise HTTPException(400, "target.selector.start must be <= end")
+    selector = {
+        "quote": optional_string(selector_raw.get("quote"), "target.selector.quote"),
+        "prefix": optional_string(selector_raw.get("prefix"), "target.selector.prefix"),
+        "suffix": optional_string(selector_raw.get("suffix"), "target.selector.suffix"),
+        "start": start,
+        "end": end,
+    }
+    region = _validate_region(selector_raw.get("region"))
+    if region is not None:
+        selector["region"] = region
+    clean_target = {
+        "block_id": optional_string(target.get("block_id"), "target.block_id"),
+        "section_id": optional_string(target.get("section_id"), "target.section_id"),
+    }
+    return clean_target, context, selector
 
 
 def _annotation_dict(row) -> dict:
@@ -169,13 +229,35 @@ def _get_annotation(aid: str):
         conn.close()
 
 
-def _update_annotation_links(aid: str, links: list[dict]):
+def _merge_annotation_link(aid: str, link: dict):
     conn = db.connect()
     try:
-        conn.execute(
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT links FROM annotations WHERE id=?", (aid,)).fetchone()
+        if row is None:
+            conn.rollback()
+            return None
+        try:
+            links = json.loads(row["links"] or "[]")
+        except (TypeError, ValueError):
+            links = []
+        links = [
+            existing
+            for existing in links
+            if not (
+                isinstance(existing, dict)
+                and existing.get("type") == link["type"]
+                and existing.get("wiki_rel") == link["wiki_rel"]
+            )
+        ]
+        links.append(link)
+        cur = conn.execute(
             "UPDATE annotations SET links=?, updated=? WHERE id=?",
             (json.dumps(links, ensure_ascii=False), db.now_iso(), aid),
         )
+        if cur.rowcount == 0:
+            conn.rollback()
+            return None
         conn.commit()
         return conn.execute("SELECT * FROM annotations WHERE id=?", (aid,)).fetchone()
     finally:
@@ -202,9 +284,7 @@ async def create_annotation(request: Request, x_auth_token: str | None = Header(
     source_id = optional_string(body.get("source_id"), "source_id").strip()
     if not source_id:
         raise HTTPException(400, "source_id required")
-    target = optional_object(body.get("target"), "target")
-    selector = optional_object(target.get("selector"), "target.selector")
-    context = optional_object(target.get("context"), "target.context")
+    target, context, selector = _validate_annotation_parts(body.get("target"))
     color = _validate_annotation_color(body.get("color"))
     tags = _validate_tags(body.get("tags"))
     links = _validate_links(body.get("links"))
@@ -295,13 +375,13 @@ async def promote_annotation(aid: str, request: Request, x_auth_token: str | Non
             raise HTTPException(400, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(500, f"git commit failed: {exc}") from exc
-    links = [
-        link
-        for link in (anno.get("links") or [])
-        if not (isinstance(link, dict) and link.get("wiki_rel") == wiki_rel)
-    ]
-    links.append({"type": "human-zone", "wiki_rel": wiki_rel, "href": result["href"]})
-    updated = await asyncio.to_thread(_update_annotation_links, aid, links)
+    updated = await asyncio.to_thread(
+        _merge_annotation_link,
+        aid,
+        {"type": "human-zone", "wiki_rel": wiki_rel, "href": result["href"]},
+    )
+    if updated is None:
+        raise HTTPException(409, "annotation disappeared after promotion; wiki page was updated")
     LOGGER.info(
         "annotation promote aid=%s source_id=%s wiki_rel=%s href=%s",
         aid,

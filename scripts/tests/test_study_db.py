@@ -74,6 +74,23 @@ class StudyDbTests(unittest.TestCase):
             with self.assertRaisesRegex(study_db.StudyDbError, "study db not found"):
                 study_db.backup(Path(tmp) / "missing.db", Path(tmp) / "backups")
 
+    def test_restore_rejects_same_file_before_touching_wal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "study.db"
+            backup_dir = root / "backups"
+            write_value(db, "live")
+            wal = root / "study.db-wal"
+            shm = root / "study.db-shm"
+            wal.write_text("pending wal", encoding="utf-8")
+            shm.write_text("pending shm", encoding="utf-8")
+
+            with self.assertRaisesRegex(study_db.StudyDbError, "from itself"):
+                study_db.restore(db, db, backup_dir)
+
+            self.assertTrue(wal.is_file())
+            self.assertTrue(shm.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

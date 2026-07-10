@@ -8,6 +8,7 @@ import os
 import sqlite3
 import datetime as dt
 import threading
+import unicodedata
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("PW_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
@@ -75,7 +76,8 @@ CREATE INDEX IF NOT EXISTS idx_reviews_item ON reviews(item_id);
 def normalize_key(kind: str, lemma: str) -> str:
     # Cross-source identity: strip whitespace + lowercase the ASCII portion.
     # Homograph glosses are a documented tokenizer limitation (plan §3a).
-    return f"{kind}:{(lemma or '').strip().lower()}"
+    normalized = unicodedata.normalize("NFC", lemma or "")
+    return f"{kind}:{normalized.strip().lower()}"
 
 
 def now_iso() -> str:

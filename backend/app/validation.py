@@ -11,7 +11,7 @@ from . import settings
 async def json_object(request: Request) -> dict:
     try:
         body = await request.json()
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as exc:
         raise HTTPException(400, "request body must be valid JSON") from exc
     if not isinstance(body, dict):
         raise HTTPException(400, "request body must be a JSON object")

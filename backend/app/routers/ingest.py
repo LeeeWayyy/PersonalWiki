@@ -66,7 +66,7 @@ async def ingest(
 
 
 @router.get("/jobs/{job_id}")
-def job_status(job_id: str, x_auth_token: str | None = Header(None)):
+async def job_status(job_id: str, x_auth_token: str | None = Header(None)):
     require_auth(x_auth_token)
     job = ir.get_job(job_id)
     if not job:

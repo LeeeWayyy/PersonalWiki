@@ -363,6 +363,44 @@ function bootSourceReader(options = {}) {
     return f === 3 ? r : null;
   }
 
+  function wrapTextSegments(range, className, aid, title = '') {
+    const rootNode = range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+      ? range.commonAncestorContainer.parentNode
+      : range.commonAncestorContainer;
+    const nodes = [];
+    const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue || !range.intersectsNode(node)) return NodeFilter.FILTER_REJECT;
+        const start = node === range.startContainer ? range.startOffset : 0;
+        const end = node === range.endContainer ? range.endOffset : node.nodeValue.length;
+        return end > start ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      },
+    });
+    let node;
+    while ((node = walker.nextNode())) {
+      nodes.push({
+        node,
+        start: node === range.startContainer ? range.startOffset : 0,
+        end: node === range.endContainer ? range.endOffset : node.nodeValue.length,
+      });
+    }
+    let wrapped = 0;
+    for (const part of nodes) {
+      try {
+        const r = document.createRange();
+        r.setStart(part.node, part.start);
+        r.setEnd(part.node, part.end);
+        const mark = document.createElement('mark');
+        mark.className = className;
+        mark.dataset.aid = aid;
+        if (title) mark.title = title;
+        r.surroundContents(mark);
+        wrapped++;
+      } catch {}
+    }
+    return wrapped;
+  }
+
   function clearMarks() {
     doc.querySelectorAll('mark.anno').forEach((m) => {
       const p = m.parentNode;
@@ -422,12 +460,10 @@ function bootSourceReader(options = {}) {
       if (hit) {
         const rng = charRange(hit.el, hit.start, hit.end);
         if (rng) {
+          const cls = `anno ${safeColor(a.color)}${isFuzzy ? ' fuzzy' : ''}`;
+          const title = isFuzzy ? 'Re-anchored — the source text changed slightly since this note' : '';
           try {
-            const m = document.createElement('mark');
-            m.className = `anno ${safeColor(a.color)}${isFuzzy ? ' fuzzy' : ''}`;
-            m.dataset.aid = a.id;
-            if (isFuzzy) m.title = 'Re-anchored — the source text changed slightly since this note';
-            rng.surroundContents(m);
+            if (!wrapTextSegments(rng, cls, a.id, title)) throw new Error();
             placed = true;
             if (isFuzzy) fuzzy++;
           } catch {}
@@ -615,11 +651,13 @@ function bootSourceReader(options = {}) {
     const h = Math.abs(e.clientY - dd.y0);
     if (w < 6 || h < 6) return;
     const rect = dd.rect;
+    const x = clamp((Math.min(e.clientX, dd.x0) - rect.left) / rect.width, 0, 1);
+    const y = clamp((Math.min(e.clientY, dd.y0) - rect.top) / rect.height, 0, 1);
     openFigPopover(dd.fig, {
-      x: Math.max(0, (Math.min(e.clientX, dd.x0) - rect.left) / rect.width),
-      y: Math.max(0, (Math.min(e.clientY, dd.y0) - rect.top) / rect.height),
-      w: Math.min(1, w / rect.width),
-      h: Math.min(1, h / rect.height),
+      x,
+      y,
+      w: clamp(w / rect.width, 0, 1 - x),
+      h: clamp(h / rect.height, 0, 1 - y),
     }, e.clientX, e.clientY);
   });
 

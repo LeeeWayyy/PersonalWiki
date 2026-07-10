@@ -31,8 +31,24 @@ describe('source reader anchor helpers', () => {
       { start: 4, end: 7, exact: true },
     );
     assert.deepEqual(
-      locateQuote('abc abc abc', { quote: 'abc', start: 40 }),
+      locateQuote('abc abc abc', { quote: 'abc' }),
       { start: 0, end: 3, exact: true },
+    );
+    assert.deepEqual(
+      locateQuote('abc abc abc', { quote: 'abc', start: 40 }),
+      { start: 8, end: 11, exact: true },
+    );
+  });
+
+  it('uses stored prefix/suffix to disambiguate repeated quotes after offsets drift', () => {
+    assert.deepEqual(
+      locateQuote('ATP first. Bridge. ATP second.', {
+        quote: 'ATP',
+        start: 80,
+        prefix: 'Bridge. ',
+        suffix: ' second',
+      }),
+      { start: 19, end: 22, exact: true },
     );
   });
 

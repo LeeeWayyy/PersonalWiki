@@ -249,7 +249,7 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
                 pass
 
 
-def complete_command(prompt: str, timeout: int = 60) -> str | None:
+def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None) -> str | None:
     """Run a local LLM provider only: custom `LLM_CMD`, then direct Codex."""
     cmd = command()
     if cmd:
@@ -274,7 +274,7 @@ def complete_command(prompt: str, timeout: int = 60) -> str | None:
         own = not (seeded and Path(seeded).is_dir())
         workdir = tempfile.mkdtemp(prefix="pw-codex-") if own else seeded
         argv = [_codex_bin(), *CODEX_ARGS, "-C", workdir, "--sandbox", "workspace-write"]
-        model_name = _env("PW_LLM_MODEL")
+        model_name = (model or "").strip() or _env("PW_LLM_MODEL")
         if model_name:
             argv += ["-m", model_name]
         try:
@@ -285,13 +285,13 @@ def complete_command(prompt: str, timeout: int = 60) -> str | None:
     return None
 
 
-def complete(prompt: str, timeout: int = 60) -> str | None:
+def complete(prompt: str, timeout: int = 60, *, model: str | None = None) -> str | None:
     """Run one completion, preferring local providers over explicit API fallback."""
     if command_configured():
-        return complete_command(prompt, timeout=timeout)
+        return complete_command(prompt, timeout=timeout, model=model)
     if _api_enabled() and _api_key():
         base_url = _env("PW_LLM_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/")
-        model_name = _env("PW_LLM_MODEL", DEFAULT_API_MODEL)
+        model_name = (model or "").strip() or _env("PW_LLM_MODEL", DEFAULT_API_MODEL)
         body = json.dumps({
             "model": model_name,
             "temperature": 0,

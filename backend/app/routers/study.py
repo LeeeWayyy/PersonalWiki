@@ -197,13 +197,18 @@ def _export_rows():
 async def add_vocab(request: Request, x_auth_token: str | None = Header(None)):
     require_auth(x_auth_token)
     body = await json_object(request)
-    kind = body.get("kind", "word")
+    kind = optional_string(body.get("kind"), "kind", "word")
     if kind not in ("word", "grammar"):
         raise HTTPException(400, "kind must be word or grammar")
     lemma = optional_string(body.get("lemma"), "lemma").strip()
     if not lemma:
         raise HTTPException(400, "lemma required")
-    item_id, key = await asyncio.to_thread(_add_vocab_item, kind, lemma, body)
+    payload = {
+        field: optional_string(body[field], field)
+        for field in ("reading", "pos", "gloss", "example", "source_id", "anchor")
+        if field in body
+    }
+    item_id, key = await asyncio.to_thread(_add_vocab_item, kind, lemma, payload)
     LOGGER.info("study vocab upsert item_id=%s kind=%s norm_key=%s", item_id, kind, key)
     return {"id": item_id, "norm_key": key}
 

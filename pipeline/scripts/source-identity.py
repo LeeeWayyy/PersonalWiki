@@ -43,13 +43,18 @@ URL_FETCH_MAX_TIME_S = os.environ.get("PW_SOURCE_FETCH_MAX_TIME_S", "120")
 URL_FETCH_MAX_BYTES = os.environ.get("PW_SOURCE_FETCH_MAX_BYTES", str(100 * 1024 * 1024))
 
 
+def _log_prefix() -> str:
+    run_id = os.environ.get("PW_RUN_ID", "").strip()
+    return f"ingest[{run_id}]" if run_id else "ingest"
+
+
 def die(msg: str) -> None:
-    print(f"ingest: {msg}", file=sys.stderr)
+    print(f"{_log_prefix()}: {msg}", file=sys.stderr)
     raise SystemExit(1)
 
 
 def progress(msg: str) -> None:
-    print(f"ingest: {msg}", file=sys.stderr)
+    print(f"{_log_prefix()}: {msg}", file=sys.stderr)
 
 
 def sha256_of(path: Path | str) -> str:

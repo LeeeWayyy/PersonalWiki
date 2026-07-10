@@ -882,6 +882,9 @@ def test_json_routes_reject_bad_field_shapes(client, auth, tmp_path, monkeypatch
         client.post("/translate", json={"text": ["not", "a", "string"]}, headers=auth),
         client.post("/assist", json={"text": "hello", "lang": ["en"]}, headers=auth),
         client.post("/annotations", json={"source_id": "S", "target": []}, headers=auth),
+        client.post("/annotations", json=_mk(quote={"bad": "shape"}, start=0, end=1), headers=auth),
+        client.post("/annotations", json=_mk(quote="x", start="0", end=1), headers=auth),
+        client.post("/annotations", json=_mk(quote="x", start=2, end=1), headers=auth),
     ]
     for r in cases:
         assert r.status_code == 400
@@ -1251,6 +1254,10 @@ def test_annotation_validation_rejects_unsafe_fields(client, auth):
     assert r.status_code == 200
     assert r.json()["links"] == safe_link
 
+    bad_region = _mk(quote="", region={"x": 0.9, "y": 0.2, "w": 0.2, "h": 0.25})
+    bad_region["target"]["block_id"] = "i-fig1"
+    assert client.post("/annotations", json=bad_region, headers=auth).status_code == 400
+
 
 def test_image_region_roundtrip(client, auth):
     payload = _mk(quote="", region={"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.25})
@@ -1307,6 +1314,26 @@ def test_promote_replaces_note_with_regex_replacement_literals():
 
     assert "\\1 and \\g<0>" in updated
     assert updated.count("<!-- anno:an_regex -->") == 1
+
+
+def test_promote_replacement_does_not_cross_into_other_annotation_blocks():
+    from app import promote
+
+    page = (
+        "# Page\n\n<!-- human-zone -->\n\n"
+        "<!-- anno:an_one -->\n"
+        "Human text that must survive.\n\n"
+        "<!-- anno:an_two -->\n> second\n<!-- /anno:an_two -->\n\n"
+        "<!-- /human-zone -->\n"
+    )
+    note = "<!-- anno:an_one -->\n> replacement\n<!-- /anno:an_one -->"
+
+    updated = promote.insert_note(page, "an_one", note)
+
+    assert "Human text that must survive." in updated
+    assert "<!-- anno:an_two -->" in updated
+    assert "<!-- /anno:an_two -->" in updated
+    assert "<!-- /anno:an_one -->" in updated
 
 
 def test_promote_commit_is_limited_to_promoted_page(client, auth, content_dir):

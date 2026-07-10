@@ -94,7 +94,12 @@ def main() -> int:
     # follows so provider prefix caches can reuse the invariant prompt prefix.
     # 1. ingest prompt
     out.write(_read(TOOLING_ROOT / "prompts" / "ingest.md"))
-    # 2. SOURCE_META
+    # 2. ALL_SOURCE_IDS
+    out.write(f"\n\n---\n\n## ALL_SOURCE_IDS\n{args.all_source_ids}\n")
+    # 3. TAXONOMY
+    out.write("\n---\n\n## TAXONOMY\n")
+    out.write(_read(VAULT_ROOT / "wiki" / "_taxonomy.md"))
+    # 4. SOURCE_META
     out.write("\n\n---\n\n## SOURCE_META\n")
     out.write(
         f"source_id: {args.source_id}\n"
@@ -104,13 +109,13 @@ def main() -> int:
         f"origin_ref: {args.origin_ref}\n"
         f"basename: {args.basename}\n"
     )
-    # 3. SECTION_LABEL — bash default embeds the source_id.
+    # 5. SECTION_LABEL — bash default embeds the source_id.
     section = args.section_label or f"<none — cite as bare [src:{args.source_id}]>"
     out.write(f"\n## SECTION_LABEL\n{section}\n")
-    # 4. SOURCE_TEXT
+    # 6. SOURCE_TEXT
     out.write("\n## SOURCE_TEXT\n")
     out.write(_read(Path(args.text_file)))
-    # 5. CANDIDATE_PAGES header
+    # 7. CANDIDATE_PAGES header
     out.write("\n\n---\n\n## CANDIDATE_PAGES")
     if expand_nonempty:
         # bash uses `wc -l` (counts trailing newlines); match exactly.
@@ -120,11 +125,6 @@ def main() -> int:
         out.write(" (digests only — emit expand action if you need full content)")
     out.write("\n")
     build_candidate_blob(Path(args.candidates_file), expand_file, out)
-    # 6. ALL_SOURCE_IDS
-    out.write(f"\n---\n\n## ALL_SOURCE_IDS\n{args.all_source_ids}\n")
-    # 7. TAXONOMY
-    out.write("\n---\n\n## TAXONOMY\n")
-    out.write(_read(VAULT_ROOT / "wiki" / "_taxonomy.md"))
     # 8. IMAGES
     out.write("\n---\n\n## IMAGES\n")
     manifest = Path(f"{args.dest}.assets") / "_manifest.md"

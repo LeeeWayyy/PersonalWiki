@@ -296,7 +296,7 @@ def run_stream(cmd: list[str], *, env: dict | None = None, check: bool = True) -
     return r.returncode
 
 
-def llm(prompt_text: str, *, soft: bool) -> str:
+def llm(prompt_text: str, *, soft: bool, model: str | None = None) -> str:
     """Invoke the shared LLM client; return stdout-like text.
 
     soft=True mirrors the keyword pre-pass (`… 2>/dev/null || true`): tolerate
@@ -304,7 +304,7 @@ def llm(prompt_text: str, *, soft: bool) -> str:
     """
     timeout = int(os.environ.get("PW_LLM_TIMEOUT_S", "1800"))
     try:
-        out = llm_client.complete(prompt_text, timeout=timeout)
+        out = llm_client.complete(prompt_text, timeout=timeout, model=model)
     except Exception as exc:
         if soft:
             return ""
@@ -959,6 +959,9 @@ def main() -> int:
                          "Defaults to PW_LLM_MODEL, else the CLI's own default. "
                          "Separate from the caption model (CAPTION_MODEL), so "
                          "ingest can run on a cheaper model than captioning.")
+    ap.add_argument("--keyword-model", default=os.environ.get("PW_KEYWORD_MODEL", ""),
+                    help="Optional cheaper model for the keyword/entity pre-pass "
+                         "(codex/API providers only). Defaults to PW_KEYWORD_MODEL.")
     ap.add_argument("--images-only", action="store_true")
     ap.add_argument("--chapters", action="store_true",
                     help="Ingest a whole book chapter-by-chapter: enumerate its "
@@ -1222,14 +1225,17 @@ def main() -> int:
         keywords_file = mktemp()
         source_head = text[:KEYWORD_SOURCE_HEAD_CHARS]
         kw_prompt = (
-            "Extract the 5 most important entity names (people, products, projects,\n"
-            "concepts, organizations) mentioned in the text below. Output them as a\n"
-            "newline-separated list. No numbering, no commentary, just one name per\n"
-            "line. Use the same language as the source text (do not translate).\n\n"
+            "Extract all salient entity and concept names (people, products,\n"
+            "projects, concepts, methods, organizations, places) that would help\n"
+            "retrieve related wiki pages from the text below. Include every\n"
+            "distinct, non-trivial name or concept that is central or recurring;\n"
+            "do not stop at a fixed count. Output a newline-separated list with\n"
+            "no numbering, no commentary, just one name per line. Use the same\n"
+            "language as the source text (do not translate).\n\n"
             f"---\n{source_head}\n---\n"
         )
         out("extracting key entities...")
-        write(keywords_file, llm(kw_prompt, soft=True))
+        write(keywords_file, llm(kw_prompt, soft=True, model=args.keyword_model or None))
         kw = read(keywords_file)
         nonws = sum(1 for c in kw if not c.isspace())
         klines = kw.split("\n")

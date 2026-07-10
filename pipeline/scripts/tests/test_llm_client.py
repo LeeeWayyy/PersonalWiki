@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location("llm_client", ROOT / "scripts" / "llm_client.py")
 llm_client = importlib.util.module_from_spec(SPEC)
 sys.modules["llm_client"] = llm_client
@@ -129,6 +130,21 @@ class LlmClientTests(unittest.TestCase):
                 out = llm_client.complete_command("hello", timeout=5)
             self.assertIn("-m gpt-5-codex", out)  # model passed through
             self.assertIn("hello", out)           # prompt passed through
+
+    def test_codex_call_model_override_takes_precedence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_LLM_MODEL": "expensive-ingest-model",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                out = llm_client.complete_command("keywords", timeout=5, model="cheap-keyword-model")
+            self.assertIn("-m cheap-keyword-model", out)
+            self.assertNotIn("expensive-ingest-model", out)
 
     def test_codex_reuses_seeded_workdir_without_deleting_it(self):
         # When ingest seeds a workdir (candidate pages), codex must run there and

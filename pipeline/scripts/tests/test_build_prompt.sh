@@ -78,6 +78,9 @@ build_prompt() {
   local out="$2"
   {
     cat "$TOOLING_ROOT/prompts/ingest.md"
+    printf '\n\n---\n\n## ALL_SOURCE_IDS\n%s\n' "$ALL_SOURCE_IDS"
+    printf '\n---\n\n## TAXONOMY\n'
+    cat wiki/_taxonomy.md
     printf '\n\n---\n\n## SOURCE_META\n'
     printf 'source_id: %s\nsha256: %s\nadded: %s\norigin_type: %s\norigin_ref: %s\nbasename: %s\n' \
       "$SOURCE_ID" "$SHA256" "$ADDED" "$ORIGIN_TYPE" "$ORIGIN_REF" "$DEST_BASENAME"
@@ -92,9 +95,6 @@ build_prompt() {
     fi
     printf '\n'
     build_candidate_blob "$expand_list"
-    printf '\n---\n\n## ALL_SOURCE_IDS\n%s\n' "$ALL_SOURCE_IDS"
-    printf '\n---\n\n## TAXONOMY\n'
-    cat wiki/_taxonomy.md
     printf '\n---\n\n## IMAGES\n'
     if [[ -f "${DEST}.assets/_manifest.md" ]]; then
       "$TOOLING_ROOT"/scripts/render-images-block.py "${DEST}.assets/_manifest.md" "$DEST" \
