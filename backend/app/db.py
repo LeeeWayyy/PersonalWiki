@@ -109,19 +109,11 @@ _MIGRATIONS = [
 ]
 
 _INIT_LOCK = threading.Lock()
-_INITIALIZED_DATABASES: dict[str, tuple[int, int]] = {}
+_INITIALIZED_DATABASES: set[str] = set()
 
 
 def _db_init_key(path: Path) -> str:
     return str(path.expanduser().resolve(strict=False))
-
-
-def _db_file_identity(path: Path) -> tuple[int, int] | None:
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return None
-    return (stat.st_dev, stat.st_ino)
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -225,19 +217,15 @@ def _run_schema_migrations(conn: sqlite3.Connection) -> None:
 
 def _ensure_initialized(conn: sqlite3.Connection, path: Path) -> None:
     init_key = _db_init_key(path)
-    identity = _db_file_identity(path)
-    if identity is not None and _INITIALIZED_DATABASES.get(init_key) == identity:
+    if init_key in _INITIALIZED_DATABASES:
         return
 
     with _INIT_LOCK:
-        identity = _db_file_identity(path)
-        if identity is not None and _INITIALIZED_DATABASES.get(init_key) == identity:
+        if init_key in _INITIALIZED_DATABASES:
             return
 
         _run_schema_migrations(conn)
-        identity = _db_file_identity(path)
-        if identity is not None:
-            _INITIALIZED_DATABASES[init_key] = identity
+        _INITIALIZED_DATABASES.add(init_key)
 
 
 def connect() -> sqlite3.Connection:

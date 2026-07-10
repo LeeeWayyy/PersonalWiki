@@ -76,7 +76,7 @@ def schedule(card: Card, grade: int, elapsed_days: float) -> tuple[Card, int]:
     d = _clamp(d, 1.0, 10.0)
 
     if grade == 1:
-        s = _next_stability_forget(d, card.stability, r)
+        s = min(_next_stability_forget(d, card.stability, r), card.stability)
         lapses = card.lapses + 1
     else:
         s = _next_stability_recall(d, card.stability, r, grade)

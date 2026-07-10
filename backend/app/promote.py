@@ -13,6 +13,7 @@ are kept side-effect-free so they can be unit-tested without a repo.
 from __future__ import annotations
 import contextlib
 import fcntl
+import logging
 import os
 import re
 import subprocess
@@ -24,6 +25,7 @@ HUMAN_OPEN = "<!-- human-zone -->"
 HUMAN_CLOSE = "<!-- /human-zone -->"
 COMMENT_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 HUMAN_CLOSE_RE = re.compile(r"(?m)^" + re.escape(HUMAN_CLOSE) + r"[ \t]*(?:\r?$)")
+LOGGER = logging.getLogger(__name__)
 
 
 def _comment_token(value: str) -> str:
@@ -107,6 +109,8 @@ def insert_note(page_text: str, aid: str, note_md: str) -> str:
         idx = close.start()
         head = page_text[:idx].rstrip("\n")
         return head + "\n\n" + note_md + "\n\n" + page_text[idx:]
+    if HUMAN_CLOSE in page_text:
+        raise ValueError("malformed human-zone close marker: expected it on its own line")
 
     body = page_text.rstrip("\n")
     zone = f"{HUMAN_OPEN}\n\n{note_md}\n\n{HUMAN_CLOSE}"
@@ -139,6 +143,7 @@ def _promote_to_page_locked(anno: dict, source_title: str, content_dir: Path, wi
     path = _safe_page_path(content_dir, wiki_rel)
     if not path.exists():
         raise ValueError(f"wiki page not found: wiki/{wiki_rel}.md")
+    _ensure_clean_target_page(content_dir, path)
     original = path.read_text(encoding="utf-8")
     aid = _comment_token(anno["id"])
     note_md = render_note(anno, source_title)
@@ -210,6 +215,21 @@ def _git_commit(content_dir: Path, path: Path, aid: str, wiki_rel: str) -> bool:
         raise RuntimeError((e.stderr or e.stdout or str(e)).strip())
 
 
+def _ensure_clean_target_page(content_dir: Path, path: Path) -> None:
+    if not (content_dir / ".git").exists():
+        return
+    rel = str(path.relative_to(content_dir))
+    result = subprocess.run(
+        ["git", "-C", str(content_dir), "-c", "core.quotepath=false", "status", "--porcelain", "--", rel],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or "git status failed")
+    if result.stdout.strip():
+        raise RuntimeError(f"target wiki page has uncommitted changes: {rel}")
+
+
 def _git_index_snapshot(content_dir: Path, path: Path) -> tuple[str, str] | None:
     if not (content_dir / ".git").exists():
         return None
@@ -242,7 +262,13 @@ def _restore_git_index_snapshot(content_dir: Path, path: Path, snapshot: tuple[s
             ["git", "-C", str(content_dir), "update-index", "--add", "--cacheinfo", mode, blob, rel],
             check=True, capture_output=True, text=True, timeout=30,
         )
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as exc:
         # The page content has already been restored. If index restoration fails,
         # surface the original commit error rather than masking it.
+        LOGGER.warning(
+            "failed to restore git index snapshot content_dir=%s path=%s: %s",
+            content_dir,
+            path,
+            (exc.stderr or exc.stdout or str(exc)).strip(),
+        )
         return

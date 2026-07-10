@@ -8,7 +8,6 @@ study/job read auth, and the AI-assist / translate graceful-degradation paths
 import asyncio
 import datetime as dt
 import json
-import logging
 import os
 import shlex
 import sqlite3
@@ -397,6 +396,21 @@ def test_preflight_reports_cjk_leftover_artifact(client, auth, content_dir):
         dirty.unlink(missing_ok=True)
 
 
+def test_preflight_splits_rename_status_paths(client, auth, content_dir):
+    from app import ingest_runner as ir
+
+    old_rel = "wiki/entities/ATP.md"
+    new_rel = "wiki/entities/ATP-renamed.md"
+    try:
+        subprocess.run(["git", "-C", str(content_dir), "mv", old_rel, new_rel], check=True)
+        ok, _msg, offending = ir.preflight({"kind": "auto"})
+        assert ok is False
+        assert old_rel in offending
+        assert new_rel in offending
+    finally:
+        subprocess.run(["git", "-C", str(content_dir), "reset", "--hard", "HEAD"], check=True, stdout=subprocess.DEVNULL)
+
+
 def test_preflight_blocks_on_git_status_failure(client, auth, monkeypatch):
     from app import ingest_runner as ir
 
@@ -489,6 +503,8 @@ def test_job_emit_persists_to_disk_and_keeps_ring_on_log_failure(tmp_path, monke
     assert durable[0].endswith(" first")
     assert durable[1].endswith(" __END__")
     assert job.visible_lines() == ["first", "__END__"]
+    job.finish_terminal("done", {"status": "done"})
+    assert job._log_fh is None
 
     blocked_parent = tmp_path / "not-a-dir"
     blocked_parent.write_text("x", encoding="utf-8")
@@ -524,7 +540,7 @@ def test_queued_job_log_handler_does_not_capture_active_job(tmp_path, monkeypatc
             await asyncio.sleep(0.01)
         second_task = asyncio.create_task(ir.run_job(second, "https://example.com/b", {"kind": "auto"}))
         await asyncio.sleep(0.05)
-        logging.getLogger("app").warning("active job marker job_id=firstjob")
+        ir.LOGGER.warning("active job marker job_id=firstjob")
         await asyncio.gather(first_task, second_task)
         return first, second
 
@@ -864,6 +880,32 @@ def test_ingest_upload_streams_to_stage_before_starting_job(client, auth, monkey
     assert called["target"].read_bytes() == b"hello"
 
 
+def test_write_upload_offloads_disk_writes(monkeypatch, tmp_path):
+    from app.routers import ingest as ingest_routes
+
+    class FakeUpload:
+        def __init__(self):
+            self.chunks = [b"he", b"llo", b""]
+
+        async def read(self, _size):
+            return self.chunks.pop(0)
+
+    calls = []
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        calls.append(fn.__name__)
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(ingest_routes.asyncio, "to_thread", fake_to_thread)
+    dest = tmp_path / "upload.txt"
+
+    total = asyncio.run(ingest_routes._write_upload(FakeUpload(), dest))
+
+    assert total == 5
+    assert dest.read_bytes() == b"hello"
+    assert calls == ["write", "write"]
+
+
 def test_ingest_upload_rejects_over_limit_and_removes_partial(client, auth, monkeypatch, tmp_path):
     from app import settings
 
@@ -1176,6 +1218,16 @@ def test_fsrs_first_review_again_does_not_increment_lapses():
     assert card.reps == 1
     assert card.lapses == 0
     assert interval >= 1
+
+
+def test_fsrs_again_never_increases_stability():
+    from app.fsrs import Card, schedule
+
+    original = Card(stability=1.0, difficulty=1.0, state=1, reps=4, lapses=0)
+    card, _interval = schedule(original, 1, 365)
+
+    assert card.stability <= original.stability
+    assert card.lapses == 1
 
 
 def test_review_elapsed_days_uses_local_date(monkeypatch, client, auth):
@@ -1494,11 +1546,8 @@ def test_promote_insert_requires_human_close_marker_at_line_start():
     page = "# Page\n\n<!-- human-zone -->\nHuman text mentions <!-- /human-zone --> inline.\n"
     note = "<!-- anno:an_inline -->\n> replacement\n<!-- /anno:an_inline -->"
 
-    updated = promote.insert_note(page, "an_inline", note)
-
-    assert "Human text mentions <!-- /human-zone --> inline." in updated
-    assert updated.count("<!-- human-zone -->") == 2
-    assert updated.rfind(note) > updated.find("inline.")
+    with pytest.raises(ValueError, match="malformed human-zone close marker"):
+        promote.insert_note(page, "an_inline", note)
 
 
 def test_promote_takes_content_ingest_flock(monkeypatch, tmp_path):
@@ -1564,6 +1613,32 @@ def test_promote_restores_original_page_when_commit_fails(monkeypatch, tmp_path)
         text=True,
     ).stdout
     assert status == ""
+
+
+def test_promote_rejects_dirty_target_page(tmp_path):
+    from app import promote
+
+    content = tmp_path / "content"
+    page = content / "wiki" / "entities" / "Dirty.md"
+    page.parent.mkdir(parents=True)
+    original = "# Dirty\n\n<!-- human-zone -->\n<!-- /human-zone -->\n"
+    page.write_text(original, encoding="utf-8")
+    subprocess.run(["git", "-C", str(content), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(content), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(content), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(content), "add", "wiki/entities/Dirty.md"], check=True)
+    subprocess.run(["git", "-C", str(content), "commit", "-q", "-m", "init"], check=True)
+    page.write_text(original + "\nuser draft\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="target wiki page has uncommitted changes"):
+        promote.promote_to_page(
+            {"id": "an_dirty", "source_id": "S", "target": {"selector": {"quote": "q"}}, "body": "b"},
+            "Source",
+            content,
+            "entities/Dirty",
+        )
+
+    assert page.read_text(encoding="utf-8") == original + "\nuser draft\n"
 
 
 def test_promote_commit_is_limited_to_promoted_page(client, auth, content_dir):
@@ -1671,6 +1746,39 @@ def test_assist_cache_stores_mode_in_context(client, auth, monkeypatch, tmp_path
     }
 
 
+def test_assist_empty_llm_output_is_not_cached(client, auth, monkeypatch):
+    from app.routers import llm as llm_routes
+
+    outputs = ["", "later assist"]
+    monkeypatch.setattr(llm_routes.llm_client, "configured", lambda: True)
+    monkeypatch.setattr(llm_routes.llm_client, "identity", lambda: {"provider": "test", "model": "empty-cache"})
+    monkeypatch.setattr(llm_routes.llm_client, "complete", lambda *_args, **_kwargs: outputs.pop(0))
+
+    first = client.post(
+        "/assist",
+        json={"text": "empty assist cache poison test", "mode": "define", "lang": "English"},
+        headers=auth,
+    ).json()
+    assert first["result"] == "(no output)"
+    assert first["cached"] is False
+
+    second = client.post(
+        "/assist",
+        json={"text": "empty assist cache poison test", "mode": "define", "lang": "English"},
+        headers=auth,
+    ).json()
+    assert second["result"] == "later assist"
+    assert second["cached"] is False
+
+    third = client.post(
+        "/assist",
+        json={"text": "empty assist cache poison test", "mode": "define", "lang": "English"},
+        headers=auth,
+    ).json()
+    assert third["result"] == "later assist"
+    assert third["cached"] is True
+
+
 def test_translate_graceful_without_llm(client, auth):
     r = client.post("/translate", json={"text": "hello"}, headers=auth)
     assert r.status_code == 200
@@ -1716,6 +1824,27 @@ def test_translate_prefers_local_llm_command(client, auth, monkeypatch, tmp_path
         "llm_provider": "command",
         "llm_model": "test-local-model",
     }
+
+
+def test_translate_empty_llm_output_is_not_cached(client, auth, monkeypatch):
+    from app.routers import llm as llm_routes
+
+    outputs = [None, "later translation"]
+    monkeypatch.setattr(llm_routes.llm_client, "configured", lambda: True)
+    monkeypatch.setattr(llm_routes.llm_client, "identity", lambda: {"provider": "test", "model": "empty-cache"})
+    monkeypatch.setattr(llm_routes.llm_client, "complete", lambda *_args, **_kwargs: outputs.pop(0))
+
+    first = client.post("/translate", json={"text": "empty translate cache poison test"}, headers=auth).json()
+    assert first["translation"] == "(no output)"
+    assert first["cached"] is False
+
+    second = client.post("/translate", json={"text": "empty translate cache poison test"}, headers=auth).json()
+    assert second["translation"] == "later translation"
+    assert second["cached"] is False
+
+    third = client.post("/translate", json={"text": "empty translate cache poison test"}, headers=auth).json()
+    assert third["translation"] == "later translation"
+    assert third["cached"] is True
 
 
 def test_api_key_requires_explicit_enable(client, auth, monkeypatch):

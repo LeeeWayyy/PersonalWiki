@@ -24,10 +24,12 @@ import uuid
 import asyncio
 import logging
 import subprocess
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TextIO
 from urllib.parse import urlparse
 
 from . import settings
@@ -88,20 +90,24 @@ class Job:
         self.ended = False
         self.log_path = JOB_LOG_DIR / f"{job_id}.log"
         self.log_failed = False
+        self._lock = threading.RLock()
+        self._log_fh: TextIO | None = None
 
     def emit(self, line: str):
-        if self.ended:
-            return
-        self.updated_at = time.time()
-        self.lines.append((self.next_seq, line))
-        self.next_seq += 1
-        self._append_log_line(line)
+        with self._lock:
+            if self.ended:
+                return
+            self.updated_at = time.time()
+            self.lines.append((self.next_seq, line))
+            self.next_seq += 1
+            self._append_log_line(line)
 
     def _append_log_line(self, line: str) -> None:
         try:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_path.open("a", encoding="utf-8") as f:
-                f.write(f"{_log_timestamp()} {line}\n")
+            if self._log_fh is None:
+                self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._log_fh = self.log_path.open("a", encoding="utf-8", buffering=1)
+            self._log_fh.write(f"{_log_timestamp()} {line}\n")
         except Exception as e:  # noqa
             if not self.log_failed:
                 LOGGER.warning(
@@ -112,22 +118,37 @@ class Job:
                 )
                 self.log_failed = True
 
+    def _close_log_handle(self) -> None:
+        with self._lock:
+            if self._log_fh is None:
+                return
+            try:
+                self._log_fh.close()
+            finally:
+                self._log_fh = None
+
     @property
     def dropped_lines(self) -> int:
-        return max(0, self.next_seq - len(self.lines))
+        with self._lock:
+            return max(0, self.next_seq - len(self.lines))
 
     def visible_lines(self) -> list[str]:
-        lines = [line for _, line in self.lines]
-        if self.dropped_lines:
-            return [f"... {self.dropped_lines} earlier log line(s) truncated ...", *lines]
+        with self._lock:
+            lines = [line for _, line in self.lines]
+            dropped = max(0, self.next_seq - len(self.lines))
+        if dropped:
+            return [f"... {dropped} earlier log line(s) truncated ...", *lines]
         return lines
 
     def events_after(self, cursor: int) -> list[tuple[int, str]]:
-        if self.lines and cursor < self.lines[0][0]:
-            first_seq = self.lines[0][0]
-            marker = f"... {self.dropped_lines} earlier log line(s) truncated ..."
-            return [(first_seq - 1, marker), *self.lines]
-        return [(seq, line) for seq, line in self.lines if seq >= cursor]
+        with self._lock:
+            lines = list(self.lines)
+            dropped = max(0, self.next_seq - len(self.lines))
+        if lines and cursor < lines[0][0]:
+            first_seq = lines[0][0]
+            marker = f"... {dropped} earlier log line(s) truncated ..."
+            return [(first_seq - 1, marker), *lines]
+        return [(seq, line) for seq, line in lines if seq >= cursor]
 
     def finish_canceled(self) -> None:
         if self.ended:
@@ -137,7 +158,9 @@ class Job:
         LOGGER.info("ingest job terminal job_id=%s status=canceled", self.id)
         self.emit("canceled by request")
         self.emit("__END__")
-        self.ended = True
+        with self._lock:
+            self.ended = True
+        self._close_log_handle()
 
     def finish_terminal(self, status: str, result: dict, lines: list[str] | None = None) -> None:
         if self.ended:
@@ -148,7 +171,9 @@ class Job:
         for line in lines or []:
             self.emit(line)
         self.emit("__END__")
-        self.ended = True
+        with self._lock:
+            self.ended = True
+        self._close_log_handle()
 
 
 class _JobLogHandler(logging.Handler):
@@ -194,6 +219,13 @@ def _expand_status_path(content: Path, path: str) -> list[str]:
         return [path]
     files = [p.relative_to(content).as_posix() for p in target.rglob("*") if p.is_file()]
     return sorted(files) or [path]
+
+
+def _porcelain_paths(line: str) -> list[str]:
+    path = line[3:].strip()
+    if " -> " not in path:
+        return [path] if path else []
+    return [part.strip() for part in path.split(" -> ", 1) if part.strip()]
 
 
 def ensure_content_git(content: Path) -> tuple[bool, str]:
@@ -259,11 +291,11 @@ def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
     watched = _LANG_WATCHED if (options or {}).get("kind") == "lang" else _WATCHED
     offending, leftover = [], []
     for line in out.splitlines():
-        path = line[3:].strip()
-        if any(path.startswith(w) or path == w.rstrip("/") for w in watched):
-            offending.extend(_expand_status_path(content, path))
-        if _LEFTOVER.search(path):
-            leftover.append(path)
+        for path in _porcelain_paths(line):
+            if any(path.startswith(w) or path == w.rstrip("/") for w in watched):
+                offending.extend(_expand_status_path(content, path))
+            if _LEFTOVER.search(path):
+                leftover.append(path)
     offending = [p for p in offending if p not in _SCAFFOLD_UNTRACKED]
     if offending or leftover:
         msg = "Vault tree is not clean — ingest preflight would refuse."
@@ -417,7 +449,7 @@ async def run_job(job: Job, target: str, options: dict):
     try:
         async with LOCK:
             job_handler = _JobLogHandler(job)
-            logging.getLogger("app").addHandler(job_handler)
+            LOGGER.addHandler(job_handler)
             if job.cancel_requested:
                 job.finish_canceled()
                 return
@@ -563,7 +595,7 @@ async def run_job(job: Job, target: str, options: dict):
         job.finish_terminal("error", {"status": "error", "error": str(e)}, [f"error: {e}"])
     finally:
         if job_handler is not None:
-            logging.getLogger("app").removeHandler(job_handler)
+            LOGGER.removeHandler(job_handler)
         if job.status in TERMINAL_STATUSES:
             await asyncio.to_thread(_cleanup_staged_target, target, job.id)
 

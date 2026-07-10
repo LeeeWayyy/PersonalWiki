@@ -33,7 +33,7 @@ async def _write_upload(file: UploadFile, dest: Path) -> int:
                 total += len(chunk)
                 if total > settings.MAX_UPLOAD_BYTES:
                     raise HTTPException(413, f"upload exceeds PW_MAX_UPLOAD_MB={settings.MAX_UPLOAD_MB}")
-                out.write(chunk)
+                await asyncio.to_thread(out.write, chunk)
     except Exception:
         dest.unlink(missing_ok=True)
         raise

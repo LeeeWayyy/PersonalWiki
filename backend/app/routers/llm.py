@@ -97,20 +97,26 @@ async def translate(request: Request, x_auth_token: str | None = Header(None)):
         }
     prompt = f"Translate to natural {settings.TRANSLATE_LANG}. Output only the translation, no notes.\n\n{text}"
     try:
-        tr = await asyncio.to_thread(llm_client.complete, prompt, timeout=120) or "(no output)"
+        raw = await asyncio.to_thread(llm_client.complete, prompt, timeout=120)
     except Exception as e:  # noqa
+        LOGGER.exception("translate LLM call failed target_lang=%s chars=%d", settings.TRANSLATE_LANG, len(text))
         raise HTTPException(502, f"LLM call failed: {e}")
+    tr = (raw or "").strip()
     prompt_version, provider, model = _llm_cache_meta(settings.TRANSLATE_PROMPT_VERSION)
-    await asyncio.to_thread(
-        _translation_cache_put,
-        h=h,
-        context="translate",
-        lang=settings.TRANSLATE_LANG,
-        translation=tr,
-        prompt_version=prompt_version,
-        provider=provider,
-        model=model,
-    )
+    if tr:
+        await asyncio.to_thread(
+            _translation_cache_put,
+            h=h,
+            context="translate",
+            lang=settings.TRANSLATE_LANG,
+            translation=tr,
+            prompt_version=prompt_version,
+            provider=provider,
+            model=model,
+        )
+    else:
+        LOGGER.warning("translate LLM returned empty output target_lang=%s chars=%d", settings.TRANSLATE_LANG, len(text))
+        tr = "(no output)"
     return {
         "translation": tr,
         "cached": False,
@@ -160,20 +166,26 @@ async def assist(request: Request, x_auth_token: str | None = Header(None)):
         }
     prompt = ASSIST_PROMPTS[mode].format(lang=lang) + "\n\n" + text
     try:
-        out = await asyncio.to_thread(llm_client.complete, prompt, timeout=120) or "(no output)"
+        raw = await asyncio.to_thread(llm_client.complete, prompt, timeout=120)
     except Exception as e:  # noqa
+        LOGGER.exception("assist LLM call failed mode=%s lang=%s chars=%d", mode, lang, len(text))
         raise HTTPException(502, f"LLM call failed: {e}")
+    out = (raw or "").strip()
     prompt_version, provider, model = _llm_cache_meta(settings.ASSIST_PROMPT_VERSION)
-    await asyncio.to_thread(
-        _translation_cache_put,
-        h=h,
-        context=mode,
-        lang=lang,
-        translation=out,
-        prompt_version=prompt_version,
-        provider=provider,
-        model=model,
-    )
+    if out:
+        await asyncio.to_thread(
+            _translation_cache_put,
+            h=h,
+            context=mode,
+            lang=lang,
+            translation=out,
+            prompt_version=prompt_version,
+            provider=provider,
+            model=model,
+        )
+    else:
+        LOGGER.warning("assist LLM returned empty output mode=%s lang=%s chars=%d", mode, lang, len(text))
+        out = "(no output)"
     return {
         "result": out,
         "mode": mode,

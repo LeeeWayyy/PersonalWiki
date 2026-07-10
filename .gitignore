@@ -30,6 +30,7 @@ pipeline/scripts/tests/.e2e-snapshot.*
 # Backend runtime state (personal study data — back this up separately)
 backend/data/*.db
 backend/data/*.db-*
+backend/data/logs/
 backend/.env
 /backups/
 backend/data/stage/
