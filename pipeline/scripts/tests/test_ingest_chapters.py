@@ -1,11 +1,13 @@
 import importlib.util
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +43,62 @@ def _seed_vault(vault: Path, sha: str, source_id: str, done_labels):
             f"2026-01-01T00:00:00Z  {source_id}#{lbl}  pages: wiki/x.md\n"
             for lbl in done_labels)
         (vault / ".wiki" / "log.md").write_text(lines, encoding="utf-8")
+
+
+def _write_minimal_epub(path: Path) -> None:
+    container_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+    content_opf = """<?xml version="1.0" encoding="UTF-8"?>
+<package version="3.0" unique-identifier="bookid" xmlns="http://www.idpf.org/2007/opf">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">chaptered-smoke</dc:identifier>
+    <dc:title>Chaptered Smoke</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="chap1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="chap2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="chap1"/>
+    <itemref idref="chap2"/>
+  </spine>
+</package>
+"""
+    nav = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>Contents</title></head>
+  <body><nav epub:type="toc"><ol>
+    <li><a href="chapter1.xhtml">Chapter 1</a></li>
+    <li><a href="chapter2.xhtml">Chapter 2</a></li>
+  </ol></nav></body>
+</html>
+"""
+    chapter = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>{title}</title></head>
+  <body>
+    <h1>{title}</h1>
+    <p>Mitochondria and ATP appear in this chaptered smoke source.</p>
+  </body>
+</html>
+"""
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        for name, data in (
+            ("META-INF/container.xml", container_xml),
+            ("OEBPS/content.opf", content_opf),
+            ("OEBPS/nav.xhtml", nav),
+            ("OEBPS/chapter1.xhtml", chapter.format(title="Chapter 1")),
+            ("OEBPS/chapter2.xhtml", chapter.format(title="Chapter 2")),
+        ):
+            zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
 
 
 class GroupChaptersTests(unittest.TestCase):
@@ -224,6 +282,79 @@ class RunChapteredTests(unittest.TestCase):
             self.assertEqual([c[0] for c in calls], ["第一章 A", "第二章 B"])
 
 
+@unittest.skipUnless(shutil.which("uv"), "uv is required for ingest helper scripts")
+class ChapteredSmokeTests(unittest.TestCase):
+    def test_two_chapter_ingest_runs_children_without_parent_lock_deadlock(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            vault = root / "content"
+            for rel in ("wiki/entities", "wiki/topics", "wiki/_index", "sources", ".wiki"):
+                (vault / rel).mkdir(parents=True, exist_ok=True)
+            (vault / "wiki" / "_taxonomy.md").write_text(
+                ingest.TAXONOMY_PLACEHOLDER, encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=vault, check=True)
+            subprocess.run(["git", "config", "user.email", "t@t"], cwd=vault, check=True)
+            subprocess.run(["git", "config", "user.name", "t"], cwd=vault, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=vault, check=True)
+            subprocess.run(["git", "commit", "-qm", "baseline"], cwd=vault, check=True)
+
+            book = root / "book.epub"
+            _write_minimal_epub(book)
+            env = os.environ.copy()
+            env.update({
+                "PW_CONTENT_DIR": str(vault),
+                "VAULT_CONTENT_DIR": str(vault),
+                "LLM_CMD": str(ROOT / "scripts" / "tests" / "stub-llm.py"),
+                "STUB_ENTITY_FROM_SECTION": "1",
+                "STUB_ENTITY_PREFIX": "chaptered-",
+            })
+            env.pop("PW_INGEST_NO_AUTOCHAPTER", None)
+
+            res = subprocess.run(
+                [sys.executable, str(ROOT / "ingest.py"), "--chapters", str(book)],
+                cwd=root, env=env, text=True, capture_output=True, timeout=180,
+            )
+            self.assertEqual(
+                res.returncode, 0,
+                f"stdout:\n{res.stdout[-4000:]}\nstderr:\n{res.stderr[-4000:]}",
+            )
+            self.assertIn("chaptered ingest complete: 2 new chapter(s)", res.stdout)
+            self.assertTrue((vault / "wiki" / "entities" / "chaptered-chapter-1.md").is_file())
+            self.assertTrue((vault / "wiki" / "entities" / "chaptered-chapter-2.md").is_file())
+            log = (vault / ".wiki" / "log.md").read_text(encoding="utf-8")
+            self.assertRegex(log, r"\s[0-9A-Z]{26}#Chapter 1\s+pages:")
+            self.assertRegex(log, r"\s[0-9A-Z]{26}#Chapter 2\s+pages:")
+            commits = subprocess.run(
+                ["git", "rev-list", "--count", "HEAD"],
+                cwd=vault, text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            self.assertEqual(commits, "3")
+
+            head_before = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=vault, text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            rerun = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "ingest.py"),
+                    "--section", "^Chapter 1$",
+                    "--section-label", "Chapter 1",
+                    str(book),
+                ],
+                cwd=root, env=env, text=True, capture_output=True, timeout=180,
+            )
+            self.assertEqual(
+                rerun.returncode, 0,
+                f"stdout:\n{rerun.stdout[-4000:]}\nstderr:\n{rerun.stderr[-4000:]}",
+            )
+            self.assertIn("section ingest already logged", rerun.stdout)
+            head_after = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=vault, text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            self.assertEqual(head_after, head_before)
+
+
 class GroupByChapterTests(unittest.TestCase):
     def test_sections_grouped_front_back_excluded(self):
         sections = [("cover.xhtml", 1), ("序言", 5000), ("导言 世界", 16000),
@@ -374,6 +505,26 @@ class PipelineRecoveryTests(unittest.TestCase):
         finally:
             os.chdir(old_cwd)
 
+    def test_section_already_logged_short_circuits_logged_sections(self):
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                (vault / ".wiki").mkdir()
+                sid = "01BOOKAAAAAAAAAAAAAAAAAAAA"
+                (vault / ".wiki" / "log.md").write_text(
+                    f"2026-01-01T00:00:00Z  {sid}#Chapter 1  pages: wiki/a.md\n",
+                    encoding="utf-8",
+                )
+                self.assertTrue(ingest.section_already_logged(sid, "Chapter 1"))
+                self.assertFalse(ingest.section_already_logged(sid, "Chapter 10"))
+                with open(vault / ".wiki" / "log.md", "a", encoding="utf-8") as f:
+                    f.write(f"2026-01-01T00:00:01Z  {sid}  pages: wiki/all.md\n")
+                self.assertTrue(ingest.section_already_logged(sid, "Chapter 10"))
+        finally:
+            os.chdir(old_cwd)
+
     def test_collect_candidates_skips_alias_index_for_empty_or_small_vault(self):
         old_cwd = os.getcwd()
         try:
@@ -448,6 +599,7 @@ class PipelineRecoveryTests(unittest.TestCase):
     def test_post_apply_failure_rollback_clears_staged_wiki_changes(self):
         old_cwd = os.getcwd()
         old_flag = ingest._ROLLBACK_ON_FAILURE
+        old_src = dict(ingest.SRC)
         try:
             with tempfile.TemporaryDirectory() as d:
                 vault = Path(d)
@@ -457,17 +609,35 @@ class PipelineRecoveryTests(unittest.TestCase):
                 subprocess.run(["git", "config", "user.name", "t"], check=True)
                 (vault / "wiki" / "entities").mkdir(parents=True)
                 (vault / ".wiki").mkdir()
+                (vault / "sources" / "book.epub.assets").mkdir(parents=True)
                 page = vault / "wiki" / "entities" / "x.md"
                 page.write_text("# X\n", encoding="utf-8")
                 log = vault / ".wiki" / "log.md"
                 log.write_text("", encoding="utf-8")
+                dest = vault / "sources" / "book.epub"
+                dest.write_text("asset", encoding="utf-8")
+                sidecar = vault / "sources" / "book.epub.md"
+                sidecar.write_text("---\nsource_id: 01OLD\n---\n\n# book\n", encoding="utf-8")
+                manifest = vault / "sources" / "book.epub.assets" / "_manifest.md"
+                manifest.write_text("---\nsource_id: 01OLD\nimages: []\n---\n", encoding="utf-8")
+                audit = vault / "sources" / "book.transcript.json"
+                audit.write_text('{"ok": true}\n', encoding="utf-8")
                 subprocess.run(["git", "add", "."], check=True)
                 subprocess.run(["git", "commit", "-qm", "init"], check=True)
 
                 page.write_text("# X\n\n[src:01NEWAAAAAAAAAAAAAAAAAAAA]\n", encoding="utf-8")
                 log.write_text("2026-01-01T00:00:00Z  01NEWAAAAAAAAAAAAAAAAAAAA  pages: wiki/entities/x.md\n",
                                encoding="utf-8")
+                sidecar.write_text("---\nsource_id: 01OLD\n---\n\n# changed\n", encoding="utf-8")
+                manifest.write_text("---\nsource_id: 01OLD\nimages:\n  - changed\n---\n", encoding="utf-8")
+                audit.write_text('{"ok": false}\n', encoding="utf-8")
                 subprocess.run(["git", "add", "."], check=True)
+                ingest.SRC.clear()
+                ingest.SRC.update({
+                    "DEST": "sources/book.epub",
+                    "SIDECAR": "sources/book.epub.md",
+                    "AUDIT_JSON": "sources/book.transcript.json",
+                })
                 ingest._ROLLBACK_ON_FAILURE = True
                 ingest._rollback_after_apply_failure()
                 status = subprocess.run(["git", "status", "--short"], text=True,
@@ -475,6 +645,8 @@ class PipelineRecoveryTests(unittest.TestCase):
                 self.assertEqual(status, "")
         finally:
             ingest._ROLLBACK_ON_FAILURE = old_flag
+            ingest.SRC.clear()
+            ingest.SRC.update(old_src)
             os.chdir(old_cwd)
 
 

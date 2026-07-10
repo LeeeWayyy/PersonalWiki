@@ -208,9 +208,16 @@ def _rollback_after_apply_failure() -> None:
     """
     if not _ROLLBACK_ON_FAILURE:
         return
+    run_provenance = [
+        ".wiki/log.md",
+        SRC.get("SIDECAR", ""),
+        SRC.get("AUDIT_JSON", ""),
+    ]
+    if SRC.get("DEST"):
+        run_provenance.append(f"{SRC['DEST']}.assets/_manifest.md")
     paths = [
-        p for p in [*WIKI_PATHSPEC, ".wiki/log.md"]
-        if Path(p).exists() or _tracked_under(p)
+        p for p in [*WIKI_PATHSPEC, *run_provenance]
+        if p and (Path(p).exists() or _tracked_under(p))
     ]
     if not paths:
         return
@@ -459,6 +466,16 @@ def acquire_content_ingest_lock() -> None:
     fcntl.flock(_INGEST_LOCK_FH.fileno(), fcntl.LOCK_EX)
 
 
+def release_content_ingest_lock() -> None:
+    """Release the process-level ingest lock before delegating to child runs."""
+    global _INGEST_LOCK_FH
+    if _INGEST_LOCK_FH is None:
+        return
+    fcntl.flock(_INGEST_LOCK_FH.fileno(), fcntl.LOCK_UN)
+    _INGEST_LOCK_FH.close()
+    _INGEST_LOCK_FH = None
+
+
 # ── candidate collection ──────────────────────────────────────────────────────
 def wiki_page_count() -> int:
     return sum(
@@ -610,7 +627,7 @@ def handle_no_changes_or_continue(raw_file: str, section_label: str) -> None:
     with open(".wiki/log.md", "a", encoding="utf-8") as f:
         f.write(f"{SRC['ADDED']}  {SRC['SOURCE_ID']}{section_tag}  pages: (no-changes: {reason}){sup_note}\n")
     if subprocess.run([f"{SCRIPTS}/update-sidecar-progress.py", SRC["SIDECAR"]],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+                      stdout=subprocess.DEVNULL).returncode != 0:
         eout("warn — sidecar progress update failed (continuing)")
     assets_dir = f"{SRC['DEST']}.assets"
     if Path(assets_dir).is_dir():
@@ -793,6 +810,9 @@ def _enumerate_sections(input_path: Path) -> list[tuple[str, int]]:
         detail = (res.stderr or res.stdout or "").strip()
         detail = detail[-500:] if detail else f"exit code {res.returncode}"
         die(f"extract.py failed for {input_path.name}: {detail}")
+    if res.stderr:
+        sys.stderr.write(res.stderr)
+        sys.stderr.flush()
     return _section_sizes(res.stdout)
 
 
@@ -832,6 +852,17 @@ def _source_log_progress(lines: list[str], source_id: str) -> tuple[set[str], bo
             whole_done = True
             break
     return labels, whole_done
+
+
+def section_already_logged(source_id: str, section_label: str) -> bool:
+    if not section_label:
+        return False
+    log_path = Path(".wiki") / "log.md"
+    if not log_path.is_file():
+        return False
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    done, whole_done = _source_log_progress(lines, source_id)
+    return whole_done or _chapter_done(section_label, done)
 
 
 def _label_matches_title(title: str, label: str) -> bool:
@@ -1055,9 +1086,9 @@ def main() -> int:
     os.environ["VAULT_CONTENT_DIR"] = str(VAULT_ROOT)
     os.chdir(VAULT_ROOT)
 
+    acquire_content_ingest_lock()
     global SCAFFOLD_PATHS
     SCAFFOLD_PATHS = ensure_wiki_scaffold(args.profile)
-    acquire_content_ingest_lock()
     preflight(args.profile, SCAFFOLD_PATHS)
     check_deps()
     global _PREEXISTING_SOURCE_PATHS
@@ -1068,6 +1099,7 @@ def main() -> int:
     # It runs after the common setup gates so missing tools and dirty vault state
     # produce the same diagnostics as a normal ingest.
     if chapter_mode:
+        release_content_ingest_lock()
         return run_chaptered(args)
 
     # ── media --rerender (§7.5): a self-contained migration (no ASR, no LLM
@@ -1140,6 +1172,13 @@ def main() -> int:
     ):
         out(f"whole-source ingest already logged for {SRC['SOURCE_ID']}; nothing to do")
         return 0
+    if (
+        args.profile == "wiki"
+        and section_label
+        and section_already_logged(SRC["SOURCE_ID"], section_label)
+    ):
+        out(f"section ingest already logged for {SRC['SOURCE_ID']}#{section_label}; nothing to do")
+        return 0
 
     # ── §lang: skip all wiki synthesis; run the language generator instead ──
     if args.profile == "lang":
@@ -1190,7 +1229,7 @@ def main() -> int:
         with open(".wiki/log.md", "a", encoding="utf-8") as f:
             f.write(f"{SRC['ADDED']}  {SRC['SOURCE_ID']}{section_tag}  pages: (images-only)\n")
         if subprocess.run([f"{SCRIPTS}/update-sidecar-progress.py", SRC["SIDECAR"]],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+                          stdout=subprocess.DEVNULL).returncode != 0:
             eout("warn — sidecar progress update failed (continuing)")
         if Path(assets_dir).is_dir():
             git_run("add", "--", assets_dir)
