@@ -17,6 +17,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 
 def test_health_ok(client):
     r = client.get("/health")
@@ -122,6 +124,66 @@ def test_db_migrates_legacy_reviews_table_to_foreign_key(monkeypatch, tmp_path):
         conn.execute("DELETE FROM items WHERE id=1")
         conn.commit()
         assert conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_db_recovers_stranded_reviews_legacy(monkeypatch, tmp_path):
+    from app import db
+
+    legacy_db = tmp_path / "study.db"
+    raw = sqlite3.connect(legacy_db)
+    raw.executescript(
+        """
+        CREATE TABLE items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          kind TEXT NOT NULL DEFAULT 'word',
+          norm_key TEXT NOT NULL,
+          lemma TEXT NOT NULL,
+          reading TEXT,
+          pos TEXT,
+          gloss TEXT,
+          example TEXT,
+          source_id TEXT,
+          anchor TEXT,
+          status TEXT NOT NULL DEFAULT 'new',
+          stability REAL NOT NULL DEFAULT 0,
+          difficulty REAL NOT NULL DEFAULT 0,
+          state INTEGER NOT NULL DEFAULT 0,
+          reps INTEGER NOT NULL DEFAULT 0,
+          lapses INTEGER NOT NULL DEFAULT 0,
+          due TEXT,
+          last_review TEXT,
+          created TEXT NOT NULL
+        );
+        CREATE TABLE reviews_legacy (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          item_id INTEGER NOT NULL,
+          grade INTEGER NOT NULL,
+          reviewed TEXT NOT NULL,
+          interval INTEGER
+        );
+        INSERT INTO items(id,kind,norm_key,lemma,created,due)
+          VALUES(1,'word','word:stranded','stranded','2026-01-01T00:00:00Z','2026-01-02');
+        INSERT INTO reviews_legacy(id,item_id,grade,reviewed,interval)
+          VALUES(1,1,3,'2026-01-02T00:00:00Z',1),
+                (2,99,3,'2026-01-02T00:00:00Z',1);
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", legacy_db)
+
+    conn = db.connect()
+    try:
+        assert conn.execute("PRAGMA foreign_key_list(reviews)").fetchone() is not None
+        rows = conn.execute("SELECT item_id FROM reviews ORDER BY id").fetchall()
+        assert [r[0] for r in rows] == [1]
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reviews_legacy'"
+        ).fetchone() is None
     finally:
         conn.close()
 
@@ -1009,7 +1071,7 @@ def test_duplicate_vocab_save_merges_new_context_without_resetting_schedule(clie
     assert item["anchor"] == "p-1"
 
 
-def test_review_grade_rejects_out_of_range_values(client, auth):
+def test_review_grade_rejects_out_of_range_and_non_integer_values(client, auth):
     add = client.post(
         "/vocab",
         json={"kind": "word", "lemma": "grade-range-test-word", "gloss": "grade"},
@@ -1018,12 +1080,64 @@ def test_review_grade_rejects_out_of_range_values(client, auth):
     assert add.status_code == 200
     item_id = add.json()["id"]
 
-    for grade in (0, 5, "bad"):
+    for grade in (0, 5, "bad", "3", 2.0, True, False):
         r = client.post(f"/review/{item_id}/grade", json={"grade": grade}, headers=auth)
         assert r.status_code == 400
 
     ok = client.post(f"/review/{item_id}/grade", json={"grade": 3}, headers=auth)
     assert ok.status_code == 200
+
+
+def test_review_again_on_mature_card_stays_due_today(client, auth):
+    from app import db
+
+    today = db.today().isoformat()
+    conn = db.connect()
+    try:
+        cur = conn.execute(
+            """INSERT INTO items(kind,norm_key,lemma,status,stability,difficulty,state,reps,lapses,due,last_review,created)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "word",
+                "word:mature-again-test-word",
+                "mature-again-test-word",
+                "known",
+                120.0,
+                3.0,
+                1,
+                12,
+                2,
+                "2027-01-01",
+                db.now_iso(),
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        item_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.post(f"/review/{item_id}/grade", json={"grade": 1}, headers=auth)
+
+    assert r.status_code == 200
+    assert r.json()["interval"] == 0
+    assert r.json()["due"] == today
+    item = next(i for i in client.get("/vocab", headers=auth).json() if i["id"] == item_id)
+    assert item["status"] == "learning"
+    assert item["due"] == today
+    assert item["lapses"] == 3
+    queue = client.get("/review/queue", headers=auth).json()
+    assert any(i["id"] == item_id for i in queue)
+
+
+def test_fsrs_first_review_again_does_not_increment_lapses():
+    from app.fsrs import Card, schedule
+
+    card, interval = schedule(Card(), 1, 0)
+
+    assert card.reps == 1
+    assert card.lapses == 0
+    assert interval >= 1
 
 
 def test_review_elapsed_days_uses_local_date(monkeypatch, client, auth):
@@ -1334,6 +1448,84 @@ def test_promote_replacement_does_not_cross_into_other_annotation_blocks():
     assert "<!-- anno:an_two -->" in updated
     assert "<!-- /anno:an_two -->" in updated
     assert "<!-- /anno:an_one -->" in updated
+
+
+def test_promote_insert_requires_human_close_marker_at_line_start():
+    from app import promote
+
+    page = "# Page\n\n<!-- human-zone -->\nHuman text mentions <!-- /human-zone --> inline.\n"
+    note = "<!-- anno:an_inline -->\n> replacement\n<!-- /anno:an_inline -->"
+
+    updated = promote.insert_note(page, "an_inline", note)
+
+    assert "Human text mentions <!-- /human-zone --> inline." in updated
+    assert updated.count("<!-- human-zone -->") == 2
+    assert updated.rfind(note) > updated.find("inline.")
+
+
+def test_promote_takes_content_ingest_flock(monkeypatch, tmp_path):
+    from app import promote
+
+    content = tmp_path / "content"
+    page = content / "wiki" / "entities" / "Lock.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# Lock\n\n<!-- human-zone -->\n<!-- /human-zone -->\n", encoding="utf-8")
+    calls = []
+
+    def fake_flock(fd, op):
+        calls.append(op)
+
+    monkeypatch.setattr(promote.fcntl, "flock", fake_flock)
+
+    result = promote.promote_to_page(
+        {"id": "an_lock", "source_id": "S", "target": {"selector": {"quote": "q"}}, "body": "b"},
+        "Source",
+        content,
+        "entities/Lock",
+    )
+
+    assert result["ok"] is True
+    assert calls == [promote.fcntl.LOCK_EX, promote.fcntl.LOCK_UN]
+    assert (content / ".wiki" / "ingest.lock").exists()
+
+
+def test_promote_restores_original_page_when_commit_fails(monkeypatch, tmp_path):
+    from app import promote
+
+    content = tmp_path / "content"
+    page = content / "wiki" / "entities" / "Rollback.md"
+    page.parent.mkdir(parents=True)
+    original = "# Rollback\n\n<!-- human-zone -->\n<!-- /human-zone -->\n"
+    page.write_text(original, encoding="utf-8")
+    subprocess.run(["git", "-C", str(content), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(content), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(content), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(content), "add", "wiki/entities/Rollback.md"], check=True)
+    subprocess.run(["git", "-C", str(content), "commit", "-q", "-m", "init"], check=True)
+
+    def fail_commit(content_dir, path, *_args):
+        rel = str(path.relative_to(content_dir))
+        subprocess.run(["git", "-C", str(content_dir), "add", rel], check=True)
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(promote, "_git_commit", fail_commit)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        promote.promote_to_page(
+            {"id": "an_rollback", "source_id": "S", "target": {"selector": {"quote": "q"}}, "body": "b"},
+            "Source",
+            content,
+            "entities/Rollback",
+        )
+
+    assert page.read_text(encoding="utf-8") == original
+    status = subprocess.run(
+        ["git", "-C", str(content), "status", "--short", "--", "wiki/entities/Rollback.md"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == ""
 
 
 def test_promote_commit_is_limited_to_promoted_page(client, auth, content_dir):

@@ -138,8 +138,13 @@ def _grade_item(item_id: int, grade: int):
             lapses=row["lapses"],
         )
         card, interval = schedule(card, grade, elapsed)
-        due = (db.today() + dt.timedelta(days=interval)).isoformat()
-        status = "known" if interval >= 21 else "learning"
+        if grade == 1:
+            interval = 0
+            due = db.today().isoformat()
+            status = "learning"
+        else:
+            due = (db.today() + dt.timedelta(days=interval)).isoformat()
+            status = "known" if interval >= 21 else "learning"
         conn.execute(
             """UPDATE items SET stability=?,difficulty=?,state=?,reps=?,lapses=?,due=?,last_review=?,status=?
                WHERE id=?""",
@@ -258,10 +263,10 @@ async def review_queue(limit: int = Query(40, ge=1, le=200), x_auth_token: str |
 async def grade(item_id: int, request: Request, x_auth_token: str | None = Header(None)):
     require_auth(x_auth_token)
     body = await json_object(request)
-    try:
-        grade_value = int(body.get("grade", 3))
-    except (TypeError, ValueError):
+    grade_raw = body.get("grade", 3)
+    if isinstance(grade_raw, bool) or not isinstance(grade_raw, int):
         raise HTTPException(400, "grade must be an integer from 1 to 4")
+    grade_value = grade_raw
     if grade_value < 1 or grade_value > 4:
         raise HTTPException(400, "grade must be an integer from 1 to 4")
     result = await asyncio.to_thread(_grade_item, item_id, grade_value)

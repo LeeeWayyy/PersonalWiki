@@ -124,13 +124,16 @@ def _db_file_identity(path: Path) -> tuple[int, int] | None:
     return (stat.st_dev, stat.st_ino)
 
 
-def _ensure_reviews_foreign_key(conn: sqlite3.Connection) -> None:
-    if conn.execute("PRAGMA foreign_key_list(reviews)").fetchone():
-        return
-    conn.execute("DROP INDEX IF EXISTS idx_reviews_item")
-    conn.execute("ALTER TABLE reviews RENAME TO reviews_legacy")
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone() is not None
+
+
+def _create_reviews_table(conn: sqlite3.Connection) -> None:
     conn.execute(
-        """CREATE TABLE reviews (
+        """CREATE TABLE IF NOT EXISTS reviews (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           item_id INTEGER NOT NULL,
           grade INTEGER NOT NULL,
@@ -139,14 +142,45 @@ def _ensure_reviews_foreign_key(conn: sqlite3.Connection) -> None:
           FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
         )"""
     )
+
+
+def _copy_valid_reviews(conn: sqlite3.Connection, source_table: str) -> None:
     conn.execute(
-        """INSERT INTO reviews(id,item_id,grade,reviewed,interval)
-           SELECT r.id,r.item_id,r.grade,r.reviewed,r.interval
-           FROM reviews_legacy r
-           WHERE EXISTS (SELECT 1 FROM items i WHERE i.id=r.item_id)"""
+        f"""INSERT OR IGNORE INTO reviews(id,item_id,grade,reviewed,interval)
+            SELECT r.id,r.item_id,r.grade,r.reviewed,r.interval
+            FROM {source_table} r
+            WHERE EXISTS (SELECT 1 FROM items i WHERE i.id=r.item_id)"""
     )
-    conn.execute("DROP TABLE reviews_legacy")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_item ON reviews(item_id)")
+
+
+def _ensure_reviews_foreign_key(conn: sqlite3.Connection) -> None:
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        has_reviews = _table_exists(conn, "reviews")
+        has_fk = has_reviews and conn.execute("PRAGMA foreign_key_list(reviews)").fetchone() is not None
+        legacy_sources: list[str] = []
+
+        if has_reviews and not has_fk:
+            conn.execute("DROP INDEX IF EXISTS idx_reviews_item")
+            migrating = "reviews_legacy_migrating"
+            suffix = 0
+            while _table_exists(conn, migrating):
+                suffix += 1
+                migrating = f"reviews_legacy_migrating_{suffix}"
+            conn.execute(f"ALTER TABLE reviews RENAME TO {migrating}")
+            legacy_sources.append(migrating)
+
+        _create_reviews_table(conn)
+        if _table_exists(conn, "reviews_legacy"):
+            legacy_sources.append("reviews_legacy")
+        for source_table in legacy_sources:
+            _copy_valid_reviews(conn, source_table)
+            conn.execute(f"DROP TABLE {source_table}")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_item ON reviews(item_id)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _ensure_translation_context(conn: sqlite3.Connection) -> None:
@@ -183,6 +217,7 @@ def _run_schema_migrations(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as e:
             if "duplicate column name" not in str(e).lower():
                 raise sqlite3.OperationalError(f"migration failed: {stmt}: {e}") from e
+    conn.commit()
     _ensure_reviews_foreign_key(conn)
     _ensure_translation_context(conn)
     conn.commit()
