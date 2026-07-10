@@ -66,7 +66,7 @@ def schedule(card: Card, grade: int, elapsed_days: float) -> tuple[Card, int]:
         s = _init_stability(grade)
         d = _init_difficulty(grade)
         card = Card(stability=s, difficulty=d, state=1,
-                    reps=1, lapses=1 if grade == 1 else 0)
+                    reps=1, lapses=0)
         return card, _interval(s)
 
     r = _retrievability(max(elapsed_days, 0), card.stability)

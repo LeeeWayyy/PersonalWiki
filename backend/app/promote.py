@@ -11,6 +11,8 @@ so it can't race an ingest commit). Pure helpers (`render_note`, `insert_note`)
 are kept side-effect-free so they can be unit-tested without a repo.
 """
 from __future__ import annotations
+import contextlib
+import fcntl
 import os
 import re
 import subprocess
@@ -21,6 +23,7 @@ from urllib.parse import quote as _q
 HUMAN_OPEN = "<!-- human-zone -->"
 HUMAN_CLOSE = "<!-- /human-zone -->"
 COMMENT_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
+HUMAN_CLOSE_RE = re.compile(r"(?m)^" + re.escape(HUMAN_CLOSE) + r"[ \t]*(?:\r?$)")
 
 
 def _comment_token(value: str) -> str:
@@ -99,8 +102,9 @@ def insert_note(page_text: str, aid: str, note_md: str) -> str:
     if existing.search(page_text):
         return existing.sub(lambda _m: "\n" + note_md + "\n", page_text)
 
-    if HUMAN_CLOSE in page_text:
-        idx = page_text.index(HUMAN_CLOSE)
+    close = HUMAN_CLOSE_RE.search(page_text)
+    if close:
+        idx = close.start()
         head = page_text[:idx].rstrip("\n")
         return head + "\n\n" + note_md + "\n\n" + page_text[idx:]
 
@@ -127,21 +131,44 @@ def promote_to_page(anno: dict, source_title: str, content_dir: Path, wiki_rel: 
     bad path / missing page, RuntimeError for git failures.
     """
     content_dir = content_dir.resolve()
+    with _content_ingest_lock(content_dir):
+        return _promote_to_page_locked(anno, source_title, content_dir, wiki_rel)
+
+
+def _promote_to_page_locked(anno: dict, source_title: str, content_dir: Path, wiki_rel: str) -> dict:
     path = _safe_page_path(content_dir, wiki_rel)
     if not path.exists():
         raise ValueError(f"wiki page not found: wiki/{wiki_rel}.md")
     original = path.read_text(encoding="utf-8")
     aid = _comment_token(anno["id"])
     note_md = render_note(anno, source_title)
-    created_zone = HUMAN_CLOSE not in original and not _anno_block_re(aid).search(original)
+    created_zone = HUMAN_CLOSE_RE.search(original) is None and not _anno_block_re(aid).search(original)
     updated = insert_note(original, aid, note_md)
     committed = False
     if updated != original:
+        index_snapshot = _git_index_snapshot(content_dir, path)
         _atomic_write_text(path, updated)
-        committed = _git_commit(content_dir, path, aid, wiki_rel)
+        try:
+            committed = _git_commit(content_dir, path, aid, wiki_rel)
+        except Exception:
+            _atomic_write_text(path, original)
+            _restore_git_index_snapshot(content_dir, path, index_snapshot)
+            raise
     href = "/wiki/" + wiki_rel.strip("/").removesuffix(".md")
     return {"ok": True, "wiki_rel": wiki_rel, "href": href,
             "created_zone": created_zone, "committed": committed}
+
+
+@contextlib.contextmanager
+def _content_ingest_lock(content_dir: Path):
+    lock_path = content_dir / ".wiki" / "ingest.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -181,3 +208,41 @@ def _git_commit(content_dir: Path, path: Path, aid: str, wiki_rel: str) -> bool:
         return True
     except subprocess.CalledProcessError as e:  # noqa
         raise RuntimeError((e.stderr or e.stdout or str(e)).strip())
+
+
+def _git_index_snapshot(content_dir: Path, path: Path) -> tuple[str, str] | None:
+    if not (content_dir / ".git").exists():
+        return None
+    rel = str(path.relative_to(content_dir))
+    result = subprocess.run(
+        ["git", "-C", str(content_dir), "ls-files", "-s", "--", rel],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    fields = result.stdout.split(maxsplit=3)
+    if len(fields) < 2:
+        return None
+    return fields[0], fields[1]
+
+
+def _restore_git_index_snapshot(content_dir: Path, path: Path, snapshot: tuple[str, str] | None) -> None:
+    if not (content_dir / ".git").exists():
+        return
+    rel = str(path.relative_to(content_dir))
+    try:
+        if snapshot is None:
+            subprocess.run(
+                ["git", "-C", str(content_dir), "rm", "--cached", "--ignore-unmatch", "-q", "--", rel],
+                check=False, capture_output=True, text=True, timeout=30,
+            )
+            return
+        mode, blob = snapshot
+        subprocess.run(
+            ["git", "-C", str(content_dir), "update-index", "--add", "--cacheinfo", mode, blob, rel],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.CalledProcessError:
+        # The page content has already been restored. If index restoration fails,
+        # surface the original commit error rather than masking it.
+        return
