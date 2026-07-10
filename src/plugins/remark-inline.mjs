@@ -47,6 +47,22 @@ function citationChip(id, anchor) {
   };
 }
 
+function citationParts(value) {
+  return String(value || '')
+    .split(',')
+    .map((part) => part.trim().replace(/^src:\s*/i, ''))
+    .filter(Boolean)
+    .map((part) => {
+      const hash = part.indexOf('#');
+      if (hash < 0) return { id: part.trim(), anchor: '' };
+      return {
+        id: part.slice(0, hash).trim(),
+        anchor: part.slice(hash + 1).trim(),
+      };
+    })
+    .filter((part) => part.id);
+}
+
 function vaultAssetUrl(target) {
   let path = target.trim().replace(/^\/+/, '');
   if (path.startsWith('sources/')) path = path.slice('sources/'.length);
@@ -86,10 +102,8 @@ export default function remarkInline() {
 
     // 3) Citations [src:...]
     splitTextNodes(tree, /\[src:([^\]]+)\]/g, (m) => {
-      const parts = m[1].split(',').map((s) => s.trim()).filter(Boolean);
       const nodes = [];
-      parts.forEach((p, i) => {
-        const [id, anchor] = p.split('#').map((s) => s.trim());
+      citationParts(m[1]).forEach(({ id, anchor }, i) => {
         if (i > 0) nodes.push({ type: 'text', value: ' ' });
         nodes.push(citationChip(id, anchor));
       });

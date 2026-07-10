@@ -25,6 +25,8 @@ describe('vault frontend contracts', () => {
     assert.equal(resolveWikilink('  adenosine   triphosphate  '), '/wiki/entities/ATP');
     assert.equal(resolveWikilink('ＡＴＰ'), '/wiki/entities/ATP');
     assert.equal(resolveWikilink('Maße'), '/wiki/entities/ATP');
+    assert.equal(resolveWikilink('οσ'), '/wiki/entities/ATP');
+    assert.equal(resolveWikilink('ος'), '/wiki/entities/ATP');
     assert.equal(resolveWikilink('ATP#Energy charge'), '/wiki/entities/ATP#Energy%20charge');
     assert.deepEqual([...vault.forward.get('/wiki/entities/ATP')], ['/wiki/topics/Energy metabolism']);
   });
@@ -37,6 +39,8 @@ describe('vault frontend contracts', () => {
     assert.equal(entry?.title, 'Fresh Pipeline Reading');
     assert.equal(entry?.reading?.title, 'Fresh Pipeline Reading');
     assert.equal(entry?.chapters[0].heading, 'Fresh Chapter');
+    assert.equal(entry?.word_count, 2);
+    assert.equal(entry?.grammar_count, 1);
   });
 
   it('cleans ebook source titles for display', () => {
@@ -81,6 +85,15 @@ describe('vault frontend contracts', () => {
     assert.equal(citations.length, 1);
     assert.equal(citations[0].wiki_href, '/wiki/entities/ATP');
     assert.equal(citations[0].anchor, '\u7b2c\u4e00\u7ae0');
+    assert.match(citations[0].excerpt, /claim above is drawn/);
+  });
+
+  it('indexes every source in multi-source citations with repeated prefixes', () => {
+    const citations = citationsForSource(MD_SOURCE_ID);
+
+    assert.equal(citations.length, 1);
+    assert.equal(citations[0].wiki_href, '/wiki/entities/ATP');
+    assert.equal(citations[0].anchor, '\u7b2c\u4e8c\u7ae0');
     assert.match(citations[0].excerpt, /claim above is drawn/);
   });
 });

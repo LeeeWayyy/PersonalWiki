@@ -177,6 +177,47 @@ export function loadVault() {
 const LANG = join(VAULT, 'lang');
 
 let _lang = null;
+const paragraphsOfReadingChapter = (chapter = {}) => chapter.paragraphs || [{ sentences: chapter.sentences || [] }];
+const sentenceText = (sentence = {}) => sentence.jp || sentence.text || (sentence.tokens || []).map((token) => token.t || '').join('');
+
+export function readingStats(reading) {
+  const stats = {
+    word_count: null,
+    token_count: null,
+    grammar_count: null,
+    chapter_count: reading?.chapters?.length || 0,
+  };
+  if (!reading) return stats;
+
+  let sawTokens = false;
+  let words = 0;
+  let tokens = 0;
+  let chapterGrammar = 0;
+  let sentenceGrammar = 0;
+
+  for (const chapter of reading.chapters || []) {
+    if (Array.isArray(chapter.grammar)) chapterGrammar += chapter.grammar.length;
+    for (const paragraph of paragraphsOfReadingChapter(chapter)) {
+      for (const sentence of paragraph.sentences || []) {
+        if (Array.isArray(sentence.tokens)) {
+          sawTokens = true;
+          tokens += sentence.tokens.length;
+          words += sentence.tokens.filter((token) => token?.w).length;
+        }
+        if (Array.isArray(sentence.grammar)) sentenceGrammar += sentence.grammar.length;
+      }
+    }
+  }
+
+  if (sawTokens) {
+    stats.word_count = words;
+    stats.token_count = tokens;
+  }
+  const grammar = chapterGrammar || sentenceGrammar;
+  if (grammar) stats.grammar_count = grammar;
+  return stats;
+}
+
 export function loadLang() {
   if (_lang) return _lang;
   const out = [];
@@ -190,16 +231,18 @@ export function loadLang() {
         const slug = rf.replace(/\.reading\.json$/, '');
         const id = doc.source_id || slug;
         if (!id) continue;
+        const stats = readingStats(doc);
         out.push({
           id,
           slug,
           title: doc.title || slug,
           vocab: [],
           grammar: [],
+          ...stats,
           chapters: (doc.chapters || []).map((ch) => ({
             heading: ch.chapter || ch.heading || '',
-            text: (ch.paragraphs || [])
-              .map((p) => (p.sentences || []).map((s) => s.jp || s.text || '').join(''))
+            text: paragraphsOfReadingChapter(ch)
+              .map((p) => (p.sentences || []).map(sentenceText).join(''))
               .filter(Boolean)
               .join('\n\n'),
           })),
@@ -251,9 +294,9 @@ export function blocksForSource(sourceId) {
   for (const ch of doc.chapters) {
     const section = ch.chapter || '';
     const section_id = sourceReaderSectionId(section);
-    const paras = ch.paragraphs || [{ sentences: ch.sentences || [] }];
+    const paras = paragraphsOfReadingChapter(ch);
     for (const p of paras) {
-      const text = (p.sentences || []).map((s) => s.jp).join(''); // canonical, frozen
+      const text = (p.sentences || []).map(sentenceText).join(''); // canonical, frozen
       if (!text) continue;
       const id = sourceReaderBlockId('paragraph', text);
       blocks.push({ id, type: 'paragraph', section_id, section, order: order++, text });
@@ -291,6 +334,22 @@ export function sourceReaderHref(sourceId, anchor = '') {
 const _BLOCK_TYPES = new Set(['paragraph', 'heading', 'listItem', 'blockquote', 'tableCell']);
 const _CITE_RE = /\[src:([^\]]+)\]/g;
 
+function _citationParts(value) {
+  return String(value || '')
+    .split(',')
+    .map((part) => part.trim().replace(/^src:\s*/i, ''))
+    .filter(Boolean)
+    .map((part) => {
+      const hash = part.indexOf('#');
+      if (hash < 0) return { id: part.trim(), anchor: '' };
+      return {
+        id: part.slice(0, hash).trim(),
+        anchor: part.slice(hash + 1).trim(),
+      };
+    })
+    .filter((part) => part.id);
+}
+
 function _cleanExcerpt(s, max = 150) {
   let t = (s || '')
     .replace(/^\s*\[!\w+\]\s*/, '')                                   // callout marker [!AI]
@@ -310,9 +369,8 @@ function _collectCitations(node, block, out) {
     _CITE_RE.lastIndex = 0;
     let m;
     while ((m = _CITE_RE.exec(node.value))) {
-      for (const part of m[1].split(',').map((s) => s.trim()).filter(Boolean)) {
-        const [id, anchor] = part.split('#').map((s) => s.trim());
-        if (id) out.push({ source_id: id, anchor: anchor || '', block: cur });
+      for (const { id, anchor } of _citationParts(m[1])) {
+        out.push({ source_id: id, anchor: anchor || '', block: cur });
       }
     }
   }

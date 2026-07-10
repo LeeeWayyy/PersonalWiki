@@ -1,6 +1,6 @@
 ---
 import Base from '../../layouts/Base.astro';
-import { loadLang } from '../../lib/vault.mjs';
+import { loadLang, readingStats } from '../../lib/vault.mjs';
 import type { LangEntry } from '../../lib/vault.mjs';
 
 export async function getStaticPaths() {
@@ -8,11 +8,12 @@ export async function getStaticPaths() {
 }
 const { lang } = Astro.props as { lang: LangEntry };
 const reading = lang.reading;
-const parasOf = (c: any) => c.paragraphs || [{ sentences: c.sentences || [] }];
-const wordCount = reading
-  ? reading.chapters.reduce((n: number, c: any) => n + parasOf(c).reduce((pm: number, p: any) =>
-      pm + p.sentences.reduce((m: number, s: any) => m + s.tokens.filter((t: any) => t.w).length, 0), 0), 0)
-  : lang.vocab.length;
+const stats = readingStats(reading);
+const metricLine = [
+  'immersion reader',
+  Number.isFinite(stats.word_count) ? `${stats.word_count} words` : '',
+  Number.isFinite(stats.grammar_count) ? `${stats.grammar_count} grammar points` : '',
+].filter(Boolean).join(' · ');
 const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).replace(/</g, '\\u003c') : '';
 ---
 <Base title={lang.title} active="reader" crumbs={[{ label: 'Reader', href: '/reader' }, { label: lang.title }]}>
@@ -34,7 +35,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
     <div style="margin-bottom:22px">
       <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
         <span style="font-size:10.5px;font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 42%,transparent);border-radius:5px;padding:2px 7px">JA · 日本語</span>
-        <span style="font-size:12px;color:var(--text-3);font-family:var(--mono)">immersion reader · {wordCount} words{reading ? '' : ' · raw fallback'}</span>
+        <span style="font-size:12px;color:var(--text-3);font-family:var(--mono)">{metricLine}</span>
       </div>
       <h1 style="font-family:var(--jp);font-size:32px;font-weight:600;line-height:1.2;margin:0">{lang.title}</h1>
     </div>
@@ -82,6 +83,9 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           const saved = new Set();
           let fontSize = 24, furi = true, trans = 'show';
           const parasOf = (ch) => ch.paragraphs || [{ sentences: ch.sentences || [] }];
+          const tokensOf = (s) => Array.isArray(s.tokens) && s.tokens.length
+            ? s.tokens
+            : [{ t: s.jp || s.text || '' }];
 
           const POS = { '動詞': 'var(--terra)', '形容詞': 'var(--amber)', '形容動詞': '#cbb96a', '形状詞': '#cbb96a',
             '名詞': 'var(--sage)', '代名詞': '#c790a6', '副詞': '#6fa6b2', '連体詞': '#9a94c4' };
@@ -130,10 +134,11 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
               for (const para of parasOf(ch)) {
                 const pEl = document.createElement('div'); pEl.style.cssText = 'margin:0 0 20px;border-left:2px solid transparent;padding-left:4px';
                 for (const s of para.sentences) {
-                  for (const t of s.tokens) if (t.w && t.m && t.new && !saved.has(t.w)) newCount++;
+                  const tokens = tokensOf(s);
+                  for (const t of tokens) if (t.w && t.m && t.new && !saved.has(t.w)) newCount++;
                   const el = document.createElement('div'); el.className = 'sent';
                   const jp = document.createElement('div'); jp.className = 'jp'; jp.style.fontSize = fontSize + 'px';
-                  jp.innerHTML = s.tokens.map(tokenHtml).join('');
+                  jp.innerHTML = tokens.map(tokenHtml).join('');
                   el.appendChild(jp);
                   if (s.grammar && s.grammar.length) {
                     const chip = document.createElement('span');
@@ -146,7 +151,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
                       el.appendChild(d); };
                     el.appendChild(chip);
                   }
-                  const en = document.createElement('div'); en.className = 'en'; en.textContent = s.en || ''; en.dataset.jp = s.jp;
+                  const en = document.createElement('div'); en.className = 'en'; en.textContent = s.en || ''; en.dataset.jp = s.jp || s.text || tokens.map((t) => t.t || '').join('');
                   el.appendChild(en);
                   el.addEventListener('click', () => onSentence(el, en));
                   pEl.appendChild(el);
@@ -213,7 +218,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
         </script>
       </>
     ) : (
-      <div class="card"><p class="muted">No structured reading data. Re-ingest this source with the language profile.</p></div>
+      <div class="card"><p class="muted">Structured reading data is unavailable for this source. Re-ingest it with the language profile.</p></div>
     )}
   </div>
 </Base>

@@ -66,6 +66,10 @@ export interface LangEntry {
   title: string;
   vocab: Array<Record<string, string>>;
   grammar: Array<Record<string, string>>;
+  word_count: number | null;
+  token_count: number | null;
+  grammar_count: number | null;
+  chapter_count: number;
   chapters: Array<{ heading: string; text: string }>;
   reading: ReadingDoc | null;
 }
@@ -81,6 +85,12 @@ export function loadVault(): {
   forward: Map<string, Set<string>>;
 };
 export function loadLang(): LangEntry[];
+export function readingStats(reading: ReadingDoc | null | undefined): {
+  word_count: number | null;
+  token_count: number | null;
+  grammar_count: number | null;
+  chapter_count: number;
+};
 
 export interface SourceBlock {
   id: string;

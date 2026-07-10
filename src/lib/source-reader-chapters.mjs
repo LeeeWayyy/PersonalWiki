@@ -100,6 +100,24 @@ function sourceAnchorParts(anchor = '') {
   return out;
 }
 
+function comparableLabel(value = '') {
+  return String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function chapterLabels(chapter) {
+  return [...new Set([chapter.section, chapter.title].map(comparableLabel).filter(Boolean))];
+}
+
+function findChapterByLooseLabel(chapters, label) {
+  const needle = comparableLabel(label);
+  if (!needle) return null;
+  const startsWithHit = chapters.find((chapter) =>
+    chapterLabels(chapter).some((candidate) => candidate.startsWith(needle) || needle.startsWith(candidate)));
+  if (startsWithHit) return startsWithHit;
+  return chapters.find((chapter) =>
+    chapterLabels(chapter).some((candidate) => candidate.includes(needle) || needle.includes(candidate))) || null;
+}
+
 function fragmentForSourceAnchor(anchor = '') {
   const { raw } = sourceAnchorParts(anchor);
   if (!raw) return '';
@@ -126,6 +144,10 @@ export function chapterForSourceAnchor(chapters = [], anchor = '') {
   }
   if (blockId) {
     const hit = chapters.find((chapter) => chapter.blocks.some((block) => block.id === blockId));
+    if (hit) return hit;
+  }
+  if (label) {
+    const hit = findChapterByLooseLabel(chapters, label);
     if (hit) return hit;
   }
   return chapters[0];
