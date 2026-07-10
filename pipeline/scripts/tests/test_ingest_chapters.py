@@ -117,6 +117,32 @@ class GroupChaptersTests(unittest.TestCase):
         self.assertEqual(chs[0][1], r"^Ch\.\ 1\ \(a\)$")
 
 
+class CitationAnchorTests(unittest.TestCase):
+    def test_missing_prior_chapter_anchor_is_detected(self):
+        sid = "01KX582AX79FD9BQG2VNMG41NY"
+        old = (
+            f"> first [src:{sid}#第一章]\n"
+            f"> second [src:{sid}#第二章]\n"
+        )
+        new = f"> third [src:{sid}#第三章]\n"
+        old_keys = ingest._citation_keys(old)
+        new_keys = ingest._citation_keys(new)
+        missing = sorted(
+            key for key in old_keys
+            if not ingest._citation_key_still_present(key, new_keys)
+        )
+        self.assertEqual(missing, [f"{sid}#第一章", f"{sid}#第二章"])
+
+    def test_bare_source_may_be_replaced_by_anchored_source(self):
+        sid = "01KX582AX79FD9BQG2VNMG41NY"
+        self.assertTrue(
+            ingest._citation_key_still_present(sid, {f"{sid}#第一章"})
+        )
+        self.assertFalse(
+            ingest._citation_key_still_present(f"{sid}#第一章", {sid})
+        )
+
+
 class AutoChapterTests(unittest.TestCase):
     def test_auto_chapter_only_local_ebooks_without_slicing_flags(self):
         with tempfile.TemporaryDirectory() as d:

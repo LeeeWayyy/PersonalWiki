@@ -52,6 +52,19 @@ Emit one raw `git diff`-style unified diff covering all file additions
 and modifications. Do not wrap it in markdown fences. Emit each file
 exactly once. The diff must apply cleanly from the vault root.
 
+Every file block must be full git diff format:
+
+```diff
+diff --git a/wiki/entities/X.md b/wiki/entities/X.md
+--- a/wiki/entities/X.md
++++ b/wiki/entities/X.md
+@@ ...
+```
+
+For new files, include `diff --git`, `new file mode`, `--- /dev/null`,
+and `+++ b/wiki/...`. Plain `--- a/...` / `+++ b/...` patches without
+`diff --git` headers are invalid.
+
 **2. Expand request** — only on digest passes.
 
 If you need full content for candidate pages before editing them,

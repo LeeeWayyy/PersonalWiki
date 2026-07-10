@@ -698,15 +698,105 @@ def run_lang(dest: str) -> int:
 
 
 def scope_check(diff_file: str, *, retry: bool) -> None:
+    ok, stdout, stderr = _scope_check_result(diff_file)
+    if ok:
+        return
+    _reject_scoped_diff(diff_file, retry=retry, stdout=stdout, stderr=stderr)
+
+
+def _scope_check_result(diff_file: str) -> tuple[bool, str, str]:
     r = subprocess.run([f"{SCRIPTS}/diff-paths.py", diff_file, "--mode=scope"],
                        text=True, capture_output=True)
-    if r.returncode != 0:
-        print(r.stdout, file=sys.stderr)
-        if r.stderr:  # surface a diff-paths.py crash/traceback (bash dropped it)
-            sys.stderr.write(r.stderr)
-        shutil.copyfile(diff_file, diff_file + ".rejected")
-        label = "retry diff" if retry else "LLM diff"
-        die(f"{label} touched forbidden paths (above). raw at {diff_file}.rejected")
+    return r.returncode == 0, r.stdout, r.stderr
+
+
+def _reject_scoped_diff(diff_file: str, *, retry: bool, stdout: str, stderr: str) -> None:
+    print(stdout, file=sys.stderr)
+    if stderr:  # surface a diff-paths.py crash/traceback (bash dropped it)
+        sys.stderr.write(stderr)
+    shutil.copyfile(diff_file, diff_file + ".rejected")
+    label = "retry diff" if retry else "LLM diff"
+    die(f"{label} touched forbidden paths (above). raw at {diff_file}.rejected")
+
+
+def _scope_error_retryable(stdout: str, stderr: str) -> bool:
+    return "no `diff --git` headers" in (stdout + stderr)
+
+
+def _diff_existing_modify_targets(diff_file: str) -> list[str]:
+    dt = subprocess.run([f"{SCRIPTS}/diff-paths.py", diff_file, "--mode=modify-targets"],
+                        text=True, capture_output=True)
+    if dt.returncode != 0:
+        if dt.stderr:
+            sys.stderr.write(dt.stderr)
+        return []
+    return sorted({
+        p for p in dt.stdout.splitlines()
+        if WIKI_PAGE_RX.match(p) and Path(p).is_file()
+    })
+
+
+def _merge_retry_targets(candidates_file: str, expand_file: str, retry_set: list[str]) -> None:
+    if not retry_set:
+        return
+    for fpath in (candidates_file, expand_file):
+        existing = [ln for ln in read(fpath).splitlines() if ln]
+        merged = sorted(set(existing) | set(retry_set))
+        write(fpath, "".join(x + "\n" for x in merged))
+
+
+def _citation_keys(text: str) -> set[str]:
+    keys: set[str] = set()
+    for inner in re.findall(r"\[([^\[\]]*src:[^\[\]]*)\]", text):
+        for part in inner.split(","):
+            m = re.search(r"src:([A-Z0-9]{26})(#[^\]]*)?", part.strip())
+            if not m:
+                continue
+            keys.add(m.group(1) + (m.group(2) or ""))
+    return keys
+
+
+def _citation_key_still_present(old_key: str, new_keys: set[str]) -> bool:
+    if old_key in new_keys:
+        return True
+    # Allow a formerly bare source citation to become anchored. The reverse
+    # would lose chapter/section precision and is intentionally rejected.
+    if "#" not in old_key and any(k.startswith(old_key + "#") for k in new_keys):
+        return True
+    return False
+
+
+def _assert_existing_citation_anchors_preserved() -> None:
+    changed = git_capture(
+        "diff", "--cached", "--name-only", "--", "wiki/entities/", "wiki/topics/"
+    ).splitlines()
+    failures: list[str] = []
+    for rel in changed:
+        if not WIKI_PAGE_RX.match(rel):
+            continue
+        head = subprocess.run(["git", "cat-file", "-e", f"HEAD:{rel}"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if head.returncode != 0 or not Path(rel).is_file():
+            continue
+        old = subprocess.run(["git", "show", f"HEAD:{rel}"], text=True,
+                             capture_output=True)
+        if old.returncode != 0:
+            continue
+        old_keys = _citation_keys(old.stdout)
+        if not old_keys:
+            continue
+        new_keys = _citation_keys(read(rel))
+        missing = sorted(
+            key for key in old_keys
+            if not _citation_key_still_present(key, new_keys)
+        )
+        if missing:
+            failures.append(f"  {rel}: removed {', '.join(missing)}")
+    if failures:
+        for line in failures:
+            eout(line)
+        die("LLM diff removed existing citation anchors; preserve prior "
+            "source/chapter evidence and re-run")
 
 
 def _anchored_regex(titles: list[str]) -> str:
@@ -1345,7 +1435,29 @@ def main() -> int:
 
     handle_no_changes_or_continue(diff_raw, section_label)
     run_stream([f"{SCRIPTS}/apply-diff.py", "strip-fences", diff_raw, diff_file])
-    scope_check(diff_file, retry=False)
+    ok, scope_stdout, scope_stderr = _scope_check_result(diff_file)
+    if not ok:
+        if _scope_error_retryable(scope_stdout, scope_stderr):
+            print(scope_stdout, file=sys.stderr)
+            if scope_stderr:
+                sys.stderr.write(scope_stderr)
+            shutil.copyfile(diff_file, diff_file + ".rejected")
+            retry_set = _diff_existing_modify_targets(diff_file)
+            _merge_retry_targets(candidates_file, expand_file, retry_set)
+            if retry_set:
+                eout(f"diff format invalid; auto-retry with {len(retry_set)} expanded path(s)...")
+            else:
+                eout("diff format invalid; auto-retry with git-format instructions...")
+            build_prompt(expand_file, prompt_file, all_source_ids, text_file,
+                         candidates_file, source_terms_file, section_label, "retry")
+            _seed_workset(codex_workdir, candidates_file, expand_file)
+            write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
+            handle_no_changes_or_continue(diff_raw, section_label)
+            run_stream([f"{SCRIPTS}/apply-diff.py", "strip-fences", diff_raw, diff_file])
+            scope_check(diff_file, retry=True)
+        else:
+            _reject_scoped_diff(diff_file, retry=False,
+                                stdout=scope_stdout, stderr=scope_stderr)
 
     # ── §8 apply + auto-retry ──
     apply_err = mktemp()
@@ -1361,6 +1473,7 @@ def main() -> int:
                 env=apply_env, stderr=ef).returncode == 0
         if applied:
             _ROLLBACK_ON_FAILURE = True
+            _assert_existing_citation_anchors_preserved()
             break
 
         err_text = read(apply_err)
@@ -1394,11 +1507,7 @@ def main() -> int:
                 die(f"patch rejected: parsed path does not exist on disk: {p}")
 
         # 2. modify-targets from the rejected diff (lenient filter)
-        dt = subprocess.run([f"{SCRIPTS}/diff-paths.py", diff_file, "--mode=modify-targets"],
-                            text=True, capture_output=True)
-        diff_targets = sorted({
-            p for p in dt.stdout.splitlines() if WIKI_PAGE_RX.match(p) and Path(p).is_file()
-        })
+        diff_targets = _diff_existing_modify_targets(diff_file)
 
         # 3. combined retry set (line-based, like bash `cat … | sort -u` —
         #    splitlines(), NOT split(), so page names containing spaces survive)
@@ -1414,10 +1523,7 @@ def main() -> int:
             die(f"post-failure index dirty (unexpected): {dirty}")
 
         # 5. append to candidates + expand (dedup)
-        for fpath in (candidates_file, expand_file):
-            existing = [ln for ln in read(fpath).splitlines() if ln]
-            merged = sorted(set(existing) | set(retry_set))
-            write(fpath, "".join(x + "\n" for x in merged))
+        _merge_retry_targets(candidates_file, expand_file, retry_set)
 
         eout(f"patch failed; auto-retry with {len(retry_set)} expanded path(s)...")
         build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label, "retry")

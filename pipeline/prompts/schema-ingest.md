@@ -100,6 +100,11 @@ tags: [...]
 - Weak evidence stays weak. If the source hedges, hedge in prose:
   `可能`, `也许`, `据认为`, `有人主张`, `仍有争议`, `may`,
   `might`, `likely`, `is proposed to`, `arguably`, etc.
+- Existing citations are provenance anchors, not disposable wording. When
+  updating an existing page, preserve every previously committed
+  `src:<id>#<section>` anchor unless the same section is being re-ingested
+  and still remains cited elsewhere on the page. Never replace earlier
+  chapter evidence with only this run's `SECTION_LABEL`.
 
 ## Voice And Attribution
 
@@ -198,13 +203,18 @@ prose is reserved for real attribution or comparison.
 
 ## Multi-Source Synthesis
 
-- When a page has two or more distinct sources, use a rolling
-  `### Synthesis` section followed by append-only
-  `### From src:<id>#<label>` evidence sections.
+- When a page has two or more distinct sources or two or more distinct
+  source anchors (`src:<id>#<label>`), use a rolling `### Synthesis`
+  section followed by append-only `### From src:<id>#<label>` evidence
+  sections.
 - Rewrite `### Synthesis` on each ingest so it integrates all sources
   currently on the page.
 - Edit an existing matching `### From ...` section in place; never
   duplicate the same source+anchor heading.
+- If this run adds a new chapter/section anchor to a page that already
+  cites earlier chapters, convert or extend the page so earlier anchors
+  remain visible and cited. Do not delete the earlier chapter's
+  paragraphs just because the new chapter has a stronger synthesis.
 - Citations inside `### Synthesis` may combine sources. Citations
   inside an evidence section cite only that source.
 - `### From src:<id>#<label>` is a section label, not a citation. Do
@@ -214,6 +224,9 @@ prose is reserved for real attribution or comparison.
 
 - Preserve existing claims unless the new source provides a clear
   correction.
+- Preserve existing citation anchors on candidate pages. You may compact
+  prose, but the old `src:<id>#<label>` anchors must still appear after
+  the edit so prior chapter/source evidence remains traceable.
 - If the source contradicts an existing claim, keep both and insert an
   inline highlight near the affected line:
   `==CONFLICT: <new_source_id> claims X; existing from <old_source_id> says Y.==`
@@ -237,4 +250,7 @@ prose is reserved for real attribution or comparison.
 - Prefer smaller, conservative hunks with exact context from the shown
   candidate content.
 - Do not broaden the edit scope to compensate for patch failure.
+- Every file block must start with `diff --git a/<path> b/<path>`.
+  Do not emit plain unified diff blocks that start only with `---` and
+  `+++`.
 - Emit a raw unified diff only; no explanations.
