@@ -62,6 +62,17 @@ def _silent_codex() -> str:
     return "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
 
 
+def _slow_quiet_codex() -> str:
+    return (
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "argv = sys.argv[1:]\n"
+        "out = argv[argv.index('-o') + 1]\n"
+        "time.sleep(0.35)\n"
+        "open(out, 'w').write('ok')\n"
+    )
+
+
 class _FakeApiResponse:
     def __init__(self, payload: dict):
         self.payload = payload
@@ -208,6 +219,24 @@ class LlmClientTests(unittest.TestCase):
             self.assertIn("writing pages", progress)   # assistant message → heartbeat
             self.assertIn("hello", out)                # diff still returned (from -o)
 
+    def test_codex_heartbeats_while_provider_is_quiet(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _slow_quiet_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_HEARTBEAT_S": "0.1",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            buf = io.StringIO()
+            with patch.dict(os.environ, env, clear=True), contextlib.redirect_stderr(buf):
+                out = llm_client.complete_command("hello", timeout=5)
+            self.assertEqual(out, "ok")
+            self.assertIn("codex · still running", buf.getvalue())
+
     def test_codex_timeout_kills_silent_process(self):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp) / "bin"
@@ -240,6 +269,9 @@ class LlmClientTests(unittest.TestCase):
                                       "text": "creating  真核细胞.md\nlinking"}]}}, state)
         self.assertIn("creating 真核细胞.md linking", msg)
         self.assertIn("84k/258k ctx", msg)  # carries last-known ctx
+        agent_msg = llm_client._codex_progress_line(
+            {"payload": {"type": "agent_message", "message": "checking final diff"}}, state)
+        self.assertEqual(agent_msg, "codex · 84k/258k ctx · checking final diff")
         # tool call: apply_patch add-file gets summarized
         tool = llm_client._codex_progress_line(
             {"payload": {"type": "custom_tool_call", "name": "apply_patch",

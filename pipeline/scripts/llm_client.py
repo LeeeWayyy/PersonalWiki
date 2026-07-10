@@ -196,6 +196,14 @@ def _run_local(argv_or_cmd: list[str] | str, prompt: str, timeout: int, *, shell
     return (stdout or "").strip() or None
 
 
+def _codex_heartbeat_interval() -> float:
+    raw = _env("PW_CODEX_HEARTBEAT_S", "30")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 30.0
+
+
 # ── codex live progress ──────────────────────────────────────────────────────
 # The codex call blocks for minutes; without this the ingest job stream goes
 # silent and we can't tell "working" from "wedged". `codex exec --json` streams
@@ -220,6 +228,8 @@ def _codex_progress_line(event: dict, state: dict) -> str | None:
         w = state.get("window")
         state["ctx"] = f"{inp // 1000}k/{w // 1000}k ctx" if w else f"{inp // 1000}k ctx"
         return fmt(f"turn {state['turn']}", state["ctx"])
+    if t == "agent_message" and p.get("message", "").strip():
+        return fmt(state.get("ctx"), " ".join(p["message"].split())[:120])
     if t == "message" and p.get("role") == "assistant":
         for c in p.get("content", []):
             if c.get("type") == "output_text" and c.get("text", "").strip():
@@ -259,6 +269,7 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
     stdout_thread = None
     stdout_lines: queue.Queue[object] = queue.Queue()
     state: dict = {}
+    heartbeat_s = _codex_heartbeat_interval()
 
     def flush_stdout_lines() -> bool:
         stdout_done = False
@@ -293,12 +304,23 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
         )
         stdout_thread.start()
         try:
+            started = time.monotonic()
             deadline = time.monotonic() + timeout
+            next_heartbeat = started + heartbeat_s
             while proc.poll() is None:
                 flush_stdout_lines()
-                remaining = deadline - time.monotonic()
+                now = time.monotonic()
+                remaining = deadline - now
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(argv, timeout)
+                if show and heartbeat_s > 0 and now >= next_heartbeat:
+                    elapsed = int(now - started)
+                    print(
+                        f"  codex · still running ({elapsed}s elapsed, timeout {timeout}s)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    next_heartbeat = now + heartbeat_s
                 try:
                     proc.wait(timeout=min(0.2, remaining))
                 except subprocess.TimeoutExpired:
