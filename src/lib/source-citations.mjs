@@ -35,10 +35,12 @@ export function citationParts(value) {
     .filter(Boolean)
     .map((part) => {
       const hash = part.indexOf('#');
-      if (hash < 0) return { id: part.trim(), anchor: '' };
+      if (hash < 0) return { id: part.trim(), anchor: '', rawAnchor: '' };
+      const rawAnchor = part.slice(hash + 1).trim();
       return {
         id: part.slice(0, hash).trim(),
-        anchor: decodeSourceAnchor(part.slice(hash + 1).trim()),
+        anchor: decodeSourceAnchor(rawAnchor),
+        rawAnchor,
       };
     })
     .filter((part) => part.id);

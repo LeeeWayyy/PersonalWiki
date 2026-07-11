@@ -98,6 +98,15 @@ class SourceCitationContractTests(unittest.TestCase):
         )
         self.assertEqual(sync_frontmatter.citations_in(text), [SOURCE_ID, OTHER_ID])
 
+    def test_parser_rejects_noncanonical_space_after_opening_bracket(self):
+        self.assertEqual(
+            citations.iter_source_citations(f"[ src:{SOURCE_ID}]"), []
+        )
+
+    def test_malformed_utf8_anchor_matches_javascript_fallback(self):
+        self.assertEqual(citations.decode_source_anchor("sec=%FF"), "%FF")
+        self.assertEqual(citations.decode_source_anchor("sec=%C3%28"), "%C3%28")
+
 
 if __name__ == "__main__":
     unittest.main()

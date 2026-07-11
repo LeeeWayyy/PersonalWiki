@@ -342,8 +342,10 @@ def _rollback_after_apply_failure() -> bool:
                 eout(f"warn — failed to remove rolled-back added path {rel}: {exc}")
                 return False
     verification_paths = [*WIKI_PATHSPEC, ".wiki/log.md", *_ROLLBACK_EXTRA_PATHS]
+    asset_dir = f"{SRC.get('DEST', '')}.assets"
     verification_paths.extend(
-        path for path in run_provenance if path and _tracked_under(path)
+        path for path in run_provenance
+        if path and path != asset_dir and _tracked_under(path)
     )
     clean, detail = _git_path_status(sorted(set(verification_paths)))
     if not clean:
@@ -378,6 +380,8 @@ def eout(msg: str) -> None:
 
 def die(msg: str) -> None:
     print(f"{_log_prefix()}: {msg}", file=sys.stderr, flush=True)
+    if SRC.get("DEST"):
+        _register_untracked_under(f"{SRC['DEST']}.assets")
     rollback_ok = _rollback_after_apply_failure()
     if rollback_ok:
         _cleanup_run_created_artifacts()
@@ -748,7 +752,7 @@ def _intelligence_search_terms(intelligence_file: str) -> list[dict]:
 
     terms: dict[str, dict] = {}
 
-    def add(term: object, *, importance: int, required: bool, source: str) -> None:
+    def add(term: object, *, importance: int, required: bool) -> None:
         if not isinstance(term, str):
             return
         value = " ".join(term.split())
@@ -760,7 +764,6 @@ def _intelligence_search_terms(intelligence_file: str) -> list[dict]:
             "term": value,
             "importance": max(1, min(5, importance)),
             "required": required,
-            "source": source,
         }
         if existing is None or (row["required"], row["importance"]) > (
             existing["required"], existing["importance"]
@@ -779,10 +782,9 @@ def _intelligence_search_terms(intelligence_file: str) -> list[dict]:
                 (page_type, normalize_name(name)), (0, False)
             )
             merged_importance = max(importance, candidate_importance)
-            add(name, importance=merged_importance, required=required, source=page_type)
+            add(name, importance=merged_importance, required=required)
             for alias in item.get("aliases", []):
-                add(alias, importance=merged_importance, required=required,
-                    source=f"{page_type}-alias")
+                add(alias, importance=merged_importance, required=required)
 
     return sorted(
         terms.values(),
@@ -806,7 +808,6 @@ def collect_candidates(intelligence_file: str, candidates_file: str, cap: int) -
     term_by_value = {row["term"]: row for row in search_terms}
     query_text = "".join(f"{row['term']}\n" for row in search_terms)
     scores: Counter[str] = Counter()
-    reasons: dict[str, set[str]] = {}
     pinned: set[str] = set()
 
     # (a) exact normalized alias lookup (tab-separated term + path). Required
@@ -819,7 +820,6 @@ def collect_candidates(intelligence_file: str, candidates_file: str, cap: int) -
             term, path = cols[0], cols[1]
             row = term_by_value.get(term, {"importance": 1, "required": False})
             scores[path] += 100 + 10 * int(row["importance"])
-            reasons.setdefault(path, set()).add(f"exact-alias:{term}")
             if row["required"]:
                 pinned.add(path)
 
@@ -831,7 +831,6 @@ def collect_candidates(intelligence_file: str, candidates_file: str, cap: int) -
                             text=True, capture_output=True)
         for path in (ln for ln in rr.stdout.splitlines() if ln):
             scores[path] += int(row["importance"])
-            reasons.setdefault(path, set()).add(f"body:{term}")
 
     ranked = [path for path, _ in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
     chosen = sorted(pinned)
@@ -1999,6 +1998,9 @@ def main() -> int:
         return run_lang(dest)
 
     # ── §4 extract text ──
+    # Extraction and captioning can update tracked files in a reused asset
+    # directory, so the transaction starts before either helper can mutate it.
+    _ROLLBACK_ON_FAILURE = True
     text_file = mktemp()
     if args.kind:
         # The transcript is already clean text; media-identity.py rendered the
@@ -2329,15 +2331,11 @@ def main() -> int:
         run_stream([f"{SCRIPTS}/lint.py", "--gate=tags"])
         out("validating image embeds (lint --gate=images)...")
         run_stream([f"{SCRIPTS}/lint.py", "--gate=images"])
-        if args.kind:
-            # Every media ingest runs the COMBINED media-anchor gate (timestamp §7.4 +
-            # card §8.2 + frame §8.3 + citation orphans). Running only the kind-matching
-            # validator would let a wrong-CAPABILITY anchor the LLM emitted slip past the
-            # front door (e.g. a [src:<id>#mm:ss] on an image_note, or a [src:<id>#frame-N]
-            # on a plain video) — each validator flags such mismatches as a capability
-            # error, but only if it actually runs.
-            out("validating media anchors (lint --gate=media-anchors)...")
-            run_stream([f"{SCRIPTS}/lint.py", "--gate=media-anchors"])
+        # Run this for documents too: the quality gate permits only recognized
+        # structured anchors, and this lint proves the cited source has the
+        # matching timestamp/card/frame capability.
+        out("validating media anchors (lint --gate=media-anchors)...")
+        run_stream([f"{SCRIPTS}/lint.py", "--gate=media-anchors"])
         subprocess.run([f"{SCRIPTS}/alias-index.py", "build"], stdout=subprocess.DEVNULL)
         out("auto-linking entity mentions across the vault...")
         run_stream([f"{SCRIPTS}/autolink.py", "--all"])

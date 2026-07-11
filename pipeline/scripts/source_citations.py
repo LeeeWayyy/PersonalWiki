@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote_to_bytes
 
 
-BRACKETED_CITATION_RX = re.compile(r"\[([^\[\]]*\bsrc:[^\[\]]*)\]")
+BRACKETED_CITATION_RX = re.compile(r"\[(src:[^\[\]]*)\]")
 SOURCE_ID_RX = re.compile(r"^[A-Z0-9]{26}$")
 
 
@@ -31,7 +31,13 @@ def encode_section_anchor(label: str) -> str:
 def decode_source_anchor(anchor: str) -> str:
     """Decode canonical section anchors; preserve legacy/media anchors."""
     value = str(anchor or "").strip().removeprefix("#")
-    return unquote(value[4:]) if value.startswith("sec=") else value
+    if not value.startswith("sec="):
+        return value
+    encoded = value[4:]
+    try:
+        return unquote_to_bytes(encoded).decode("utf-8")
+    except UnicodeDecodeError:
+        return encoded
 
 
 def source_citation_ref(source_id: str, section_label: str = "") -> str:

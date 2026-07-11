@@ -30,7 +30,7 @@ function splitTextNodes(tree, regex, make) {
   });
 }
 
-function citationChip(id, anchor) {
+function citationChip(id, anchor, rawAnchor) {
   const src = resolveSource(id);
   const label = anchor || 'src';
   const cls = ['cite'];
@@ -39,7 +39,7 @@ function citationChip(id, anchor) {
   // resolves to that section's first block. Always target the reader (not gated on
   // build-time block existence — that isn't in Astro's render cache key, so it
   // would go stale); the reader shows an empty state if a source isn't extracted.
-  const url = src ? sourceReaderHref(id, anchor || '') : '#';
+  const url = src ? sourceReaderHref(id, rawAnchor || anchor || '') : '#';
   return {
     type: 'link', url,
     title: src ? src.title : `unknown source ${id}`,
@@ -88,9 +88,9 @@ export default function remarkInline() {
     // 3) Citations [src:...]
     splitTextNodes(tree, /\[src:([^\]]+)\]/g, (m) => {
       const nodes = [];
-      citationParts(m[1]).forEach(({ id, anchor }, i) => {
+      citationParts(m[1]).forEach(({ id, anchor, rawAnchor }, i) => {
         if (i > 0) nodes.push({ type: 'text', value: ' ' });
-        nodes.push(citationChip(id, anchor));
+        nodes.push(citationChip(id, anchor, rawAnchor));
       });
       return nodes;
     });

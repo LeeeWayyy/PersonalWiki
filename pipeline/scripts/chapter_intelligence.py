@@ -23,6 +23,8 @@ SCHEMA_VERSION = "chapter-intelligence/1"
 CACHE_MANIFEST_SCHEMA = "chapter-intelligence-cache-entry/1"
 PROMPT_VERSION = "v3"
 DEFAULT_TIMEOUT_S = 900
+SOURCE_QUOTE_MIN_CHARS = 20
+SOURCE_QUOTE_MAX_CHARS = 240
 DEFAULT_SCHEMA_INGEST_PATH = (
     Path(__file__).resolve().parent.parent / "prompts" / "schema-ingest.md"
 )
@@ -332,6 +334,7 @@ MODEL_IDENTITY_FIELDS = (
     "command_fingerprint",
     "codex_binary_fingerprint",
     "codex_config_fingerprint",
+    "codex_automation_fingerprint",
 )
 
 
@@ -651,7 +654,16 @@ def materialize_source_spans(artifact: object, text: str) -> dict:
                     span_path,
                     "must contain quote, with optional paired start and end",
                 )
-            quote = _string(span["quote"], f"{span_path}.quote", max_length=8000)
+            quote = _string(
+                span["quote"],
+                f"{span_path}.quote",
+                max_length=SOURCE_QUOTE_MAX_CHARS,
+            )
+            if len(quote) < SOURCE_QUOTE_MIN_CHARS:
+                _fail(
+                    f"{span_path}.quote",
+                    f"must contain at least {SOURCE_QUOTE_MIN_CHARS} characters",
+                )
             supplied_bounds = "start" in span
             if supplied_bounds:
                 supplied_start = _integer(span["start"], f"{span_path}.start")
@@ -1084,7 +1096,16 @@ def validate_artifact(
             span = _object(span_value, span_path, {"start", "end", "quote"})
             start = _integer(span["start"], f"{span_path}.start")
             end = _integer(span["end"], f"{span_path}.end")
-            quote = _string(span["quote"], f"{span_path}.quote", max_length=8000)
+            quote = _string(
+                span["quote"],
+                f"{span_path}.quote",
+                max_length=SOURCE_QUOTE_MAX_CHARS,
+            )
+            if len(quote) < SOURCE_QUOTE_MIN_CHARS:
+                _fail(
+                    f"{span_path}.quote",
+                    f"must contain at least {SOURCE_QUOTE_MIN_CHARS} characters",
+                )
             if start < 0 or end <= start:
                 _fail(
                     span_path,

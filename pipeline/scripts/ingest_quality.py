@@ -13,14 +13,14 @@ import yaml
 
 from _util import normalize_name
 from source_citations import (
+    BRACKETED_CITATION_RX,
     encode_section_anchor,
-    iter_source_citations,
+    parse_citation_parts,
     source_citation_ref,
 )
 
 
 RECEIPT_SCHEMA = "ingest-quality-receipt/1"
-INTELLIGENCE_SCHEMA = "chapter-intelligence/1"
 HIGH_IMPORTANCE = 4
 FACT_CARD_MAX_ALNUMERIC_CHARS = 180
 
@@ -35,6 +35,11 @@ _CALLOUT_RX = re.compile(r"^\s*>\s?(.*)$")
 _AI_CALLOUT_RX = re.compile(r"^\[!AI\](?:\s+.*)?$", re.IGNORECASE)
 _HEADING_RX = re.compile(r"^#{1,6}\s+")
 _FENCE_RX = re.compile(r"^(`{3,}|~{3,})")
+_LIST_ITEM_RX = re.compile(r"^(?:[-+*]|\d+[.)])\s+")
+_MEDIA_ANCHOR_RX = re.compile(
+    r"(?:card-[1-9]\d*|frame-[1-9]\d*|"
+    r"\d{1,2}:\d{2}(?::\d{2})?-\d{1,2}:\d{2}(?::\d{2})?)"
+)
 _CITATION_GROUP_RX = re.compile(r"\[[^\[\]]*\bsrc:[^\[\]]*\]")
 _WIKILINK_RX = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]")
 _IMAGE_TRANSCLUDE_RX = re.compile(r"!\[\[[^\]]+\]\]")
@@ -74,28 +79,6 @@ _CHINESE_CHAPTER_RX = re.compile(
     re.IGNORECASE,
 )
 
-_PRODUCTION_INTELLIGENCE_KEYS = {
-    "schema",
-    "source_id",
-    "source_sha256",
-    "text_sha256",
-    "section_label",
-    "prompt_version",
-    "language",
-    "summary",
-    "central_question",
-    "chapter_claim",
-    "builds_on",
-    "claims",
-    "entities",
-    "topics",
-    "relations",
-    "page_candidates",
-    "claim_coverage",
-    "open_questions",
-}
-
-
 class IntelligenceValidationError(ValueError):
     """Raised when the quality gate cannot trust an intelligence artifact."""
 
@@ -117,7 +100,6 @@ class Candidate:
     name: str
     page_type: str
     importance: int | None
-    required: bool
     central: bool
     accepted_names: tuple[str, ...]
     claim_ids: tuple[str, ...]
@@ -127,7 +109,6 @@ class Candidate:
 class Zone:
     kind: str
     start_line: int
-    end_line: int
     lines: tuple[tuple[int, str], ...]
 
 
@@ -153,19 +134,9 @@ class PageInput:
 class ParsedPage:
     path: str
     page_type: str | None
-    h1: str | None
-    aliases: tuple[str, ...]
-    zones: tuple[Zone, ...]
+    names: frozenset[str]
     paragraphs: tuple[Paragraph, ...]
     issues: tuple[Issue, ...]
-
-    @property
-    def names(self) -> frozenset[str]:
-        return frozenset(
-            normalize_name(value)
-            for value in ((self.h1,) + self.aliases)
-            if value and normalize_name(value)
-        )
 
 
 def _claim_text_by_id(artifact: object) -> dict[str, str]:
@@ -186,193 +157,49 @@ def _intelligence_error(path: str, message: str) -> IntelligenceValidationError:
     return IntelligenceValidationError(f"{path}: {message}")
 
 
-def _required_string(value: object, path: str) -> str:
-    if type(value) is not str or not value.strip():
-        raise _intelligence_error(path, "must be a non-empty string")
-    return value.strip()
-
-
-def _optional_aliases(value: object, path: str) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if type(value) is not list:
-        raise _intelligence_error(path, "must be an array of strings")
-    aliases: list[str] = []
-    for index, alias in enumerate(value):
-        aliases.append(_required_string(alias, f"{path}[{index}]"))
-    if len({normalize_name(alias) for alias in aliases}) != len(aliases):
-        raise _intelligence_error(path, "contains duplicate normalized aliases")
-    return tuple(aliases)
-
-
-def _declared_aliases(
-    artifact: Mapping[str, object], key: str, page_type: str
-) -> dict[str, tuple[str, ...]]:
-    value = artifact.get(key)
-    if value is None:
-        return {}
-    if type(value) is not list:
-        raise _intelligence_error(f"$.{key}", "must be an array")
-    result: dict[str, tuple[str, ...]] = {}
-    for index, raw in enumerate(value):
-        path = f"$.{key}[{index}]"
-        if type(raw) is not dict:
-            raise _intelligence_error(path, "must be an object")
-        name = _required_string(raw.get("name"), f"{path}.name")
-        aliases = _optional_aliases(raw.get("aliases"), f"{path}.aliases")
-        normalized = normalize_name(name)
-        if normalized in result:
-            raise _intelligence_error(f"{path}.name", f"duplicates {page_type} {name!r}")
-        result[normalized] = aliases
-    return result
-
-
-def _candidate_type(raw: Mapping[str, object], path: str) -> str | None:
-    value = raw.get("page_type")
-    if value is None:
-        return None
-    string = _required_string(value, f"{path}.page_type").casefold()
-    if string not in {"entity", "topic"}:
-        raise _intelligence_error(f"{path}.page_type", "must be entity or topic")
-    return string
-
-
 def validate_intelligence(
     artifact: object, *, source_id: str, section_label: str
 ) -> tuple[Candidate, ...]:
-    """Validate quality-relevant intelligence and return mandatory candidates.
+    """Validate with the analyzer contract, then project mandatory candidates."""
+    try:
+        import chapter_intelligence as analyzer
 
-    The analyzer has a stricter source-span validator. This gate independently
-    validates every field it relies on so malformed or ambiguous planning data
-    can never turn a check off.
-    """
-    if type(artifact) is not dict:
-        raise _intelligence_error("$", "must be an object")
-    if artifact.get("schema") != INTELLIGENCE_SCHEMA:
-        raise _intelligence_error(
-            "$.schema", f"must equal {INTELLIGENCE_SCHEMA!r}"
+        if type(artifact) is not dict:
+            raise ValueError("artifact must be an object")
+        analyzer.validate_artifact(
+            artifact,
+            text=None,
+            source_id=source_id,
+            source_sha256=artifact.get("source_sha256"),
+            section_label=section_label,
+            prompt_version=artifact.get("prompt_version"),
+            _expected_text_sha256=artifact.get("text_sha256"),
         )
-    actual_source = _required_string(artifact.get("source_id"), "$.source_id")
-    if actual_source != source_id:
-        raise _intelligence_error(
-            "$.source_id", f"expected {source_id!r}, got {actual_source!r}"
-        )
-    if type(artifact.get("section_label")) is not str:
-        raise _intelligence_error("$.section_label", "must be a string")
-    if artifact["section_label"] != section_label:
-        raise _intelligence_error(
-            "$.section_label",
-            f"expected {section_label!r}, got {artifact['section_label']!r}",
-        )
+    except (ImportError, TypeError, ValueError) as exc:
+        raise _intelligence_error("$", f"production artifact is invalid: {exc}") from exc
 
-    # Full analyzer artifacts use a stricter exact-key contract than the
-    # quality gate needs for isolated/flexible candidate records. Reuse that
-    # validator when production metadata is present so malformed claim links,
-    # hashes, spans, or the current exact page-candidate shape fail closed.
-    if any(key in artifact for key in ("source_sha256", "text_sha256", "prompt_version")):
-        if set(artifact) != _PRODUCTION_INTELLIGENCE_KEYS:
-            missing = sorted(_PRODUCTION_INTELLIGENCE_KEYS - set(artifact))
-            extra = sorted(set(artifact) - _PRODUCTION_INTELLIGENCE_KEYS)
-            details = []
-            if missing:
-                details.append(f"missing {missing}")
-            if extra:
-                details.append(f"unexpected {extra}")
-            raise _intelligence_error("$", "; ".join(details))
-        try:
-            import chapter_intelligence as analyzer
-
-            analyzer.validate_artifact(
-                artifact,
-                text=None,
-                source_id=source_id,
-                source_sha256=artifact["source_sha256"],
-                section_label=section_label,
-                prompt_version=artifact["prompt_version"],
-                _expected_text_sha256=artifact["text_sha256"],
-            )
-        except (ImportError, TypeError, ValueError) as exc:
-            raise _intelligence_error("$", f"production artifact is invalid: {exc}") from exc
-
-    entity_aliases = _declared_aliases(artifact, "entities", "entity")
-    topic_aliases = _declared_aliases(artifact, "topics", "topic")
-    declarations = {"entity": entity_aliases, "topic": topic_aliases}
-
-    raw_candidates = artifact.get("page_candidates")
-    if type(raw_candidates) is not list:
-        raise _intelligence_error("$.page_candidates", "must be an array")
+    aliases = {
+        normalize_name(entity["name"]): tuple(entity["aliases"])
+        for entity in artifact["entities"]
+    }
 
     required_candidates: list[Candidate] = []
-    seen: set[tuple[str, str]] = set()
-    for index, raw in enumerate(raw_candidates):
-        path = f"$.page_candidates[{index}]"
-        if type(raw) is not dict:
-            raise _intelligence_error(path, "must be an object")
-        name = _required_string(raw.get("name"), f"{path}.name")
-
-        importance = raw.get("importance")
-        if importance is not None:
-            if type(importance) is not int or not 1 <= importance <= 5:
-                raise _intelligence_error(
-                    f"{path}.importance", "must be an integer from 1 through 5"
-                )
-
-        explicit_required = raw.get("required")
-        if explicit_required is not None and type(explicit_required) is not bool:
-            raise _intelligence_error(f"{path}.required", "must be a boolean")
-        if importance is None and explicit_required is None:
-            raise _intelligence_error(
-                path, "needs importance or required selection metadata"
-            )
-
-        page_type = _candidate_type(raw, path)
-        selected = (
-            (importance is not None and importance >= HIGH_IMPORTANCE)
-            or explicit_required is True
-        )
-        if not selected:
+    for raw in artifact["page_candidates"]:
+        importance = raw["importance"]
+        required = raw["required"]
+        if importance < HIGH_IMPORTANCE and not required:
             continue
-        if page_type is None:
-            raise _intelligence_error(
-                path, "a required/high-importance candidate needs an entity/topic page_type"
-            )
-
-        key = (page_type, normalize_name(name))
-        if key in seen:
-            raise _intelligence_error(path, f"duplicates candidate {page_type}:{name}")
-        seen.add(key)
-
-        declared = declarations[page_type].get(key[1], ())
-        accepted = tuple(dict.fromkeys((name, *declared)))
-
-        central = importance == 5 or explicit_required is True
-        raw_claim_ids = raw.get("claim_ids")
-        if raw_claim_ids is None:
-            claim_ids: tuple[str, ...] = ()
-        elif type(raw_claim_ids) is not list:
-            raise _intelligence_error(f"{path}.claim_ids", "must be an array")
-        else:
-            parsed_claim_ids: list[str] = []
-            for claim_index, claim_id in enumerate(raw_claim_ids):
-                parsed_claim_ids.append(
-                    _required_string(
-                        claim_id, f"{path}.claim_ids[{claim_index}]"
-                    )
-                )
-            if len(set(parsed_claim_ids)) != len(parsed_claim_ids):
-                raise _intelligence_error(
-                    f"{path}.claim_ids", "contains duplicate claim ids"
-                )
-            claim_ids = tuple(parsed_claim_ids)
+        name = raw["name"]
+        page_type = raw["page_type"]
+        accepted = tuple(dict.fromkeys((name, *aliases.get(normalize_name(name), ()))))
         required_candidates.append(
             Candidate(
                 name=name,
                 page_type=page_type,
                 importance=importance,
-                required=True,
-                central=central,
+                central=(importance == 5 or (required and importance < HIGH_IMPORTANCE)),
                 accepted_names=accepted,
-                claim_ids=claim_ids,
+                claim_ids=tuple(raw["claim_ids"]),
             )
         )
     return tuple(required_candidates)
@@ -460,7 +287,6 @@ def validate_zones(text: str, path: str) -> tuple[tuple[Zone, ...], tuple[Issue,
             Zone(
                 kind=kind,
                 start_line=open_line,
-                end_line=line_number,
                 lines=tuple(
                     (body_index + 1, lines[body_index])
                     for body_index in range(open_index + 1, index)
@@ -568,6 +394,11 @@ def callout_paragraphs(
             ):
                 flush()
                 continue
+            if _LIST_ITEM_RX.match(stripped):
+                flush()
+                block_line = line_number
+                block.append(value)
+                continue
             if not block:
                 block_line = line_number
             block.append(value)
@@ -645,9 +476,11 @@ def parse_page(page: PageInput) -> ParsedPage:
     return ParsedPage(
         path=page.path,
         page_type=page_type,
-        h1=h1,
-        aliases=aliases,
-        zones=zones,
+        names=frozenset(
+            normalize_name(value)
+            for value in ((h1,) + aliases)
+            if value and normalize_name(value)
+        ),
         paragraphs=paragraphs,
         issues=tuple(issues),
     )
@@ -682,17 +515,21 @@ def has_exact_citation(text: str, source_id: str, section_label: str) -> bool:
     anchor such as a timestamp, card, or frame; the dedicated media-anchor lint
     validates that anchor's capability and range later in the pipeline.
     """
+    stripped = text.rstrip()
+    matches = list(BRACKETED_CITATION_RX.finditer(stripped))
+    if not matches or not re.fullmatch(r"[.!?。！？]*", stripped[matches[-1].end():]):
+        return False
     expected_anchor = encode_section_anchor(section_label) if section_label else ""
-    for citation in iter_source_citations(text):
+    for citation in parse_citation_parts(matches[-1].group(1)):
         if citation.source_id != source_id:
             continue
         if section_label:
             if citation.raw_anchor == expected_anchor:
                 return True
         else:
-            # Whole-source provenance may be bare or use a structured media
-            # anchor; dedicated lint gates validate media-anchor capability.
-            return True
+            return not citation.raw_anchor or bool(
+                _MEDIA_ANCHOR_RX.fullmatch(citation.raw_anchor)
+            )
     return False
 
 
@@ -844,11 +681,14 @@ def evaluate_quality(
         identity_matches = [page for page in parsed if bool(page.names & accepted)]
         existing_identity_matches = [
             page for page in identity_matches
-            if disposition_by_path.get(page.path) == "existing" and page.page_type is not None
+            if disposition_by_path.get(page.path) == "existing"
+            and page.page_type is not None
+            and not page.issues
         ]
         existing_identity_matches.extend(
             page for page in historical
-            if page.page_type is not None and bool(page.names & accepted)
+            if page.page_type is not None and not page.issues
+            and bool(page.names & accepted)
             and page.path not in {match.path for match in existing_identity_matches}
         )
         existing_types = {page.page_type for page in existing_identity_matches}
@@ -868,13 +708,14 @@ def evaluate_quality(
         ]
         historical_matches = [
             page for page in historical
-            if page.page_type == resolved_type
+            if not page.issues and page.page_type == resolved_type
             and bool(page.names & accepted)
             and _already_covers_claims(page, candidate, claim_texts)
         ]
         covered_existing = [
             page for page in matches
             if disposition_by_path.get(page.path) == "existing"
+            and not page.issues
             and _already_covers_claims(page, candidate, claim_texts)
         ]
         covered_existing.extend(
@@ -1027,27 +868,3 @@ def evaluate_quality(
         "errors": [issue.as_dict() for issue in errors],
         "warnings": [issue.as_dict() for issue in warnings],
     }
-
-
-__all__ = [
-    "Candidate",
-    "FACT_CARD_MAX_ALNUMERIC_CHARS",
-    "INTELLIGENCE_SCHEMA",
-    "IntelligenceValidationError",
-    "Issue",
-    "PageInput",
-    "Paragraph",
-    "ParsedPage",
-    "RECEIPT_SCHEMA",
-    "Zone",
-    "callout_paragraphs",
-    "evaluate_quality",
-    "expected_citation",
-    "forbidden_entity_text_phrases",
-    "has_exact_citation",
-    "modified_paragraphs",
-    "normalize_name",
-    "parse_page",
-    "validate_intelligence",
-    "validate_zones",
-]

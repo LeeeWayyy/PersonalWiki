@@ -45,4 +45,14 @@ describe('remark-inline citation rendering', () => {
     assert.match(links[0].url, /#sec=A%2C%20B%5D%20%23100%25%20%C2%B7/);
     assert.equal(links[1].children[0].value, 'legacy');
   });
+
+  it('routes a structured-looking label with its raw canonical anchor', () => {
+    const nodes = renderTextNode(
+      `[src:${SOURCE_ID}#sec=sec%3DIntroduction]`,
+    );
+    const link = nodes.find((node) => node.type === 'link');
+
+    assert.equal(link.children[0].value, 'sec=Introduction');
+    assert.match(link.url, /#sec=sec%3DIntroduction$/);
+  });
 });

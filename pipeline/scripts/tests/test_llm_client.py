@@ -274,6 +274,134 @@ class LlmClientTests(unittest.TestCase):
                 first["command_fingerprint"], second["command_fingerprint"]
             )
 
+    def test_command_model_override_matches_execution_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "stub.sh"
+            write_executable(
+                script,
+                '#!/usr/bin/env bash\ncat >/dev/null\nprintf "%s" "$PW_LLM_MODEL"\n',
+            )
+            env = {
+                "LLM_CMD": str(script),
+                "PW_LLM_MODEL": "main-model",
+                "PATH": os.environ.get("PATH", ""),
+            }
+            with patch.dict(os.environ, env, clear=True):
+                identity = llm_client.execution_identity("analyzer-model")
+                output = llm_client.complete_command(
+                    "prompt", timeout=5, model="analyzer-model"
+                )
+            self.assertEqual(identity["model"], "analyzer-model")
+            self.assertEqual(output, "analyzer-model")
+
+    def test_codex_automation_flags_change_execution_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            base = {
+                "PW_LLM_PROVIDER": "codex",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, base, clear=True):
+                first = llm_client.execution_identity("model")
+            changed = {
+                **base,
+                "PW_CODEX_IGNORE_USER_CONFIG": "0",
+                "PW_CODEX_IGNORE_RULES": "0",
+                "PW_CODEX_EPHEMERAL": "1",
+                "PW_CODEX_DISABLE_SHELL": "1",
+                "PW_CODEX_SERVICE_TIER": "priority",
+            }
+            with patch.dict(os.environ, changed, clear=True):
+                second = llm_client.execution_identity("model")
+            self.assertNotEqual(
+                first["codex_automation_fingerprint"],
+                second["codex_automation_fingerprint"],
+            )
+
+    def test_enabled_codex_config_and_rules_are_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            codex_home = root / "codex-home"
+            rules = codex_home / "rules"
+            bin_dir.mkdir()
+            rules.mkdir(parents=True)
+            write_executable(bin_dir / "codex", _fake_codex())
+            config = codex_home / "config.toml"
+            rule = rules / "default.rules"
+            config.write_text('model = "one"\n', encoding="utf-8")
+            rule.write_text("allow one\n", encoding="utf-8")
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_IGNORE_USER_CONFIG": "0",
+                "PW_CODEX_IGNORE_RULES": "0",
+                "CODEX_HOME": str(codex_home),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                first = llm_client.execution_identity("model")
+                config.write_text('model = "different"\n', encoding="utf-8")
+                rule.write_text("allow different behavior\n", encoding="utf-8")
+                second = llm_client.execution_identity("model")
+            self.assertNotEqual(
+                first["codex_automation_fingerprint"],
+                second["codex_automation_fingerprint"],
+            )
+
+    def test_workspace_instructions_are_always_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            workdir = root / "work"
+            bin_dir.mkdir()
+            workdir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            instructions = workdir / "AGENTS.md"
+            instructions.write_text("first instruction\n", encoding="utf-8")
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_IGNORE_RULES": "1",
+                "PW_CODEX_WORKDIR": str(workdir),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                first = llm_client.execution_identity("model")
+                instructions.write_text("changed instruction\n", encoding="utf-8")
+                second = llm_client.execution_identity("model")
+            self.assertNotEqual(
+                first["codex_automation_fingerprint"],
+                second["codex_automation_fingerprint"],
+            )
+
+    def test_unseeded_scratch_ancestor_instructions_are_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            scratch_root = root / "scratch"
+            bin_dir.mkdir()
+            scratch_root.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            instructions = scratch_root / "AGENTS.md"
+            instructions.write_text("first instruction\n", encoding="utf-8")
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_WORKDIR": str(root / "missing-workdir"),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(llm_client.tempfile, "gettempdir", return_value=str(scratch_root)),
+            ):
+                first = llm_client.execution_identity("model")
+                instructions.write_text("changed instruction\n", encoding="utf-8")
+                second = llm_client.execution_identity("model")
+            self.assertNotEqual(
+                first["codex_automation_fingerprint"],
+                second["codex_automation_fingerprint"],
+            )
+
     def test_derived_lib_call_llm_honors_base_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "cmd"

@@ -28,8 +28,8 @@ CLI_SPEC.loader.exec_module(cli)
 SOURCE_ID = "01K00000000000000000000000"
 SOURCE_SHA = "a" * 64
 MODEL_IDENTITY = {"provider": "fake", "model": "fake-analyzer"}
-TEXT = "Alpha powers beta. Gamma measures delta. Epsilon records change."
-QUOTE = "Alpha powers beta."
+TEXT = "Alpha reliably powers beta. Gamma measures delta. Epsilon records change."
+QUOTE = "Alpha reliably powers beta."
 
 
 def artifact_for(
@@ -233,7 +233,9 @@ class ValidationTests(unittest.TestCase):
 
     def test_rejects_noncanonical_or_mismatched_final_spans(self):
         bad = artifact_for()
-        bad["claims"][0]["source_spans"][0]["quote"] = "Alpha powers BETA."
+        bad["claims"][0]["source_spans"][0]["quote"] = (
+            "Alpha reliably powers BETA."
+        )
         with self.assertRaisesRegex(ci.ArtifactValidationError, "does not match"):
             validate(bad)
 
@@ -407,38 +409,52 @@ class QuoteMaterializationTests(unittest.TestCase):
         validate(result)
 
     def test_repeated_quote_defaults_to_first_or_uses_exact_bounds(self):
-        text = "repeat here; repeat there"
+        quote = "repeat evidence phrase"
+        text = f"{quote}; {quote}"
+        second = len(quote) + 2
         raw = artifact_for(text=TEXT, count=1, quote_first=True)
-        raw["claims"][0]["source_spans"] = [{"quote": "repeat"}]
+        raw["claims"][0]["source_spans"] = [{"quote": quote}]
         first = ci.materialize_source_spans(raw, text)
         self.assertEqual(
             first["claims"][0]["source_spans"][0],
-            {"start": 0, "end": 6, "quote": "repeat"},
+            {"start": 0, "end": len(quote), "quote": quote},
         )
 
         raw["claims"][0]["source_spans"] = [
-            {"quote": "repeat", "start": 13, "end": 19}
+            {"quote": quote, "start": second, "end": second + len(quote)}
         ]
         result = ci.materialize_source_spans(raw, text)
         self.assertEqual(
             result["claims"][0]["source_spans"][0],
-            {"start": 13, "end": 19, "quote": "repeat"},
+            {"start": second, "end": second + len(quote), "quote": quote},
         )
+
+    def test_quote_length_contract_is_enforced(self):
+        raw = artifact_for(count=1, quote_first=True)
+        raw["claims"][0]["source_spans"] = [{"quote": "too short"}]
+        with self.assertRaisesRegex(ci.ArtifactValidationError, "at least 20"):
+            ci.materialize_source_spans(raw, "too short")
+
+        long_quote = "x" * 241
+        raw["claims"][0]["source_spans"] = [{"quote": long_quote}]
+        with self.assertRaisesRegex(ci.ArtifactValidationError, "at most 240"):
+            ci.materialize_source_spans(raw, long_quote)
 
     def test_unmatched_fails_and_approximate_repeated_bounds_use_first(self):
         raw = artifact_for(count=1, quote_first=True)
-        raw["claims"][0]["source_spans"] = [{"quote": "not in source"}]
+        raw["claims"][0]["source_spans"] = [{"quote": "missing evidence phrase"}]
         with self.assertRaisesRegex(ci.ArtifactValidationError, "does not occur"):
             ci.materialize_source_spans(raw, TEXT)
 
-        text = "repeat here; repeat there"
+        quote = "repeat evidence phrase"
+        text = f"{quote}; {quote}"
         raw["claims"][0]["source_spans"] = [
-            {"quote": "repeat", "start": 12, "end": 18}
+            {"quote": quote, "start": len(quote) + 1, "end": len(quote) * 2 + 1}
         ]
         result = ci.materialize_source_spans(raw, text)
         self.assertEqual(
             result["claims"][0]["source_spans"][0],
-            {"start": 0, "end": 6, "quote": "repeat"},
+            {"start": 0, "end": len(quote), "quote": quote},
         )
 
     def test_formatting_equivalent_quote_is_canonicalized_to_source_slice(self):
@@ -743,7 +759,9 @@ class CacheAndPromptTests(unittest.TestCase):
             schema = root / "schema.md"
             schema.write_text("rules", encoding="utf-8")
             raw = artifact_for(quote_first=True)
-            raw["claims"][0]["source_spans"] = [{"quote": "invented quote"}]
+            raw["claims"][0]["source_spans"] = [
+                {"quote": "invented evidence quote"}
+            ]
             with self.assertRaisesRegex(ci.ArtifactValidationError, "does not occur"):
                 ci.analyze_chapter(
                     TEXT,
@@ -764,10 +782,10 @@ class CacheAndPromptTests(unittest.TestCase):
             diagnostic = json.loads(diagnostics[0].read_text(encoding="utf-8"))
             self.assertEqual(diagnostic["schema"], "chapter-intelligence-invalid/1")
             self.assertIn("does not occur", diagnostic["error"])
-            self.assertIn("invented quote", diagnostic["raw_response"])
+            self.assertIn("invented evidence quote", diagnostic["raw_response"])
 
     def test_revalidates_preserved_response_before_calling_llm(self):
-        text = "Alpha **powers** beta."
+        text = "Alpha **reliably powers** beta."
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             schema = root / "schema.md"
@@ -775,7 +793,9 @@ class CacheAndPromptTests(unittest.TestCase):
             cache = root / "cache"
             raw = artifact_for(count=1, quote_first=True)
             raw["text_sha256"] = ci.sha256_text(text)
-            raw["claims"][0]["source_spans"] = [{"quote": "Alpha powers beta."}]
+            raw["claims"][0]["source_spans"] = [
+                {"quote": "Alpha reliably powers beta."}
+            ]
             key = ci.cache_key(
                 source_sha256=SOURCE_SHA,
                 text_sha256=ci.sha256_text(text),

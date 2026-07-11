@@ -210,6 +210,13 @@ def _file_fingerprint(path: Path) -> dict[str, int | str]:
     }
 
 
+def _content_fingerprint(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def _command_fingerprint() -> str | None:
     """Hash the effective custom command without persisting command secrets."""
     cmd = command()
@@ -268,6 +275,53 @@ def _codex_config_fingerprint(model_override: str | None = None) -> str | None:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _codex_automation_profile() -> dict[str, object]:
+    """Return every non-secret Codex automation input that can affect output."""
+    profile: dict[str, object] = {
+        "ignore_user_config": _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True),
+        "ignore_rules": _env_bool("PW_CODEX_IGNORE_RULES", True),
+        "ephemeral": _env_bool("PW_CODEX_EPHEMERAL", False),
+        "disable_shell": _env_bool("PW_CODEX_DISABLE_SHELL", False),
+        "service_tier": _env("PW_CODEX_SERVICE_TIER") or None,
+    }
+    if not profile["ignore_user_config"]:
+        config = _codex_config_path()
+        profile["user_config"] = _content_fingerprint(config)
+    if not profile["ignore_rules"]:
+        rules_dir = _codex_config_path().parent / "rules"
+        profile["rules"] = [
+            {
+                "path": path.relative_to(rules_dir).as_posix(),
+                "sha256": _content_fingerprint(path),
+            }
+            for path in sorted(rules_dir.rglob("*"))
+            if path.is_file()
+        ] if rules_dir.is_dir() else []
+    workdir = _env("PW_CODEX_WORKDIR")
+    configured_workdir = Path(workdir).expanduser() if workdir else None
+    root = (
+        configured_workdir.resolve()
+        if configured_workdir is not None and configured_workdir.is_dir()
+        else Path(tempfile.gettempdir()).resolve()
+    )
+    profile["workspace_instructions"] = [
+        {
+            "path": str(candidate),
+            "sha256": _content_fingerprint(candidate),
+        }
+        for candidate in (parent / "AGENTS.md" for parent in (root, *root.parents))
+        if candidate.is_file()
+    ]
+    return profile
+
+
+def _codex_automation_fingerprint() -> str:
+    payload = json.dumps(
+        _codex_automation_profile(), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _public_api_base_url() -> str | None:
     if provider() != "api":
         return None
@@ -311,6 +365,11 @@ def execution_identity(model_override: str | None = None) -> dict[str, str | Non
             if selected_provider == "codex"
             else None
         ),
+        "codex_automation_fingerprint": (
+            _codex_automation_fingerprint()
+            if selected_provider == "codex"
+            else None
+        ),
     }
 
 
@@ -339,7 +398,8 @@ def _enqueue_stdout_lines(stdout, lines: "queue.Queue[object]") -> None:
         lines.put(_STDOUT_DONE)
 
 
-def _run_local(argv_or_cmd: list[str] | str, prompt: str, timeout: int, *, shell: bool, cwd: str | None) -> str | None:
+def _run_local(argv_or_cmd: list[str] | str, prompt: str, timeout: int, *, shell: bool,
+               cwd: str | None, env: dict[str, str] | None = None) -> str | None:
     proc = subprocess.Popen(
         argv_or_cmd,
         shell=shell,
@@ -348,6 +408,7 @@ def _run_local(argv_or_cmd: list[str] | str, prompt: str, timeout: int, *, shell
         stderr=subprocess.PIPE,
         text=True,
         cwd=cwd,
+        env=env,
         start_new_session=True,
     )
     try:
@@ -551,7 +612,13 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
     """Run a local LLM provider only: custom `LLM_CMD`, then direct Codex."""
     cmd = command()
     if cmd:
-        return _run_local(cmd, prompt, timeout, shell=True, cwd=_command_cwd())
+        env = None
+        if model and model.strip():
+            env = os.environ.copy()
+            env["PW_LLM_MODEL"] = model.strip()
+        return _run_local(
+            cmd, prompt, timeout, shell=True, cwd=_command_cwd(), env=env
+        )
     if codex_configured():
         # Isolate codex from the content repo: it runs in a small working root
         # (-C) holding ONLY the pages the prompt references — never the whole
@@ -572,13 +639,14 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
         own = not (seeded and Path(seeded).is_dir())
         workdir = tempfile.mkdtemp(prefix="pw-codex-") if own else seeded
         argv = [_codex_bin(), *CODEX_ARGS]
-        if _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True):
+        automation = _codex_automation_profile()
+        if automation["ignore_user_config"]:
             argv.append("--ignore-user-config")
-        if _env_bool("PW_CODEX_IGNORE_RULES", True):
+        if automation["ignore_rules"]:
             argv.append("--ignore-rules")
-        if _env_bool("PW_CODEX_EPHEMERAL", False):
+        if automation["ephemeral"]:
             argv.append("--ephemeral")
-        if _env_bool("PW_CODEX_DISABLE_SHELL", False):
+        if automation["disable_shell"]:
             argv += ["--disable", "shell_tool"]
         reasoning = _effective_codex_setting(
             "PW_CODEX_REASONING_EFFORT", "model_reasoning_effort", "medium"
@@ -590,7 +658,7 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
         )
         if verbosity:
             argv += ["-c", f"model_verbosity={json.dumps(verbosity)}"]
-        service_tier = _env("PW_CODEX_SERVICE_TIER")
+        service_tier = automation["service_tier"]
         if service_tier:
             argv += ["-c", f"service_tier={json.dumps(service_tier)}"]
         argv += ["-C", workdir, "--sandbox", "workspace-write"]

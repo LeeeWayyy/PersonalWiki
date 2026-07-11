@@ -28,8 +28,8 @@ describe('source citation contract', () => {
       `${sourceCitationRef('SOURCE1', label)},src:SOURCE2#legacy section`,
     );
     assert.deepEqual(parts, [
-      { id: 'SOURCE1', anchor: label },
-      { id: 'SOURCE2', anchor: 'legacy section' },
+      { id: 'SOURCE1', anchor: label, rawAnchor: cases[1].anchor },
+      { id: 'SOURCE2', anchor: 'legacy section', rawAnchor: 'legacy section' },
     ]);
   });
 

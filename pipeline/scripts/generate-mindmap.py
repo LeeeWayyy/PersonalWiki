@@ -54,7 +54,7 @@ from _util import default_vault_root  # noqa: E402
 from autolink import _autolink_body, _build_entries  # noqa: E402
 import chapter_intelligence as ci  # noqa: E402
 import derived_lib as dl  # noqa: E402
-from source_citations import source_citation  # noqa: E402
+from source_citations import SOURCE_ID_RX, source_citation  # noqa: E402
 
 TOOLING_ROOT = Path(__file__).resolve().parent.parent  # tooling repo (scripts/, schema.md)
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
@@ -114,14 +114,14 @@ def load_chapter_intelligence(
         return None, "no chapter labels in .wiki/log.md"
 
     expected_labels = set(chapters)
-    artifacts_by_label: dict[str, list[tuple[int, str, dict]]] = {
+    artifacts_by_label: dict[str, list[tuple[int, str, dict, dict]]] = {
         label: [] for label in chapters
     }
     # The analyzer's shared cache scanner requires a manifest and checks the
     # artifact/manifest agreement and ordered_sections. This consumer does not
     # assume the producer's model/schema/template is still configured, so it
     # applies no further producer-identity predicate — only the log's labels.
-    for section, modified_ns, name, validated, _inputs in ci.scan_validated_entries(
+    for section, modified_ns, name, validated, inputs in ci.scan_validated_entries(
         CHAPTER_INTELLIGENCE_CACHE_DIR,
         source_id=source_id,
         source_sha256=source_sha256,
@@ -129,20 +129,34 @@ def load_chapter_intelligence(
         ordered_sections=chapters,
     ):
         if section in expected_labels:
-            artifacts_by_label[section].append((modified_ns, name, validated))
+            artifacts_by_label[section].append(
+                (modified_ns, name, validated, inputs)
+            )
 
     incomplete = [label for label in chapters if not artifacts_by_label[label]]
     if incomplete:
         return None, "incomplete chapter intelligence: " + ", ".join(incomplete)
 
-    selected = {
-        label: max(artifacts_by_label[label], key=lambda item: (item[0], item[1]))[2]
-        for label in chapters
-    }
+    selected: list[dict] = []
+    spines: list[dict] = []
+    for label in chapters:
+        coherent = [
+            item for item in artifacts_by_label[label]
+            if item[3]["analysis_context"]["previous_chapter_spine"] == spines
+        ]
+        if not coherent:
+            return None, f"incoherent chapter intelligence at {label}"
+        artifact = max(coherent, key=lambda item: (item[0], item[1]))[2]
+        selected.append(artifact)
+        spines.append({
+            "section_label": label,
+            "central_question": artifact["central_question"],
+            "chapter_claim": artifact["chapter_claim"],
+        })
 
     return {
         "schema": ci.SCHEMA_VERSION,
-        "artifacts": [selected[label] for label in chapters],
+        "artifacts": selected,
     }, f"complete chapter intelligence ({len(chapters)} chapters)"
 
 
@@ -471,6 +485,8 @@ def render_map(source_id: str, title: str, chapters: list[str], data: dict,
 
 
 def generate_one(source_id: str, meta: dict, refresh: bool, dry_run: bool) -> tuple[bool, str]:
+    if not SOURCE_ID_RX.fullmatch(source_id):
+        raise ValueError(f"invalid source_id {source_id!r}")
     chapters = chapter_order(source_id)
     sha = meta["sha256"]
     intelligence, intelligence_status = load_chapter_intelligence(
@@ -510,18 +526,54 @@ def generate_one(source_id: str, meta: dict, refresh: bool, dry_run: bool) -> tu
         used_llm = True
 
     chash = content_hash(data)
-    slug = dl.source_slug(meta["title"], source_id)
-    path = MAPS_DIR / f"{slug}.md"
-    existing = path.read_text(encoding="utf-8") if path.exists() else None
+    base_slug = dl.fs_safe_slug(
+        dl.source_slug(meta["title"], source_id), fallback=source_id
+    )
+    suffix = f"-{source_id}.md"
+    byte_budget = 255 - len(suffix.encode("utf-8"))
+    base_slug = base_slug.encode("utf-8")[:byte_budget].decode(
+        "utf-8", errors="ignore"
+    ).rstrip(". -") or "map"
+    path = MAPS_DIR / f"{base_slug}{suffix}"
+    if path.is_file():
+        current_meta = dl.parse_frontmatter(
+            path.read_text(encoding="utf-8", errors="replace")
+        ) or {}
+        if current_meta.get("source_id") != source_id:
+            raise ValueError(f"canonical map path is owned by another source: {path.name}")
+    # ponytail: one bounded scan per source; build an index only if map counts
+    # make batch generation measurably slow.
+    owned_paths = []
+    if MAPS_DIR.is_dir():
+        for candidate in sorted(MAPS_DIR.rglob("*.md")):
+            if candidate == path:
+                continue
+            candidate_text = candidate.read_text(encoding="utf-8", errors="replace")
+            if (dl.parse_frontmatter(candidate_text) or {}).get("source_id") == source_id:
+                owned_paths.append(candidate)
+    if len(owned_paths) > 1:
+        raise ValueError(
+            f"multiple existing maps claim source_id {source_id}: "
+            + ", ".join(path.name for path in owned_paths)
+        )
+    legacy_path = owned_paths[0] if owned_paths else None
+    existing_path = path if path.exists() else legacy_path
+    existing = existing_path.read_text(encoding="utf-8") if existing_path else None
     today = date.today().isoformat()
     prior = dl.existing_last_generated(existing)
     display = dl.clean_title(meta["title"])
     preserved = render_map(source_id, display, chapters, data, chash, prior or today, existing)
     tag = f" [{input_path}{', LLM' if used_llm else ''}]"
-    if existing is not None and existing == preserved:
+    if existing_path == path and existing == preserved:
+        if legacy_path:
+            if not dry_run:
+                legacy_path.unlink()
+            return True, f"  {'would remove' if dry_run else 'removed'} legacy {legacy_path.relative_to(VAULT_ROOT)}{tag}"
         return False, f"  = {path.relative_to(VAULT_ROOT)} unchanged ({len(data['nodes'])} nodes){tag}"
     content = render_map(source_id, display, chapters, data, chash, today, existing)
     wrote = dl.atomic_write(path, content, dry_run)
+    if wrote and not dry_run and legacy_path:
+        legacy_path.unlink()
     verb = "would write" if dry_run else "wrote"
     return wrote, f"  {verb} {path.relative_to(VAULT_ROOT)} ({len(data['nodes'])} nodes, {len(data['edges'])} edges){tag}"
 

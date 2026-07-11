@@ -124,8 +124,18 @@ def write_artifact(
     ordered_sections: list[str],
     *,
     model_identity: dict | None = None,
+    prior_chapters: list[dict] | None = None,
 ) -> Path:
     identity = model_identity or MODEL_IDENTITY
+    if prior_chapters is None:
+        prior_chapters = []
+        for label in ordered_sections[:ordered_sections.index(artifact["section_label"])]:
+            prior = artifact_for(label)
+            prior_chapters.append({
+                "section_label": label,
+                "central_question": prior["central_question"],
+                "chapter_claim": prior["chapter_claim"],
+            })
     template_sha = mindmap.ci.prompt_template_identity()
     key = mindmap.ci.cache_key(
         source_sha256=artifact["source_sha256"],
@@ -135,7 +145,7 @@ def write_artifact(
         model_identity=identity,
         schema_ingest_sha256=SCHEMA_SHA,
         ordered_sections=ordered_sections,
-        prior_chapters=[],
+        prior_chapters=prior_chapters,
         prompt_template_sha256=template_sha,
     )
     path = mindmap.ci.cache_path(
@@ -152,7 +162,7 @@ def write_artifact(
         model_identity=identity,
         schema_ingest_sha256=SCHEMA_SHA,
         ordered_sections=ordered_sections,
-        prior_chapters=[],
+        prior_chapters=prior_chapters,
         prompt_template_sha256=template_sha,
     )
     mindmap.ci.write_cache_entry(path, artifact, inputs)
@@ -216,6 +226,264 @@ def generation_environment(root: Path, chapters: list[str]):
 
 
 class GenerateMindmapTests(unittest.TestCase):
+
+    def test_rejects_unsafe_source_id_before_building_output_path(self):
+        with self.assertRaisesRegex(ValueError, "invalid source_id"):
+            mindmap.generate_one(
+                "../outside",
+                {"sha256": SOURCE_SHA, "asset": "book.epub", "title": "Book"},
+                refresh=False,
+                dry_run=False,
+            )
+
+    def test_output_path_is_safe_and_unique_per_source(self):
+        chapters = ["Chapter 1"]
+        other_source = "01K00000111111111111111111"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            maps = root / "wiki" / "_maps"
+            with (
+                generation_environment(root, chapters),
+                patch.object(
+                    mindmap.dl,
+                    "extract_source_text",
+                    return_value="RAW SOURCE",
+                ),
+                patch.object(
+                    mindmap.dl,
+                    "call_llm",
+                    return_value=map_completion(chapters),
+                ),
+            ):
+                for source_id in (SOURCE_ID, other_source):
+                    mindmap.generate_one(
+                        source_id,
+                        {
+                            "sha256": SOURCE_SHA,
+                            "asset": root / "book.epub",
+                            "title": "../../same title",
+                        },
+                        refresh=False,
+                        dry_run=False,
+                    )
+
+            paths = sorted(maps.glob("*.md"))
+            self.assertEqual(len(paths), 2)
+            self.assertTrue(all(path.parent == maps for path in paths))
+            self.assertNotEqual(paths[0].name, paths[1].name)
+
+    def test_existing_unsuffixed_map_is_migrated_with_human_zone(self):
+        chapters = ["Chapter 1"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            maps = root / "wiki" / "_maps"
+            maps.mkdir(parents=True)
+            legacy = maps / "Book.md"
+            legacy.write_text(
+                f"---\nsource_id: {SOURCE_ID}\n---\n\n"
+                "<!-- human-zone -->\nKeep this note.\n<!-- /human-zone -->\n",
+                encoding="utf-8",
+            )
+            with (
+                generation_environment(root, chapters),
+                patch.object(
+                    mindmap.dl,
+                    "extract_source_text",
+                    return_value="RAW SOURCE",
+                ),
+                patch.object(
+                    mindmap.dl,
+                    "call_llm",
+                    return_value=map_completion(chapters),
+                ),
+            ):
+                mindmap.generate_one(
+                    SOURCE_ID,
+                    {
+                        "sha256": SOURCE_SHA,
+                        "asset": root / "book.epub",
+                        "title": "Book",
+                    },
+                    refresh=False,
+                    dry_run=False,
+                )
+
+            migrated = maps / f"Book-{SOURCE_ID}.md"
+            self.assertTrue(migrated.is_file())
+            self.assertIn("Keep this note.", migrated.read_text(encoding="utf-8"))
+            self.assertFalse(legacy.exists())
+
+    def test_title_change_migrates_owned_map_by_frontmatter(self):
+        chapters = ["Chapter 1"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            maps = root / "wiki" / "_maps"
+            maps.mkdir(parents=True)
+            legacy = maps / "Old" / "Title.md"
+            legacy.parent.mkdir()
+            legacy.write_text(
+                f"---\nsource_id: {SOURCE_ID}\n---\n\n"
+                "<!-- human-zone -->\nKEEP\n<!-- /human-zone -->\n",
+                encoding="utf-8",
+            )
+            with (
+                generation_environment(root, chapters),
+                patch.object(mindmap.dl, "extract_source_text", return_value="RAW"),
+                patch.object(
+                    mindmap.dl, "call_llm", return_value=map_completion(chapters)
+                ),
+            ):
+                mindmap.generate_one(
+                    SOURCE_ID,
+                    {"sha256": SOURCE_SHA, "asset": "book.epub", "title": "New Title"},
+                    refresh=False,
+                    dry_run=False,
+                )
+            migrated = maps / f"New-Title-{SOURCE_ID}.md"
+            self.assertIn("KEEP", migrated.read_text(encoding="utf-8"))
+            self.assertFalse(legacy.exists())
+
+    def test_ambiguous_owned_maps_fail_closed(self):
+        chapters = ["Chapter 1"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            maps = root / "wiki" / "_maps"
+            maps.mkdir(parents=True)
+            content = f"---\nsource_id: {SOURCE_ID}\n---\n"
+            (maps / "One.md").write_text(content, encoding="utf-8")
+            (maps / "Two.md").write_text(content, encoding="utf-8")
+            with (
+                generation_environment(root, chapters),
+                patch.object(mindmap.dl, "extract_source_text", return_value="RAW"),
+                patch.object(
+                    mindmap.dl, "call_llm", return_value=map_completion(chapters)
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "multiple existing maps"):
+                    mindmap.generate_one(
+                        SOURCE_ID,
+                        {"sha256": SOURCE_SHA, "asset": "book.epub", "title": "Book"},
+                        refresh=False,
+                        dry_run=False,
+                    )
+
+    def test_canonical_path_owned_by_another_source_fails_closed(self):
+        chapters = ["Chapter 1"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            maps = root / "wiki" / "_maps"
+            maps.mkdir(parents=True)
+            canonical = maps / f"Book-{SOURCE_ID}.md"
+            canonical.write_text(
+                "---\nsource_id: 01K11111111111111111111111\n---\n",
+                encoding="utf-8",
+            )
+            with (
+                generation_environment(root, chapters),
+                patch.object(mindmap.dl, "extract_source_text", return_value="RAW"),
+                patch.object(
+                    mindmap.dl, "call_llm", return_value=map_completion(chapters)
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, "owned by another source"):
+                    mindmap.generate_one(
+                        SOURCE_ID,
+                        {"sha256": SOURCE_SHA, "asset": "book.epub", "title": "Book"},
+                        refresh=False,
+                        dry_run=False,
+                    )
+
+    def test_legacy_detection_uses_frontmatter_only(self):
+        chapters = ["Chapter 1"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            maps = root / "wiki" / "_maps"
+            maps.mkdir(parents=True)
+            unrelated = maps / "Book.md"
+            unrelated.write_text(
+                "---\nsource_id: 01K11111111111111111111111\n---\n\n"
+                f"Example:\nsource_id: {SOURCE_ID}\n",
+                encoding="utf-8",
+            )
+            with (
+                generation_environment(root, chapters),
+                patch.object(mindmap.dl, "extract_source_text", return_value="RAW"),
+                patch.object(
+                    mindmap.dl, "call_llm", return_value=map_completion(chapters)
+                ),
+            ):
+                mindmap.generate_one(
+                    SOURCE_ID,
+                    {"sha256": SOURCE_SHA, "asset": "book.epub", "title": "Book"},
+                    refresh=False,
+                    dry_run=False,
+                )
+            self.assertTrue(unrelated.exists())
+
+    def test_unchanged_map_still_removes_owned_legacy_duplicate(self):
+        chapters = ["Chapter 1"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            meta = {"sha256": SOURCE_SHA, "asset": "book.epub", "title": "Book"}
+            with (
+                generation_environment(root, chapters),
+                patch.object(mindmap.dl, "extract_source_text", return_value="RAW"),
+                patch.object(
+                    mindmap.dl, "call_llm", return_value=map_completion(chapters)
+                ),
+            ):
+                mindmap.generate_one(SOURCE_ID, meta, False, False)
+                maps = root / "wiki" / "_maps"
+                canonical = maps / f"Book-{SOURCE_ID}.md"
+                legacy = maps / "Book.md"
+                legacy.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8")
+                wrote, _message = mindmap.generate_one(SOURCE_ID, meta, False, False)
+
+            self.assertTrue(wrote)
+            self.assertTrue(canonical.exists())
+            self.assertFalse(legacy.exists())
+
+    def test_output_filename_respects_utf8_component_limit(self):
+        chapters = ["Chapter 1"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                generation_environment(root, chapters),
+                patch.object(mindmap.dl, "extract_source_text", return_value="RAW"),
+                patch.object(
+                    mindmap.dl, "call_llm", return_value=map_completion(chapters)
+                ),
+            ):
+                mindmap.generate_one(
+                    SOURCE_ID,
+                    {"sha256": SOURCE_SHA, "asset": "book.epub", "title": "章" * 80},
+                    refresh=False,
+                    dry_run=False,
+                )
+            path = next((root / "wiki" / "_maps").glob("*.md"))
+            self.assertLessEqual(len(path.name.encode("utf-8")), 255)
+
+    def test_incoherent_chapter_refresh_falls_back(self):
+        chapters = ["Chapter 1", "Chapter 2"]
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "cache"
+            first = artifact_for("Chapter 1")
+            write_artifact(cache, first, chapters)
+            write_artifact(cache, artifact_for("Chapter 2"), chapters)
+
+            refreshed = artifact_for(
+                "Chapter 1", chapter_claim="Refreshed chapter-one claim."
+            )
+            write_artifact(cache, refreshed, chapters)
+            with patch.object(
+                mindmap, "CHAPTER_INTELLIGENCE_CACHE_DIR", cache
+            ):
+                bundle, status = mindmap.load_chapter_intelligence(
+                    SOURCE_ID, SOURCE_SHA, chapters
+                )
+
+            self.assertIsNone(bundle)
+            self.assertIn("incoherent chapter intelligence", status)
 
     def test_render_uses_shared_delimiter_safe_section_citation(self):
         cases = json.loads(

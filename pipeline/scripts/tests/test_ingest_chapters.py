@@ -814,6 +814,58 @@ class SectionSizesTests(unittest.TestCase):
 
 
 class PipelineRecoveryTests(unittest.TestCase):
+    def test_failed_reused_asset_mutation_is_fully_rolled_back(self):
+        old_cwd = os.getcwd()
+        old_src = dict(ingest.SRC)
+        old_rollback = ingest._ROLLBACK_ON_FAILURE
+        old_files = set(ingest._RUN_CREATED_FILES)
+        old_snapshot = set(ingest._PREEXISTING_SOURCE_PATHS)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                vault = Path(directory)
+                assets = vault / "sources" / "book.assets"
+                assets.mkdir(parents=True)
+                manifest = assets / "_manifest.md"
+                manifest.write_text("original\n", encoding="utf-8")
+                subprocess.run(["git", "init", "-q"], cwd=vault, check=True)
+                subprocess.run(["git", "add", "."], cwd=vault, check=True)
+                subprocess.run(
+                    ["git", "-c", "user.name=test", "-c", "user.email=test@example.com",
+                     "commit", "-qm", "baseline"],
+                    cwd=vault,
+                    check=True,
+                )
+                os.chdir(vault)
+                ingest.SRC.clear()
+                ingest.SRC.update({
+                    "DEST": "sources/book",
+                    "SIDECAR": "sources/book.md",
+                })
+                ingest._ROLLBACK_ON_FAILURE = True
+                ingest._RUN_CREATED_FILES.clear()
+                ingest._PREEXISTING_SOURCE_PATHS = ingest._source_path_snapshot()
+                manifest.write_text("changed\n", encoding="utf-8")
+                (assets / "new.png").write_bytes(b"new")
+
+                with patch.object(ingest, "_cleanup"):
+                    with self.assertRaises(SystemExit):
+                        ingest.die("forced failure")
+
+                self.assertEqual(manifest.read_text(encoding="utf-8"), "original\n")
+                self.assertFalse((assets / "new.png").exists())
+                self.assertFalse(subprocess.run(
+                    ["git", "status", "--porcelain"], cwd=vault,
+                    text=True, capture_output=True, check=True,
+                ).stdout)
+        finally:
+            os.chdir(old_cwd)
+            ingest.SRC.clear()
+            ingest.SRC.update(old_src)
+            ingest._ROLLBACK_ON_FAILURE = old_rollback
+            ingest._RUN_CREATED_FILES.clear()
+            ingest._RUN_CREATED_FILES.update(old_files)
+            ingest._PREEXISTING_SOURCE_PATHS = old_snapshot
+
     def test_termination_stops_identity_publisher_before_cleanup(self):
         events = []
 

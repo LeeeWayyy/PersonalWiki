@@ -26,13 +26,118 @@ def current_citation(source_id=SOURCE_ID, section_label=SECTION):
 
 
 def intelligence(*candidates, entities=None, topics=None):
+    candidates = [dict(candidate) for candidate in candidates]
+    claim_ids = sorted({
+        claim_id
+        for candidate in candidates
+        for claim_id in candidate.get("claim_ids", ["c1"])
+    }) or ["c1"]
+    entity_rows = {
+        row["name"]: dict(row) for row in (entities or [])
+    }
+    topic_rows = {
+        row["name"]: dict(row) for row in (topics or [])
+    }
+    normalized_candidates = []
+    references = {claim_id: [] for claim_id in claim_ids}
+    for candidate in candidates:
+        importance = candidate.get("importance", 1)
+        required = candidate.get("required", importance >= 4)
+        refs = candidate.get("claim_ids", ["c1"])
+        page_type = candidate.get("page_type", "entity")
+        name = candidate["name"]
+        normalized_candidates.append({
+            "page_type": page_type,
+            "name": name,
+            "importance": importance,
+            "required": required,
+            "claim_ids": refs,
+            "reason": "Quality-gate test candidate.",
+        })
+        declaration = entity_rows if page_type == "entity" else topic_rows
+        declaration.setdefault(name, {"name": name})
+        for claim_id in refs:
+            references.setdefault(claim_id, []).append(
+                {"page_type": page_type, "name": name}
+            )
+
+    normalized_entities = [
+        {
+            "name": row["name"],
+            "type": "concept",
+            "aliases": row.get("aliases", []),
+            "importance": 3,
+            "role": "Quality-gate test context.",
+            "page_hint": (
+                "entity"
+                if any(candidate["page_type"] == "entity"
+                       and candidate["name"] == row["name"]
+                       for candidate in normalized_candidates)
+                else "none"
+            ),
+            "claim_ids": claim_ids,
+        }
+        for row in entity_rows.values()
+    ]
+    normalized_topics = [
+        {
+            "name": row["name"],
+            "question": "What does this test topic explain?",
+            "synthesis_angle": "Quality-gate test synthesis.",
+            "importance": 3,
+            "claim_ids": claim_ids,
+        }
+        for row in topic_rows.values()
+    ]
+    if not normalized_entities and not normalized_topics:
+        normalized_entities.append({
+            "name": "Quality gate context",
+            "type": "concept",
+            "aliases": [],
+            "importance": 1,
+            "role": "Keeps the no-candidate fixture structurally valid.",
+            "page_hint": "none",
+            "claim_ids": claim_ids,
+        })
     return {
         "schema": "chapter-intelligence/1",
         "source_id": SOURCE_ID,
+        "source_sha256": "a" * 64,
+        "text_sha256": "b" * 64,
         "section_label": SECTION,
-        "entities": entities or [],
-        "topics": topics or [],
-        "page_candidates": list(candidates),
+        "prompt_version": "v1",
+        "language": "en",
+        "summary": "Quality-gate test artifact.",
+        "central_question": "What does this fixture test?",
+        "chapter_claim": "The quality gate enforces its contract.",
+        "builds_on": None,
+        "claims": [
+            {
+                "id": claim_id,
+                "kind": "claim",
+                "text": f"Quality-gate test claim {claim_id}.",
+                "importance": 1,
+                "source_spans": [],
+                "entities": [],
+            }
+            for claim_id in claim_ids
+        ],
+        "entities": normalized_entities,
+        "topics": normalized_topics,
+        "relations": [],
+        "page_candidates": normalized_candidates,
+        "claim_coverage": [
+            {
+                "claim_id": claim_id,
+                "page_candidates": references.get(claim_id, []),
+                "skip_reason": (
+                    None if references.get(claim_id)
+                    else "No page candidate is needed in this test."
+                ),
+            }
+            for claim_id in claim_ids
+        ],
+        "open_questions": [],
     }
 
 
@@ -55,7 +160,13 @@ def production_intelligence(candidate_required=True):
                 "kind": "claim",
                 "text": "ATP couples energy-releasing reactions to work.",
                 "importance": 5,
-                "source_spans": [{"start": 0, "end": 3, "quote": "ATP"}],
+                "source_spans": [
+                    {
+                        "start": 0,
+                        "end": 22,
+                        "quote": "ATP evidence sentence.",
+                    }
+                ],
                 "entities": ["ATP"],
             }
         ],
@@ -161,8 +272,9 @@ class IntelligenceValidationTests(unittest.TestCase):
 
     def test_rejects_candidate_without_selection_metadata(self):
         artifact = intelligence({"name": "ATP", "page_type": "entity"})
+        del artifact["page_candidates"][0]["importance"]
         with self.assertRaisesRegex(
-            quality.IntelligenceValidationError, "needs importance"
+            quality.IntelligenceValidationError, "missing.*importance"
         ):
             quality.validate_intelligence(
                 artifact, source_id=SOURCE_ID, section_label=SECTION
@@ -182,13 +294,43 @@ class IntelligenceValidationTests(unittest.TestCase):
 
 class PageQualityTests(unittest.TestCase):
     def test_whole_source_accepts_media_anchor_on_current_source(self):
-        text = f"Evidence appears on a card [src:{SOURCE_ID}#card-2]."
+        text = f"Evidence appears on a card [src:{SOURCE_ID}#card-2]"
         self.assertTrue(quality.has_exact_citation(text, SOURCE_ID, ""))
         self.assertFalse(quality.has_exact_citation(text, "01K00000000000000000000000", ""))
+
+    def test_citation_must_end_each_block_and_use_a_known_anchor_shape(self):
+        self.assertFalse(
+            quality.has_exact_citation(
+                f"Cited early [src:{SOURCE_ID}] but not at the end.", SOURCE_ID, ""
+            )
+        )
+        self.assertFalse(
+            quality.has_exact_citation(
+                f"Fabricated section [src:{SOURCE_ID}#garbage]", SOURCE_ID, ""
+            )
+        )
+        self.assertTrue(
+            quality.has_exact_citation(
+                f"Bare whole source [src:{SOURCE_ID}]", SOURCE_ID, ""
+            )
+        )
 
     def test_chaptered_source_requires_exact_section_anchor(self):
         text = f"Evidence belongs elsewhere [src:{SOURCE_ID}#Chapter 20]."
         self.assertFalse(quality.has_exact_citation(text, SOURCE_ID, SECTION))
+
+    def test_each_adjacent_list_item_needs_its_own_citation(self):
+        text = page_text(
+            "ATP",
+            f"- Uncited claim.\n> - Cited claim {current_citation()}",
+        )
+        receipt = quality.evaluate_quality(
+            production_intelligence(),
+            source_id=SOURCE_ID,
+            section_label=SECTION,
+            pages=[quality.PageInput("wiki/entities/ATP.md", text)],
+        )
+        self.assertIn("citation.current_missing", codes(receipt))
 
     def test_unchanged_page_can_be_explicitly_already_covered(self):
         artifact = production_intelligence()
@@ -208,6 +350,24 @@ class PageQualityTests(unittest.TestCase):
         self.assertEqual(receipt["summary"]["already_covered_candidates"], 1)
         self.assertEqual(receipt["candidates"][0]["disposition"], "already-covered")
         self.assertIn("coverage.already_covered", codes(receipt, "warnings"))
+
+    def test_invalid_existing_page_cannot_prove_coverage(self):
+        text = page_text(
+            "ATP", "ATP couples energy-releasing reactions to work."
+        ).replace(
+            "> ATP couples energy-releasing reactions to work.",
+            "ATP couples energy-releasing reactions to work.",
+        )
+        receipt = quality.evaluate_quality(
+            production_intelligence(),
+            source_id=SOURCE_ID,
+            section_label=SECTION,
+            pages=[quality.PageInput(
+                "wiki/entities/ATP.md", text, text, disposition="existing"
+            )],
+        )
+        self.assertFalse(receipt["ok"])
+        self.assertIn("coverage.required_candidate_missing", codes(receipt))
 
     def test_ambiguous_existing_alias_ownership_fails_closed(self):
         artifact = production_intelligence()
