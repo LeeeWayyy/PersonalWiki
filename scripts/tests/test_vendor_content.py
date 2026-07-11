@@ -66,6 +66,8 @@ class VendorContentTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertIn("wiki/.alias-index.json",
                           (dest / ".gitignore").read_text(encoding="utf-8"))
+            self.assertIn(".wiki/chapter-intelligence-cache/",
+                          (dest / ".gitignore").read_text(encoding="utf-8"))
             status = subprocess.run(
                 ["git", "-C", str(dest), "status", "--porcelain"],
                 capture_output=True, text=True).stdout

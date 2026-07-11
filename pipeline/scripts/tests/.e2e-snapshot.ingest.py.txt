@@ -15,7 +15,9 @@ last_ingested: <DATE>
 <!-- llm-zone -->
 > [!AI] LLM Synthesis
 >
-> An end-to-end stub claim about e2e-entity [src:<SOURCE_ID>].
+> e2e-entity is a reusable concept in the end-to-end fixture. It carries enough context to exercise the human-readable prose gate [src:<SOURCE_ID>].
+>
+> The second paragraph explains why e2e-entity belongs in the wiki graph. It also verifies paragraph-level provenance [src:<SOURCE_ID>].
 <!-- /llm-zone -->
 === .wiki/log.md (last line) ===
 <ADDED>  <SOURCE_ID>  pages: wiki/_index/biology__cell.md wiki/_index/concept.md wiki/entities/e2e-entity.md

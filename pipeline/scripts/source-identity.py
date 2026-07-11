@@ -30,6 +30,8 @@ import os
 import re
 import secrets
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -55,6 +57,10 @@ def die(msg: str) -> None:
 
 def progress(msg: str) -> None:
     print(f"{_log_prefix()}: {msg}", file=sys.stderr)
+
+
+def _terminated(_signum, _frame) -> None:
+    raise SystemExit(143)
 
 
 def sha256_of(path: Path | str) -> str:
@@ -126,10 +132,36 @@ def emit(**vars_: str) -> None:
         sys.stdout.write(f"{k}={shlex.quote(v)}\n")
 
 
+def _copy_exclusive(src: Path | str, dest: Path | str) -> None:
+    """Publish a new file without ever replacing a path that appeared concurrently."""
+    with open(src, "rb") as inf, open(dest, "xb") as outf:
+        shutil.copyfileobj(inf, outf, length=1024 * 1024)
+
+
+def _await_publish(values: dict[str, str], *, existing: bool) -> None:
+    """Two-phase protocol used by ingest.py.
+
+    For a new source, every cleanup path is flushed to the parent before this
+    process is permitted to touch the vault. The parent replies ``PUBLISH`` only
+    after registering those paths. Existing sources require no publication.
+    """
+    emit(**values, IDENTITY_READY="existing" if existing else "new")
+    sys.stdout.flush()
+    if existing:
+        return
+    if sys.stdin.readline().rstrip("\r\n") != "PUBLISH":
+        die("identity publication was not acknowledged by the orchestrator")
+
+
 def main() -> int:
-    if len(sys.argv) != 2 or not sys.argv[1]:
+    reserve_handshake = False
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--reserve-handshake":
+        reserve_handshake = True
+        argv = argv[1:]
+    if len(argv) != 1 or not argv[0]:
         die("usage: source-identity.py <path-or-url>")
-    inp = sys.argv[1]
+    inp = argv[0]
 
     # This script is cwd-relative (SOURCES, dedup via git, dest writes). Honor
     # $VAULT_CONTENT_DIR like the other helpers so it operates on the content
@@ -146,6 +178,8 @@ def main() -> int:
     origin_type = "file"
     origin_ref = inp
     tmp_fetch: str | None = None
+    signal.signal(signal.SIGTERM, _terminated)
+    signal.signal(signal.SIGINT, _terminated)
 
     try:
         if re.match(r"^https?://", inp):
@@ -204,35 +238,35 @@ def main() -> int:
             progress(f"reusing existing source_id={source_id} (sha match)")
             progress(f"asset={dest}")
             progress(f"sidecar={sidecar}")
+            values = {
+                "SOURCE_ID": source_id,
+                "SHA256": sha256,
+                "ADDED": added,
+                "ORIGIN_TYPE": origin_type,
+                "ORIGIN_REF": origin_ref,
+                "DEST": dest,
+                "DEST_BASENAME": dest_basename,
+                "SIDECAR": sidecar,
+                "EXISTING_SIDECAR": existing_sidecar,
+            }
+            if reserve_handshake:
+                _await_publish(values, existing=True)
         else:
             if origin_type == "url":
                 dest_basename = f"{today()}-{url_slug(inp)}.html"
                 dest = f"sources/{dest_basename}"
-                if Path(dest).exists():
-                    if git_tracked(dest):
-                        die(f"destination exists and is tracked: {dest} "
-                            f"(different content with the same date+slug)")
-                    die(f"destination exists but is UNTRACKED: {dest} (likely an "
-                        f"aborted prior run; remove {dest} and {dest}.md if present, "
-                        f"then re-run)")
-                os.replace(fetched, dest)  # mv
-                tmp_fetch = None
             else:
                 dest_basename = f"{today()}-{safe_name(os.path.basename(inp))}"
                 dest = f"sources/{dest_basename}"
-                if Path(dest).exists():
-                    if git_tracked(dest):
-                        die(f"destination exists and is tracked: {dest} "
-                            f"(different content with the same date+slug)")
-                    die(f"destination exists but is UNTRACKED: {dest} (likely an "
-                        f"aborted prior run; remove {dest} and {dest}.md if present, "
-                        f"then re-run)")
-                import shutil
-                shutil.copyfile(inp, dest)
 
             source_id = new_ulid()
             sidecar = f"{dest}.md"
-            Path(sidecar).write_text(
+            for target in (dest, sidecar):
+                if Path(target).exists():
+                    state = "tracked" if git_tracked(target) else "UNTRACKED"
+                    die(f"destination exists and is {state}: {target} "
+                        f"(refusing to overwrite pre-existing data)")
+            sidecar_text = (
                 "---\n"
                 f"source_id: {source_id}\n"
                 "type: source\n"
@@ -244,9 +278,32 @@ def main() -> int:
                 f"title: '{yaml_squote(dest_basename)}'\n"
                 "---\n\n"
                 f"# {dest_basename}\n\n"
-                "Auto-generated sidecar. Do not hand-edit.\n",
-                encoding="utf-8",
+                "Auto-generated sidecar. Do not hand-edit.\n"
             )
+            values = {
+                "SOURCE_ID": source_id,
+                "SHA256": sha256,
+                "ADDED": added,
+                "ORIGIN_TYPE": origin_type,
+                "ORIGIN_REF": origin_ref,
+                "DEST": dest,
+                "DEST_BASENAME": dest_basename,
+                "SIDECAR": sidecar,
+                "EXISTING_SIDECAR": "",
+            }
+            if reserve_handshake:
+                _await_publish(values, existing=False)
+            Path("sources").mkdir(exist_ok=True)
+            try:
+                _copy_exclusive(fetched, dest)
+                with open(sidecar, "x", encoding="utf-8") as f:
+                    f.write(sidecar_text)
+            except FileExistsError as exc:
+                die(f"destination appeared during identity publication; refusing to overwrite: "
+                    f"{exc.filename}")
+            if origin_type == "url" and tmp_fetch:
+                os.remove(tmp_fetch)
+                tmp_fetch = None
             progress(f"new source_id={source_id}")
             progress(f"sidecar={sidecar}")
             existing_sidecar = ""
@@ -255,12 +312,8 @@ def main() -> int:
             os.remove(tmp_fetch)
         raise
 
-    emit(
-        SOURCE_ID=source_id, SHA256=sha256, ADDED=added,
-        ORIGIN_TYPE=origin_type, ORIGIN_REF=origin_ref,
-        DEST=dest, DEST_BASENAME=dest_basename, SIDECAR=sidecar,
-        EXISTING_SIDECAR=existing_sidecar,
-    )
+    if not reserve_handshake:
+        emit(**values)
     return 0
 
 

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import signal
 import shutil
@@ -107,10 +108,58 @@ class GroupChaptersTests(unittest.TestCase):
         self.assertEqual([c[0] for c in chs], ["第1章", "第2章"])
         self.assertEqual(chs[0][1], "^第1章$")
 
-    def test_identical_titles_collapse(self):
+    def test_identical_titles_remain_distinct(self):
         chs = ingest._group_chapters(["Intro", "Body", "Intro"])
-        self.assertEqual([c[0] for c in chs], ["Intro", "Body"])   # deduped, order kept
+        self.assertEqual([c[0] for c in chs], ["Intro", "Body", "Intro"])
         self.assertEqual(chs[0][1], "^Intro$")
+
+    def test_duplicate_titles_receive_stable_occurrence_identities(self):
+        instances = ingest._stable_chapter_instances(
+            ingest._group_chapters(["Interlude", "Body", "Interlude"])
+        )
+        self.assertEqual(
+            [instance[0] for instance in instances],
+            ["Interlude [occurrence 1/2]", "Body", "Interlude [occurrence 2/2]"],
+        )
+        self.assertEqual([instance[3] for instance in instances], [1, None, 2])
+
+    def test_normalized_duplicate_labels_select_their_own_exact_heading(self):
+        instances = ingest._stable_chapter_instances(
+            ingest._group_chapters(["ATP", "ＡＴＰ"])
+        )
+        self.assertEqual(
+            [instance[0] for instance in instances],
+            ["ATP [occurrence 1/2]", "ＡＴＰ [occurrence 2/2]"],
+        )
+        self.assertEqual([instance[3] for instance in instances], [1, 1])
+
+    def test_selects_repeated_heading_occurrence_without_merging(self):
+        text = "## Interlude\nfirst\n## Interlude\nsecond\n"
+        self.assertEqual(
+            ingest._select_section_occurrence(text, "Interlude", 2),
+            "## Interlude\nsecond\n",
+        )
+
+    def test_grouped_ranges_do_not_cross_contaminate_repeated_subheadings(self):
+        sections = [
+            ("Chapter 1", 500), ("Introduction", 5000),
+            ("Chapter 2", 500), ("Introduction", 6000),
+        ]
+        groups = ingest._grouped_chapter_ranges(sections)
+        self.assertEqual(
+            [(label, start, end) for label, _members, start, end in groups],
+            [("Chapter 1", 0, 2), ("Chapter 2", 2, 4)],
+        )
+        text = (
+            "## Chapter 1\nfirst chapter\n## Introduction\nfirst intro\n"
+            "## Chapter 2\nsecond chapter\n## Introduction\nsecond intro\n"
+        )
+        first = ingest._select_heading_range(text, 0, 2)
+        second = ingest._select_heading_range(text, 2, 4)
+        self.assertIn("first intro", first)
+        self.assertNotIn("second intro", first)
+        self.assertIn("second intro", second)
+        self.assertNotIn("first intro", second)
 
     def test_regex_special_titles_escaped(self):
         chs = ingest._group_chapters(["Ch. 1 (a)"])
@@ -118,6 +167,17 @@ class GroupChaptersTests(unittest.TestCase):
 
 
 class CitationAnchorTests(unittest.TestCase):
+    def test_citation_keys_use_shared_encoded_multi_source_contract(self):
+        first = "01KX582AX79FD9BQG2VNMG41NY"
+        second = "01KX582AX79FD9BQG2VNMG41NZ"
+        keys = ingest._citation_keys(
+            f"[src:{first}#sec=Supply%2C%20Demand,src:{second}#frame-2]"
+        )
+        self.assertEqual(
+            keys,
+            {f"{first}#sec=Supply%2C%20Demand", f"{second}#frame-2"},
+        )
+
     def test_missing_prior_chapter_anchor_is_detected(self):
         sid = "01KX582AX79FD9BQG2VNMG41NY"
         old = (
@@ -143,7 +203,55 @@ class CitationAnchorTests(unittest.TestCase):
         )
 
 
+class ScaffoldTests(unittest.TestCase):
+    def test_existing_vault_gets_local_chapter_cache_ignore(self):
+        with tempfile.TemporaryDirectory() as d:
+            vault = Path(d)
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            (vault / ".gitignore").write_text("custom-rule\n", encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(vault)
+                ingest.ensure_wiki_scaffold()
+                ingest.ensure_wiki_scaffold()
+            finally:
+                os.chdir(old_cwd)
+
+            exclude = (vault / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+            self.assertEqual(
+                exclude.count(ingest.CHAPTER_INTELLIGENCE_CACHE_IGNORE), 1
+            )
+            self.assertEqual(exclude.count(ingest.INGEST_LOCK_IGNORE), 1)
+            self.assertEqual(
+                (vault / ".gitignore").read_text(encoding="utf-8"),
+                "custom-rule\n",
+            )
+            cache_file = vault / ".wiki" / "chapter-intelligence-cache" / "x.json"
+            cache_file.parent.mkdir(parents=True)
+            cache_file.write_text("{}", encoding="utf-8")
+            status = subprocess.run(
+                ["git", "-C", str(vault), "status", "--short", "--", str(cache_file)],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertEqual(status, "")
+
+
 class AutoChapterTests(unittest.TestCase):
+    def test_analyzer_reasoning_is_child_scoped_and_defaults_low(self):
+        with patch.dict(os.environ, {
+            "PW_CODEX_REASONING_EFFORT": "high",
+        }, clear=False):
+            os.environ.pop("PW_ANALYZE_REASONING_EFFORT", None)
+            env = ingest.analyzer_env()
+            self.assertEqual(env["PW_CODEX_REASONING_EFFORT"], "low")
+            self.assertEqual(os.environ["PW_CODEX_REASONING_EFFORT"], "high")
+        with patch.dict(os.environ, {"PW_ANALYZE_REASONING_EFFORT": "medium"}):
+            self.assertEqual(
+                ingest.analyzer_env()["PW_CODEX_REASONING_EFFORT"], "medium"
+            )
+
     def test_auto_chapter_only_local_ebooks_without_slicing_flags(self):
         with tempfile.TemporaryDirectory() as d:
             book = Path(d) / "book.epub"
@@ -183,8 +291,71 @@ class AutoChapterTests(unittest.TestCase):
             with patch.dict(os.environ, {"PW_INGEST_NO_AUTOCHAPTER": "1"}):
                 self.assertFalse(ingest._should_auto_chapter(_args(book)))
 
+    def test_partial_section_requires_a_completion_label(self):
+        with patch.object(ingest, "die", side_effect=RuntimeError) as die:
+            with self.assertRaises(RuntimeError):
+                ingest._validate_section_contract("^Chapter 1$", "", "")
+        self.assertIn("requires --section-label", die.call_args.args[0])
+
+    def test_label_without_selector_is_rejected(self):
+        with patch.object(ingest, "die", side_effect=RuntimeError) as die:
+            with self.assertRaises(RuntimeError):
+                ingest._validate_section_contract("", "Chapter 1", "")
+        self.assertIn("requires --section", die.call_args.args[0])
+
+    def test_internal_ordered_range_may_use_label_without_regex(self):
+        ingest._validate_section_contract("", "Chapter 1", "0:2")
+
+    def test_grouped_range_does_not_forward_duplicate_title_occurrence(self):
+        captured = {}
+
+        def fake_run(argv, env=None):
+            captured["argv"] = argv
+            captured["env"] = env or {}
+            return types.SimpleNamespace(returncode=0)
+
+        args = _args("book.epub")
+        with patch.object(ingest.subprocess, "run", fake_run):
+            ingest._run_one_chapter(
+                args,
+                section="^Chapter 1$",
+                label="Chapter 1 [occurrence 2/2]",
+                source_title="Chapter 1",
+                section_occurrence=2,
+                section_range=(4, 7),
+            )
+        self.assertNotIn("--section", captured["argv"])
+        self.assertEqual(captured["env"]["PW_SECTION_RANGE"], "4:7")
+        self.assertNotIn("PW_SECTION_OCCURRENCE", captured["env"])
+
+    def test_internal_ordered_range_cannot_silently_log_whole_source(self):
+        for section, label in (("", ""), ("^Chapter$", "Chapter")):
+            with self.subTest(section=section, label=label), patch.object(
+                ingest, "die", side_effect=RuntimeError
+            ):
+                with self.assertRaises(RuntimeError):
+                    ingest._validate_section_contract(section, label, "0:2")
+
+    def test_explicit_selector_must_match_one_heading(self):
+        with patch.object(ingest, "die", side_effect=RuntimeError) as die:
+            with self.assertRaises(RuntimeError):
+                ingest._require_one_selected_heading(
+                    "## Intro\nfirst\n## Intro\nsecond\n", "^Intro$"
+                )
+        self.assertIn("matched 2 section headings", die.call_args.args[0])
+
 
 class LogProgressTests(unittest.TestCase):
+    def test_labeled_images_only_line_does_not_complete_section(self):
+        source_id = "01BOOKAAAAAAAAAAAAAAAAAAAA"
+        line = (
+            f"2026-01-01T00:00:00Z  {source_id}#Chapter 1  "
+            "pages: (images-only)"
+        )
+        self.assertEqual(
+            ingest._source_log_progress([line], source_id), (set(), False)
+        )
+
     def test_pages_text_inside_label_round_trips(self):
         source_id = "01BOOKAAAAAAAAAAAAAAAAAAAA"
         labels, whole_done = ingest._source_log_progress(
@@ -194,12 +365,105 @@ class LogProgressTests(unittest.TestCase):
         self.assertFalse(whole_done)
         self.assertEqual(labels, {"Front pages: a history"})
 
+    def test_identical_supersede_requires_committed_wiki_citation(self):
+        old_cwd = os.getcwd()
+        old_src = dict(ingest.SRC)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                subprocess.run(["git", "init", "-q"], check=True)
+                subprocess.run(["git", "config", "user.email", "test@example.com"], check=True)
+                subprocess.run(["git", "config", "user.name", "Test"], check=True)
+                (vault / "sources").mkdir()
+                (vault / "wiki" / "entities").mkdir(parents=True)
+                (vault / "wiki" / "topics").mkdir(parents=True)
+                (vault / "sources" / "old.md").write_text(
+                    "---\nsource_id: OLD\nsha256: same\n---\n", encoding="utf-8"
+                )
+                page = vault / "wiki" / "entities" / "x.md"
+                page.write_text("# X\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-qm", "base"], check=True)
+                ingest.SRC.clear()
+                ingest.SRC.update({"SHA256": "same"})
+                self.assertFalse(ingest._supersede_coverage_proven("OLD"))
+                page.write_text("# X\n\n> covered [src:OLD]\n", encoding="utf-8")
+                subprocess.run(["git", "add", str(page)], check=True)
+                subprocess.run(["git", "commit", "-qm", "synthesis"], check=True)
+                self.assertTrue(ingest._supersede_coverage_proven("OLD"))
+                # A mismatched text-artifact hash short-circuits before git.
+                ingest.SRC["SHA256"] = "different"
+                self.assertFalse(ingest._supersede_coverage_proven("OLD"))
+        finally:
+            ingest.SRC.clear()
+            ingest.SRC.update(old_src)
+            os.chdir(old_cwd)
+
+    def test_no_changes_arms_rollback_before_supersede_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.txt"
+            raw.write_text("NO_CHANGES: identical transcript\n", encoding="utf-8")
+            old_src = dict(ingest.SRC)
+            old_rollback = ingest._ROLLBACK_ON_FAILURE
+            ingest.SRC.clear()
+            ingest.SRC.update({
+                "SUPERSEDES": "OLD",
+                "SOURCE_ID": "NEW",
+                "EXISTING_SIDECAR": "",
+            })
+
+            def fail_during_rewrite(*_args, **_kwargs):
+                self.assertTrue(ingest._ROLLBACK_ON_FAILURE)
+                raise RuntimeError("rewrite failed")
+
+            try:
+                ingest._ROLLBACK_ON_FAILURE = False
+                with patch.object(
+                    ingest, "_supersede_coverage_proven", return_value=True
+                ), patch.object(ingest, "run_stream", side_effect=fail_during_rewrite):
+                    with self.assertRaisesRegex(RuntimeError, "rewrite failed"):
+                        ingest.handle_no_changes_or_continue(
+                            str(raw), "", str(raw), str(raw)
+                        )
+            finally:
+                ingest.SRC.clear()
+                ingest.SRC.update(old_src)
+                ingest._ROLLBACK_ON_FAILURE = old_rollback
+
+    def test_ordinary_no_changes_arms_rollback_before_log_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw.txt"
+            raw.write_text("NO_CHANGES: already represented\n", encoding="utf-8")
+            old_src = dict(ingest.SRC)
+            old_rollback = ingest._ROLLBACK_ON_FAILURE
+            ingest.SRC.clear()
+            ingest.SRC.update({"SUPERSEDES": "", "SOURCE_ID": "NEW"})
+
+            def fail_before_log(*_args, **_kwargs):
+                self.assertTrue(ingest._ROLLBACK_ON_FAILURE)
+                raise RuntimeError("stop before log")
+
+            try:
+                ingest._ROLLBACK_ON_FAILURE = False
+                with patch.object(
+                    ingest, "_run_quality_gate", return_value=(0, {"ok": True})
+                ), patch.object(ingest.Path, "mkdir", side_effect=fail_before_log):
+                    with self.assertRaisesRegex(RuntimeError, "stop before log"):
+                        ingest.handle_no_changes_or_continue(
+                            str(raw), "", str(raw), str(raw)
+                        )
+            finally:
+                ingest.SRC.clear()
+                ingest.SRC.update(old_src)
+                ingest._ROLLBACK_ON_FAILURE = old_rollback
+
 
 class RunChapteredTests(unittest.TestCase):
     def _run(self, vault, input_path, titles, run_returns):
         calls = []
 
-        def fake_run_one(args, section, label, *, skip_assets=False):
+        def fake_run_one(args, section, label, *, skip_assets=False, **_kwargs):
             calls.append((label, skip_assets))
             return run_returns.get(label, 0)
 
@@ -243,6 +507,20 @@ class RunChapteredTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(calls, [("第2章", False)])
 
+    def test_legacy_prefix_resume_requires_one_unique_current_match(self):
+        self.assertEqual(
+            ingest._resolved_done_labels(
+                ["Chapter 1 Origins", "Chapter 1 Methods"], {"Chapter 1"}
+            ),
+            set(),
+        )
+        self.assertEqual(
+            ingest._resolved_done_labels(
+                ["Chapter 1 Origins", "Chapter 2 Methods"], {"Chapter 1"}
+            ),
+            {"Chapter 1 Origins"},
+        )
+
     def test_whole_doc_prior_log_skips_all_chapters(self):
         with tempfile.TemporaryDirectory() as d:
             vault = Path(d)
@@ -267,6 +545,40 @@ class RunChapteredTests(unittest.TestCase):
             rc, calls = self._run(vault, book, ["A", "B", "C"], {"B": 1})
             self.assertEqual(rc, 1)
             self.assertEqual(calls, [("A", False), ("B", True)])  # stopped at B, C not attempted
+
+    def test_duplicate_labels_run_and_resume_by_occurrence_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            vault = Path(d)
+            (vault / "sources").mkdir(parents=True)
+            book = vault / "book.epub"
+            book.write_bytes(b"epub-bytes")
+            captured = []
+
+            def fake_run(_args, section, label, **kwargs):
+                captured.append((label, section, kwargs.get("section_occurrence")))
+                return 0
+
+            with patch.object(ingest, "VAULT_ROOT", vault), \
+                 patch.object(ingest, "_enumerate_sections", return_value=[
+                     ("Interlude", 9000), ("Body", 9000), ("Interlude", 9000),
+                 ]), \
+                 patch.object(ingest, "_run_one_chapter", side_effect=fake_run):
+                self.assertEqual(ingest.run_chaptered(_args(book)), 0)
+
+            self.assertEqual(
+                captured,
+                [
+                    ("Interlude [occurrence 1/2]", "^Interlude$", 1),
+                    ("Body", "^Body$", None),
+                    ("Interlude [occurrence 2/2]", "^Interlude$", 2),
+                ],
+            )
+            self.assertIn(
+                "Interlude [occurrence 1/2]", {"Interlude [occurrence 1/2]"}
+            )
+            self.assertNotIn(
+                "Interlude [occurrence 2/2]", {"Interlude [occurrence 1/2]"}
+            )
 
     def test_no_chapters_falls_back_to_single_unit(self):
         with tempfile.TemporaryDirectory() as d:
@@ -380,28 +692,106 @@ class ChapteredSmokeTests(unittest.TestCase):
             ).stdout.strip()
             self.assertEqual(head_after, head_before)
 
+    def test_truncated_explicit_section_never_logs_or_commits_completion(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            vault = root / "content"
+            for rel in ("wiki/entities", "wiki/topics", "wiki/_index", "sources", ".wiki"):
+                (vault / rel).mkdir(parents=True, exist_ok=True)
+            (vault / "wiki" / "_taxonomy.md").write_text(
+                ingest.TAXONOMY_PLACEHOLDER, encoding="utf-8"
+            )
+            (vault / ".wiki" / ".keep").write_text("", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=vault, check=True)
+            subprocess.run(["git", "config", "user.email", "t@t"], cwd=vault, check=True)
+            subprocess.run(["git", "config", "user.name", "t"], cwd=vault, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=vault, check=True)
+            subprocess.run(["git", "commit", "-qm", "baseline"], cwd=vault, check=True)
+
+            source = root / "large.md"
+            source.write_text(
+                "## Chapter 1\n" + ("complete evidence sentence. " * 20) + "\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update({
+                "PW_CONTENT_DIR": str(vault),
+                "VAULT_CONTENT_DIR": str(vault),
+                "LLM_CMD": str(ROOT / "scripts" / "tests" / "stub-llm.py"),
+                "PW_INGEST_SKIP_ASSETS": "1",
+            })
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "ingest.py"),
+                    "--section", "^Chapter 1$",
+                    "--section-label", "Chapter 1",
+                    "--limit", "80",
+                    str(source),
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=60,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("truncated text is never logged as complete", result.stderr)
+            self.assertFalse((vault / ".wiki" / "log.md").exists())
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "status", "--porcelain"], cwd=vault,
+                    text=True, capture_output=True, check=True,
+                ).stdout,
+                "",
+            )
+
 
 class GroupByChapterTests(unittest.TestCase):
+    @staticmethod
+    def _groups(sections):
+        return [
+            (label, members)
+            for label, members, _start, _end in ingest._grouped_chapter_ranges(sections)
+        ]
+
     def test_sections_grouped_front_back_excluded(self):
         sections = [("cover.xhtml", 1), ("序言", 5000), ("导言 世界", 16000),
                     ("第一章 起源", 5000), ("第一节 鸿沟", 9000), ("第二节 祖先", 9000),
                     ("第二章 生命力", 4000), ("第三节 起源", 9000),
                     ("后记", 9000), ("词汇表", 5000)]
-        groups = ingest._group_by_chapter(sections)
+        groups = self._groups(sections)
         self.assertEqual([g[0] for g in groups], ["第一章 起源", "第二章 生命力"])
         self.assertEqual(groups[0][1], ["第一章 起源", "第一节 鸿沟", "第二节 祖先"])
         self.assertEqual(groups[1][1], ["第二章 生命力", "第三节 起源"])
 
     def test_no_chapter_markers_returns_empty(self):
         self.assertEqual(
-            ingest._group_by_chapter([("intro", 100), ("body", 9000)]), [])
+            self._groups([("intro", 100), ("body", 9000)]), [])
 
     def test_section_before_first_chapter_is_dropped(self):
         # A stray 节 before any 章 is not inside a chapter → excluded.
-        groups = ingest._group_by_chapter([("第九节 orphan", 9000),
-                                           ("第一章 A", 5000), ("第一节 a", 9000)])
+        groups = self._groups([("第九节 orphan", 9000),
+                               ("第一章 A", 5000), ("第一节 a", 9000)])
         self.assertEqual([g[0] for g in groups], ["第一章 A"])
         self.assertEqual(groups[0][1], ["第一章 A", "第一节 a"])
+
+    def test_substantial_descriptive_heading_stays_in_current_chapter(self):
+        groups = self._groups([
+            ("Chapter 1 Origins", 4000),
+            ("A descriptive mechanism", 9000),
+            ("spine-label.xhtml", 3),
+            ("Section 2 Evidence", 8000),
+            ("Afterword", 9000),
+            ("Appendix data", 9000),
+        ])
+        self.assertEqual(
+            groups,
+            [(
+                "Chapter 1 Origins",
+                ["Chapter 1 Origins", "A descriptive mechanism", "Section 2 Evidence"],
+            )],
+        )
 
     def test_anchored_regex_matches_all_members(self):
         rx = ingest._anchored_regex(["第一章 A", "第一节 a"])
@@ -424,6 +814,74 @@ class SectionSizesTests(unittest.TestCase):
 
 
 class PipelineRecoveryTests(unittest.TestCase):
+    def test_termination_stops_identity_publisher_before_cleanup(self):
+        events = []
+
+        class FakeProcess:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                events.append("terminate")
+
+            def wait(self, timeout=None):
+                events.append(f"wait:{timeout}")
+                return -signal.SIGTERM
+
+        old_proc = ingest._ACTIVE_SOURCE_IDENTITY
+        old_terminating = ingest._TERMINATING
+        try:
+            ingest._ACTIVE_SOURCE_IDENTITY = FakeProcess()
+            ingest._TERMINATING = False
+
+            def stopped_die(_message):
+                events.append("cleanup")
+                raise RuntimeError("stopped")
+
+            with patch.object(ingest, "die", side_effect=stopped_die):
+                with self.assertRaisesRegex(RuntimeError, "stopped"):
+                    ingest._handle_termination(signal.SIGTERM, None)
+            self.assertEqual(events, ["terminate", "wait:5", "cleanup"])
+        finally:
+            ingest._ACTIVE_SOURCE_IDENTITY = old_proc
+            ingest._TERMINATING = old_terminating
+
+    def test_source_identity_registers_paths_before_publication(self):
+        old_cwd = os.getcwd()
+        old_files = set(ingest._RUN_CREATED_FILES)
+        old_dirs = set(ingest._RUN_CREATED_DIRS)
+        old_snapshot = set(ingest._PREEXISTING_SOURCE_PATHS)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d) / "content"
+                vault.mkdir()
+                (vault / "sources").mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=vault, check=True)
+                source = Path(d) / "book.txt"
+                source.write_text("transactional identity\n", encoding="utf-8")
+                os.chdir(vault)
+                ingest._RUN_CREATED_FILES.clear()
+                ingest._RUN_CREATED_DIRS.clear()
+                ingest._PREEXISTING_SOURCE_PATHS = ingest._source_path_snapshot()
+
+                with patch.dict(os.environ, {"VAULT_CONTENT_DIR": str(vault)}):
+                    result = ingest.run_source_identity(str(source))
+
+                values = ingest.parse_shell_assignments(result.stdout)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(values["IDENTITY_READY"], "new")
+                self.assertIn(values["DEST"], ingest._RUN_CREATED_FILES)
+                self.assertIn(values["SIDECAR"], ingest._RUN_CREATED_FILES)
+                self.assertTrue(Path(values["DEST"]).is_file())
+                self.assertTrue(Path(values["SIDECAR"]).is_file())
+        finally:
+            os.chdir(old_cwd)
+            ingest._RUN_CREATED_FILES.clear()
+            ingest._RUN_CREATED_FILES.update(old_files)
+            ingest._RUN_CREATED_DIRS.clear()
+            ingest._RUN_CREATED_DIRS.update(old_dirs)
+            ingest._PREEXISTING_SOURCE_PATHS = old_snapshot
+
     def test_default_vault_root_prefers_pw_content_dir(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -447,6 +905,15 @@ class PipelineRecoveryTests(unittest.TestCase):
         self.assertTrue(ingest._has_extraction_truncation_marker(
             "body\n\n[... truncated at 100000 chars ...]\n"))
         self.assertFalse(ingest._has_extraction_truncation_marker("body without marker"))
+
+    def test_truncated_section_is_rejected_too(self):
+        with patch.object(ingest, "die", side_effect=RuntimeError) as die:
+            with self.assertRaises(RuntimeError):
+                ingest._require_complete_extraction(
+                    "## Chapter\nbody\n[... truncated at 100 chars ...]\n",
+                    sliced=True,
+                )
+        self.assertIn("selected section", die.call_args.args[0])
 
     def test_sigterm_handler_uses_die_cleanup_path(self):
         old_terminating = ingest._TERMINATING
@@ -561,17 +1028,163 @@ class PipelineRecoveryTests(unittest.TestCase):
                 (vault / "wiki" / "topics").mkdir(parents=True)
                 (vault / "wiki" / "entities" / "A.md").write_text("# A\n", encoding="utf-8")
                 out_file = vault / "candidates.txt"
-                keywords_file = vault / "keywords.txt"
-                keywords_file.write_text("A\n", encoding="utf-8")
+                intelligence_file = vault / "chapter-intelligence.json"
+                intelligence_file.write_text("{}\n", encoding="utf-8")
                 with patch.object(ingest, "run_stream") as run_stream:
-                    ingest.collect_candidates(str(keywords_file), str(out_file), 20)
+                    ingest.collect_candidates(str(intelligence_file), str(out_file), 20)
                 run_stream.assert_not_called()
                 self.assertEqual(out_file.read_text(encoding="utf-8"), "wiki/entities/A.md\n")
 
                 (vault / "wiki" / "entities" / "A.md").unlink()
-                ingest.collect_candidates(str(keywords_file), str(out_file), 20)
+                ingest.collect_candidates(str(intelligence_file), str(out_file), 20)
                 self.assertEqual(out_file.read_text(encoding="utf-8"), "")
         finally:
+            os.chdir(old_cwd)
+
+    def test_intelligence_search_terms_prioritize_required_page_candidates(self):
+        with tempfile.TemporaryDirectory() as d:
+            artifact_path = Path(d) / "chapter-intelligence.json"
+            artifact_path.write_text(json.dumps({
+                "entities": [
+                    {"name": "线粒体", "aliases": ["Mitochondria"], "importance": 5},
+                    {"name": "偶然例子", "aliases": [], "importance": 2},
+                    {"name": "显式要求", "aliases": [], "importance": 3},
+                ],
+                "topics": [
+                    {"name": "真核细胞起源", "importance": 4},
+                ],
+                "page_candidates": [
+                    {"page_type": "entity", "name": "线粒体", "importance": 5,
+                     "required": True},
+                    {"page_type": "topic", "name": "真核细胞起源", "importance": 4,
+                     "required": True},
+                    {"page_type": "entity", "name": "显式要求", "importance": 3,
+                     "required": True},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            terms = ingest._intelligence_search_terms(str(artifact_path))
+        by_term = {row["term"]: row for row in terms}
+        self.assertTrue(by_term["线粒体"]["required"])
+        self.assertTrue(by_term["Mitochondria"]["required"])
+        self.assertTrue(by_term["真核细胞起源"]["required"])
+        self.assertTrue(by_term["显式要求"]["required"])
+        self.assertFalse(by_term["偶然例子"]["required"])
+
+    def test_candidate_decisions_use_nfkc_casefold_whitespace_normalization(self):
+        with tempfile.TemporaryDirectory() as d:
+            artifact_path = Path(d) / "chapter-intelligence.json"
+            artifact_path.write_text(json.dumps({
+                "entities": [
+                    {"name": "ATP", "aliases": ["Adenosine   Triphosphate"],
+                     "importance": 5},
+                ],
+                "topics": [],
+                "page_candidates": [
+                    {"page_type": "entity", "name": "ＡＴＰ", "importance": 5,
+                     "required": True},
+                ],
+            }), encoding="utf-8")
+            terms = ingest._intelligence_search_terms(str(artifact_path))
+        by_name = {ingest.normalize_name(row["term"]): row for row in terms}
+        self.assertTrue(by_name["atp"]["required"])
+        self.assertTrue(by_name["adenosine triphosphate"]["required"])
+
+    def test_large_vault_pins_all_required_exact_aliases_past_cap(self):
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                vault = Path(directory)
+                entities = vault / "wiki" / "entities"
+                (vault / "wiki" / "topics").mkdir(parents=True)
+                entities.mkdir(parents=True)
+                (vault / "wiki" / "_taxonomy.md").write_text(
+                    ingest.TAXONOMY_PLACEHOLDER, encoding="utf-8"
+                )
+                for index in range(22):
+                    (entities / f"P{index}.md").write_text(
+                        "---\n"
+                        "type: Entity\n"
+                        f"page_id: '01{index:024d}'\n"
+                        f"aliases: [Alias {index}]\n"
+                        "tags: [concept, biology/cell]\n"
+                        "---\n\n"
+                        f"# P{index}\n\nAlias {index} background.\n",
+                        encoding="utf-8",
+                    )
+                required = ["Alias 0", "Alias 1", "Alias 2"]
+                intelligence_file = vault / "intelligence.json"
+                intelligence_file.write_text(json.dumps({
+                    "entities": [
+                        {"name": name, "aliases": [], "importance": 5}
+                        for name in required
+                    ],
+                    "topics": [],
+                    "page_candidates": [
+                        {
+                            "page_type": "entity",
+                            "name": name,
+                            "importance": 5,
+                            "required": True,
+                        }
+                        for name in required
+                    ],
+                }), encoding="utf-8")
+                candidates = vault / "candidates.txt"
+                os.chdir(vault)
+                with patch.dict(os.environ, {
+                    "PW_CONTENT_DIR": str(vault),
+                    "VAULT_CONTENT_DIR": str(vault),
+                }):
+                    ingest.collect_candidates(
+                        str(intelligence_file), str(candidates), cap=2
+                    )
+                self.assertEqual(
+                    set(candidates.read_text(encoding="utf-8").splitlines()),
+                    {f"wiki/entities/P{index}.md" for index in range(3)},
+                )
+        finally:
+            os.chdir(old_cwd)
+
+    def test_renderer_reconciles_candidate_to_existing_global_page_type(self):
+        old_cwd = os.getcwd()
+        old_temps = list(ingest._TEMPS)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                (vault / "wiki" / "topics").mkdir(parents=True)
+                page = vault / "wiki" / "topics" / "ATP.md"
+                page.write_text("# ATP\n", encoding="utf-8")
+                (vault / "wiki" / ".alias-index.json").write_text(json.dumps({
+                    "aliases": {"atp": ["P1"]},
+                    "pages": {"P1": {
+                        "path": "wiki/topics/ATP.md", "type": "Topic",
+                    }},
+                }), encoding="utf-8")
+                artifact = vault / "intelligence.json"
+                artifact.write_text(json.dumps({
+                    "page_candidates": [{
+                        "page_type": "entity", "name": "ＡＴＰ", "importance": 5,
+                    }],
+                }), encoding="utf-8")
+                candidates = vault / "candidates.txt"
+                candidates.write_text("wiki/topics/ATP.md\n", encoding="utf-8")
+                with patch.object(
+                    ingest.subprocess, "run",
+                    return_value=types.SimpleNamespace(returncode=0, stderr=""),
+                ):
+                    projected = ingest._renderer_intelligence_with_existing_types(
+                        str(artifact), str(candidates)
+                    )
+                self.assertNotEqual(projected, str(artifact))
+                value = json.loads(Path(projected).read_text(encoding="utf-8"))
+                self.assertEqual(value["page_candidates"][0]["page_type"], "topic")
+                original = json.loads(artifact.read_text(encoding="utf-8"))
+                self.assertEqual(original["page_candidates"][0]["page_type"], "entity")
+        finally:
+            for path in ingest._TEMPS[len(old_temps):]:
+                Path(path).unlink(missing_ok=True)
+            ingest._TEMPS[:] = old_temps
             os.chdir(old_cwd)
 
     def test_cleanup_removes_only_registered_new_untracked_artifacts(self):
@@ -657,6 +1270,8 @@ class PipelineRecoveryTests(unittest.TestCase):
                 sidecar.write_text("---\nsource_id: 01OLD\n---\n\n# changed\n", encoding="utf-8")
                 manifest.write_text("---\nsource_id: 01OLD\nimages:\n  - changed\n---\n", encoding="utf-8")
                 audit.write_text('{"ok": false}\n', encoding="utf-8")
+                added_page = vault / "wiki" / "entities" / "new.md"
+                added_page.write_text("# New\n", encoding="utf-8")
                 subprocess.run(["git", "add", "."], check=True)
                 ingest.SRC.clear()
                 ingest.SRC.update({
@@ -669,10 +1284,70 @@ class PipelineRecoveryTests(unittest.TestCase):
                 status = subprocess.run(["git", "status", "--short"], text=True,
                                         capture_output=True, check=True).stdout
                 self.assertEqual(status, "")
+                self.assertFalse(added_page.exists())
         finally:
             ingest._ROLLBACK_ON_FAILURE = old_flag
             ingest.SRC.clear()
             ingest.SRC.update(old_src)
+            os.chdir(old_cwd)
+
+    def test_rollback_git_failure_preserves_provenance_for_staged_citations(self):
+        old_cwd = os.getcwd()
+        old_flag = ingest._ROLLBACK_ON_FAILURE
+        old_src = dict(ingest.SRC)
+        old_files = set(ingest._RUN_CREATED_FILES)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                vault = Path(d)
+                os.chdir(vault)
+                subprocess.run(["git", "init", "-q"], check=True)
+                subprocess.run(["git", "config", "user.email", "t@t"], check=True)
+                subprocess.run(["git", "config", "user.name", "t"], check=True)
+                (vault / "wiki" / "entities").mkdir(parents=True)
+                (vault / "sources").mkdir()
+                (vault / ".wiki").mkdir()
+                (vault / ".wiki" / "log.md").write_text("", encoding="utf-8")
+                subprocess.run(["git", "add", ".wiki/log.md"], check=True)
+                subprocess.run(["git", "commit", "-qm", "init"], check=True)
+
+                source = vault / "sources" / "new.epub"
+                sidecar = vault / "sources" / "new.epub.md"
+                source.write_text("evidence", encoding="utf-8")
+                sidecar.write_text("---\nsource_id: NEW\n---\n", encoding="utf-8")
+                page = vault / "wiki" / "entities" / "new.md"
+                page.write_text("# New\n\n[src:NEW]\n", encoding="utf-8")
+                subprocess.run(["git", "add", "wiki/entities/new.md"], check=True)
+
+                ingest.SRC.clear()
+                ingest.SRC.update({
+                    "DEST": "sources/new.epub",
+                    "SIDECAR": "sources/new.epub.md",
+                })
+                ingest._RUN_CREATED_FILES.clear()
+                ingest._RUN_CREATED_FILES.update({
+                    "sources/new.epub", "sources/new.epub.md",
+                })
+                ingest._ROLLBACK_ON_FAILURE = True
+                index_lock = vault / ".git" / "index.lock"
+                index_lock.write_text("locked", encoding="utf-8")
+                with patch.object(ingest, "_cleanup"):
+                    with self.assertRaises(SystemExit):
+                        ingest.die("forced failure")
+                index_lock.unlink()
+
+                self.assertTrue(source.exists())
+                self.assertTrue(sidecar.exists())
+                staged = subprocess.run(
+                    ["git", "diff", "--cached", "--name-only"],
+                    text=True, capture_output=True, check=True,
+                ).stdout.splitlines()
+                self.assertEqual(staged, ["wiki/entities/new.md"])
+        finally:
+            ingest._ROLLBACK_ON_FAILURE = old_flag
+            ingest.SRC.clear()
+            ingest.SRC.update(old_src)
+            ingest._RUN_CREATED_FILES.clear()
+            ingest._RUN_CREATED_FILES.update(old_files)
             os.chdir(old_cwd)
 
 

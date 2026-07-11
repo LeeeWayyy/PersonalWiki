@@ -46,12 +46,14 @@ sys.path.insert(0, str(SCRIPTS_PATH))
 from _util import (  # noqa: E402
     chapter_order_from_lines,
     default_vault_root,
+    normalize_name,
     parse_log_line,
     sha256_of,
     split_frontmatter,
     today,
 )
 import llm_client  # noqa: E402
+from source_citations import iter_source_citations  # noqa: E402
 
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
 SCRIPTS = str(SCRIPTS_PATH)
@@ -60,7 +62,6 @@ CHAPTERED_EXTS = (".epub", ".mobi", ".azw", ".azw3")
 # chars than this is structural (cover/TOC/title page) and skipped.
 CHAPTER_MIN_CHARS = int(os.environ.get("PW_CHAPTER_MIN_CHARS", "200"))
 SECTION_LABEL_MAX_CHARS = int(os.environ.get("PW_SECTION_LABEL_MAX_CHARS", "200"))
-KEYWORD_SOURCE_HEAD_CHARS = 6_000
 
 # Distinguish an actual chapter heading from a section heading, so sections are
 # ingested grouped under their parent chapter and out-of-chapter front/back
@@ -77,6 +78,13 @@ CHAPTER_HEADING_RX = _compile_env_rx(
     "PW_CHAPTER_HEADING_RX", rf"(?:第{_CJK_NUM}+章)|(?:^\s*(?:chapter|part)\b)")
 SECTION_HEADING_RX = _compile_env_rx(
     "PW_SECTION_HEADING_RX", rf"(?:第{_CJK_NUM}+节)|(?:^\s*section\b)")
+NONCONTENT_HEADING_RX = _compile_env_rx(
+    "PW_NONCONTENT_HEADING_RX",
+    r"(?:^|[/_.\-\s])(?:cover|copyright|contents?|toc|nav|title(?:page)?|"
+    r"afterword|epilogue|acknowledg(?:e)?ments?|glossary|bibliography|"
+    r"references?|index|colophon|about\s+the\s+author)(?:$|[/_.\-\s])|"
+    r"^(?:版权(?:信息)?|目录|封面|后记|致谢|词汇表|参考文献|索引|译后记)$",
+)
 
 WIKI_PATHSPEC = ["wiki/entities/", "wiki/topics/", "wiki/_index/", "wiki/_taxonomy.md"]
 WIKI_PAGE_RX = re.compile(r"^wiki/(entities|topics)/.+\.md$")
@@ -101,7 +109,9 @@ _TEMP_DIRS: list[str] = []
 _RUN_CREATED_FILES: set[str] = set()
 _RUN_CREATED_DIRS: set[str] = set()
 _PREEXISTING_SOURCE_PATHS: set[str] = set()
+_ROLLBACK_EXTRA_PATHS: set[str] = set()
 _INGEST_LOCK_FH = None
+_ACTIVE_SOURCE_IDENTITY: subprocess.Popen[str] | None = None
 _ROLLBACK_ON_FAILURE = False
 
 
@@ -199,7 +209,36 @@ def _register_new_source_artifacts(dest: str) -> None:
     _register_run_created_dir(f"{dest}.assets")
 
 
-def _rollback_after_apply_failure() -> None:
+def _register_untracked_under(path: str) -> None:
+    """Register untracked files produced below a clean, tool-owned directory."""
+    result = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "ls-files", "--others",
+         "--exclude-standard", "--", path],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return
+    for rel in result.stdout.splitlines():
+        if rel:
+            _register_run_created_file(rel)
+
+
+def _git_path_status(paths: list[str]) -> tuple[bool, str]:
+    result = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "status", "--porcelain", "--", *paths],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return False, detail or f"git status exited {result.returncode}"
+    return not result.stdout.strip(), result.stdout.strip()
+
+
+def _rollback_after_apply_failure() -> bool:
     """Drop staged/worktree wiki/log changes created after git apply --index.
 
     Once source cleanup removes a newly-created source artifact, leaving staged
@@ -207,26 +246,111 @@ def _rollback_after_apply_failure() -> None:
     Preflight guarantees these paths were clean before ingest touched them.
     """
     if not _ROLLBACK_ON_FAILURE:
-        return
+        return True
     run_provenance = [
         ".wiki/log.md",
+        SRC.get("DEST", ""),
         SRC.get("SIDECAR", ""),
         SRC.get("AUDIT_JSON", ""),
     ]
     if SRC.get("DEST"):
-        run_provenance.append(f"{SRC['DEST']}.assets/_manifest.md")
+        run_provenance.extend([
+            f"{SRC['DEST']}.assets",
+            f"{SRC['DEST']}.assets/_manifest.md",
+        ])
     paths = [
-        p for p in [*WIKI_PATHSPEC, *run_provenance]
+        p for p in [*WIKI_PATHSPEC, *run_provenance, *_ROLLBACK_EXTRA_PATHS]
         if p and (Path(p).exists() or _tracked_under(p))
     ]
     if not paths:
-        return
-    subprocess.run(
-        ["git", "-c", "core.quotepath=false", "restore", "--staged", "--worktree", "--", *paths],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        return True
+
+    # `git restore --staged --worktree` in one command fails for newly-added
+    # paths because they do not exist in HEAD, leaving the entire index dirty.
+    # Record additions, unstage first, then restore only paths tracked in HEAD
+    # and remove the now-untracked additions from this clean-baseline run.
+    staged_result = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "diff", "--cached",
+         "--name-only", "--", *paths],
+        text=True,
+        capture_output=True,
         check=False,
     )
+    added_result = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "diff", "--cached",
+         "--name-only", "--diff-filter=A", "--", *paths],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    for operation, result in (("inspect staged paths", staged_result),
+                              ("inspect staged additions", added_result)):
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            eout(f"rollback failed — could not {operation}"
+                 + (f": {detail}" if detail else ""))
+            return False
+    staged = staged_result.stdout.splitlines()
+    added = set(added_result.stdout.splitlines())
+    if staged:
+        result = subprocess.run(
+            ["git", "-c", "core.quotepath=false", "restore", "--staged", "--", *staged],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            eout("rollback failed — could not restore the Git index"
+                 + (f": {detail}" if detail else ""))
+            return False
+    tracked_result = subprocess.run(
+        ["git", "-c", "core.quotepath=false", "ls-files", "--", *paths],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if tracked_result.returncode != 0:
+        detail = (tracked_result.stderr or tracked_result.stdout).strip()
+        eout("rollback failed — could not enumerate tracked paths"
+             + (f": {detail}" if detail else ""))
+        return False
+    tracked = tracked_result.stdout.splitlines()
+    if tracked:
+        result = subprocess.run(
+            ["git", "-c", "core.quotepath=false", "restore", "--worktree", "--", *tracked],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            eout("rollback failed — could not restore the working tree"
+                 + (f": {detail}" if detail else ""))
+            return False
+    wiki_additions = {
+        rel for rel in added
+        if WIKI_PAGE_RX.match(rel) or rel.startswith("wiki/_index/")
+        or rel == "wiki/_taxonomy.md" or rel == ".wiki/log.md"
+    }
+    for rel in sorted(wiki_additions, reverse=True):
+        path = Path(rel)
+        if path.is_file() and not _tracked_file(rel):
+            try:
+                path.unlink()
+            except OSError as exc:
+                eout(f"warn — failed to remove rolled-back added path {rel}: {exc}")
+                return False
+    verification_paths = [*WIKI_PATHSPEC, ".wiki/log.md", *_ROLLBACK_EXTRA_PATHS]
+    verification_paths.extend(
+        path for path in run_provenance if path and _tracked_under(path)
+    )
+    clean, detail = _git_path_status(sorted(set(verification_paths)))
+    if not clean:
+        eout("rollback failed — wiki/provenance paths remain dirty"
+             + (f": {detail}" if detail else ""))
+        return False
+    return True
 
 
 def _cleanup_run_created_artifacts() -> None:
@@ -254,13 +378,27 @@ def eout(msg: str) -> None:
 
 def die(msg: str) -> None:
     print(f"{_log_prefix()}: {msg}", file=sys.stderr, flush=True)
-    _rollback_after_apply_failure()
-    _cleanup_run_created_artifacts()
+    rollback_ok = _rollback_after_apply_failure()
+    if rollback_ok:
+        _cleanup_run_created_artifacts()
+    else:
+        eout("rollback was incomplete; preserving source provenance so any remaining "
+             "wiki citations cannot be orphaned")
     _cleanup()
     sys.exit(1)
 
 
 _TERMINATING = False
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """SIGTERM a child, escalating to SIGKILL if it ignores a 5s grace period."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 def _handle_termination(signum, _frame) -> None:
@@ -269,6 +407,9 @@ def _handle_termination(signum, _frame) -> None:
     if _TERMINATING:
         return
     _TERMINATING = True
+    proc = _ACTIVE_SOURCE_IDENTITY
+    if proc is not None and proc.poll() is None:
+        _terminate(proc)
     name = signal.Signals(signum).name
     die(f"terminated by {name}")
 
@@ -303,11 +444,20 @@ def run_stream(cmd: list[str], *, env: dict | None = None, check: bool = True) -
     return r.returncode
 
 
+def analyzer_env() -> dict[str, str]:
+    """Isolate cheap analyzer reasoning from the main renderer process."""
+    env = os.environ.copy()
+    env["PW_CODEX_REASONING_EFFORT"] = (
+        os.environ.get("PW_ANALYZE_REASONING_EFFORT", "low").strip() or "low"
+    )
+    return env
+
+
 def llm(prompt_text: str, *, soft: bool, model: str | None = None) -> str:
     """Invoke the shared LLM client; return stdout-like text.
 
-    soft=True mirrors the keyword pre-pass (`… 2>/dev/null || true`): tolerate
-    failure and return an empty string. soft=False dies on failure.
+    soft=True tolerates failure and returns an empty string. Main ingest calls
+    use soft=False so a missing or failed completion aborts before mutation.
     """
     timeout = int(os.environ.get("PW_LLM_TIMEOUT_S", "1800"))
     try:
@@ -331,6 +481,54 @@ def parse_shell_assignments(text: str) -> dict[str, str]:
         parts = shlex.split(v)
         out_[k] = parts[0] if parts else ""
     return out_
+
+
+def run_source_identity(src_input: str) -> subprocess.CompletedProcess[str]:
+    """Resolve a document source through source-identity's two-phase protocol.
+
+    The child stages no vault files before ``IDENTITY_READY=new``. We register
+    every future destination before replying ``PUBLISH``, so cancellation can
+    never strand a source file that the orchestrator does not know how to clean.
+    """
+    global _ACTIVE_SOURCE_IDENTITY
+    proc = subprocess.Popen(
+        [f"{SCRIPTS}/source-identity.py", "--reserve-handshake", src_input],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    _ACTIVE_SOURCE_IDENTITY = proc
+    lines: list[str] = []
+    ready = ""
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.append(line)
+            parsed = parse_shell_assignments("".join(lines))
+            ready = parsed.get("IDENTITY_READY", "")
+            if ready:
+                if ready == "new":
+                    required = ("DEST", "SIDECAR")
+                    if any(not parsed.get(key) for key in required):
+                        proc.kill()
+                        raise RuntimeError("source identity reservation omitted DEST or SIDECAR")
+                    _register_run_created_file(parsed["DEST"])
+                    _register_run_created_file(parsed["SIDECAR"])
+                    _register_run_created_dir(f"{parsed['DEST']}.assets")
+                    assert proc.stdin is not None
+                    proc.stdin.write("PUBLISH\n")
+                    proc.stdin.flush()
+                break
+        stdout_rest, stderr = proc.communicate()
+        lines.append(stdout_rest)
+    except BaseException:
+        if proc.poll() is None:
+            _terminate(proc)
+        raise
+    finally:
+        _ACTIVE_SOURCE_IDENTITY = None
+    return subprocess.CompletedProcess(proc.args, proc.returncode, "".join(lines), stderr)
 
 
 def write(path: str, content: str) -> None:
@@ -360,10 +558,35 @@ def resolve_vault_root(profile: str) -> Path:
 
 
 # ── preflight ─────────────────────────────────────────────────────────────────
+CHAPTER_INTELLIGENCE_CACHE_IGNORE = ".wiki/chapter-intelligence-cache/"
+INGEST_LOCK_IGNORE = ".wiki/ingest.lock"
+
+
+def ensure_local_cache_ignore() -> None:
+    """Keep local runtime state out of existing custom vault repos."""
+    exclude_raw = git_capture("rev-parse", "--git-path", "info/exclude").strip()
+    if not exclude_raw:
+        die("git did not report an info/exclude path for the content repo")
+    exclude = Path(exclude_raw)
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    current = exclude.read_text(encoding="utf-8", errors="replace") if exclude.exists() else ""
+    rules = {line.strip() for line in current.splitlines()}
+    missing = [
+        rule for rule in (CHAPTER_INTELLIGENCE_CACHE_IGNORE, INGEST_LOCK_IGNORE)
+        if rule not in rules
+    ]
+    if not missing:
+        return
+    separator = "" if not current or current.endswith("\n") else "\n"
+    with exclude.open("a", encoding="utf-8") as handle:
+        handle.write(separator + "".join(f"{rule}\n" for rule in missing))
+
+
 def ensure_wiki_scaffold(profile: str = "wiki") -> list[str]:
     """Create the minimal wiki structure ingest needs in an empty content repo."""
     if profile != "wiki":
         return []
+    ensure_local_cache_ignore()
     for rel in ("wiki/entities", "wiki/topics", "wiki/_index", "sources", ".wiki"):
         Path(rel).mkdir(parents=True, exist_ok=True)
     taxonomy = Path("wiki/_taxonomy.md")
@@ -416,6 +639,16 @@ def preflight(profile: str = "wiki", allowed_untracked: list[str] | None = None)
             eout("  Commit, stash, or remove these before running ingest — the")
             eout("  vault-wide autolink sweep + bulk `git add` would otherwise")
             eout("  pull them into the ingest commit.")
+            sys.exit(1)
+    else:
+        generated_dirty = git_capture(
+            "status", "--porcelain", "--", "_reading/"
+        ).strip()
+        if generated_dirty:
+            eout("refusing to run with local changes under lang/_reading/.")
+            for line in generated_dirty.splitlines():
+                print(f"    {line}", file=sys.stderr)
+            eout("  Commit, stash, or remove these tool-owned outputs before ingest.")
             sys.exit(1)
     # Provenance files the terminal `git add` sweeps up regardless of the LLM
     # diff: the ingest log + this run's source asset/sidecar. An unstaged edit
@@ -491,7 +724,73 @@ def wiki_page_paths() -> list[str]:
     ) if Path("wiki").is_dir() else []
 
 
-def collect_candidates(keywords_file: str, candidates_file: str, cap: int) -> None:
+def _intelligence_search_terms(intelligence_file: str) -> list[dict]:
+    """Return deduplicated retrieval terms ordered by editorial importance."""
+    try:
+        artifact = json.loads(read(intelligence_file))
+    except (OSError, json.JSONDecodeError) as exc:
+        die(f"invalid chapter intelligence for candidate retrieval: {exc}")
+    if not isinstance(artifact, dict):
+        die("invalid chapter intelligence for candidate retrieval: expected object")
+
+    page_decisions: dict[tuple[str, str], tuple[int, bool]] = {}
+    for candidate in artifact.get("page_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        page_type = str(candidate.get("page_type") or "")
+        name = str(candidate.get("name") or "").strip()
+        importance = candidate.get("importance")
+        if name and page_type in {"entity", "topic"} and isinstance(importance, int):
+            page_decisions[(page_type, normalize_name(name))] = (
+                importance,
+                candidate.get("required") is True,
+            )
+
+    terms: dict[str, dict] = {}
+
+    def add(term: object, *, importance: int, required: bool, source: str) -> None:
+        if not isinstance(term, str):
+            return
+        value = " ".join(term.split())
+        if not value or len(value) > 512:
+            return
+        key = normalize_name(value)
+        existing = terms.get(key)
+        row = {
+            "term": value,
+            "importance": max(1, min(5, importance)),
+            "required": required,
+            "source": source,
+        }
+        if existing is None or (row["required"], row["importance"]) > (
+            existing["required"], existing["importance"]
+        ):
+            terms[key] = row
+
+    for key, page_type in (("entities", "entity"), ("topics", "topic")):
+        for item in artifact.get(key, []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            importance = item.get("importance")
+            if not isinstance(importance, int):
+                importance = 1
+            candidate_importance, required = page_decisions.get(
+                (page_type, normalize_name(name)), (0, False)
+            )
+            merged_importance = max(importance, candidate_importance)
+            add(name, importance=merged_importance, required=required, source=page_type)
+            for alias in item.get("aliases", []):
+                add(alias, importance=merged_importance, required=required,
+                    source=f"{page_type}-alias")
+
+    return sorted(
+        terms.values(),
+        key=lambda row: (-int(row["required"]), -row["importance"], row["term"].casefold()),
+    )
+
+
+def collect_candidates(intelligence_file: str, candidates_file: str, cap: int) -> None:
     pages = wiki_page_paths()
     total = len(pages)
 
@@ -503,31 +802,127 @@ def collect_candidates(keywords_file: str, candidates_file: str, cap: int) -> No
     out("rebuilding alias index...")
     run_stream([f"{SCRIPTS}/alias-index.py", "build"])
 
-    hits: list[str] = []
-    kw_text = read(keywords_file)
-    # (a) alias-index lookup (tab-separated; column 2 = path)
-    r = subprocess.run([f"{SCRIPTS}/alias-index.py", "lookup"], input=kw_text,
+    search_terms = _intelligence_search_terms(intelligence_file)
+    term_by_value = {row["term"]: row for row in search_terms}
+    query_text = "".join(f"{row['term']}\n" for row in search_terms)
+    scores: Counter[str] = Counter()
+    reasons: dict[str, set[str]] = {}
+    pinned: set[str] = set()
+
+    # (a) exact normalized alias lookup (tab-separated term + path). Required
+    # matches are pinned before the optional-context cap is applied.
+    r = subprocess.run([f"{SCRIPTS}/alias-index.py", "lookup"], input=query_text,
                        text=True, capture_output=True)
     for ln in r.stdout.splitlines():
         cols = ln.split("\t")
         if len(cols) >= 2 and cols[1]:
-            hits.append(cols[1])
-    # (b) rg -F body search per cleaned keyword
-    for raw in kw_text.splitlines():
-        kw = re.sub(r"^[ \t]*[-*][ \t]*", "", raw)
-        kw = re.sub(r"^[0-9]+\.[ \t]*", "", kw)
-        if not kw:
-            continue
-        rr = subprocess.run(["rg", "-l", "--type", "md", "-F", "--", kw,
+            term, path = cols[0], cols[1]
+            row = term_by_value.get(term, {"importance": 1, "required": False})
+            scores[path] += 100 + 10 * int(row["importance"])
+            reasons.setdefault(path, set()).add(f"exact-alias:{term}")
+            if row["required"]:
+                pinned.add(path)
+
+    # (b) body search adds optional context and ranking evidence.
+    for row in search_terms:
+        term = row["term"]
+        rr = subprocess.run(["rg", "-l", "--type", "md", "-F", "--", term,
                              "wiki/entities/", "wiki/topics/"],
                             text=True, capture_output=True)
-        hits.extend(ln for ln in rr.stdout.splitlines() if ln)
+        for path in (ln for ln in rr.stdout.splitlines() if ln):
+            scores[path] += int(row["importance"])
+            reasons.setdefault(path, set()).add(f"body:{term}")
 
-    counts = Counter(hits)
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    chosen = [path for path, _ in ranked[:cap]]
+    ranked = [path for path, _ in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
+    chosen = sorted(pinned)
+    for path in ranked:
+        if path in pinned:
+            continue
+        if len(chosen) >= max(cap, len(pinned)):
+            break
+        chosen.append(path)
     write(candidates_file, "".join(p + "\n" for p in chosen))
-    out(f"{len(chosen)} candidate pages (keyword-ranked, cap={cap})")
+    out(f"{len(chosen)} candidate pages ({len(pinned)} required exact match(es) pinned; cap={cap})")
+
+
+def _renderer_intelligence_with_existing_types(
+    intelligence_file: str, candidates_file: str
+) -> str:
+    """Resolve analyzer Entity/Topic suggestions to the vault's owned identity.
+
+    The strict analyzer artifact remains unchanged for validation and reuse.
+    This renderer-only projection prevents a historical Topic from provoking a
+    duplicate Entity (or vice versa) when the alias index proves one owner.
+    """
+    if not _candidate_paths(candidates_file):
+        return intelligence_file
+    build = subprocess.run(
+        [f"{SCRIPTS}/alias-index.py", "build"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if build.returncode != 0:
+        detail = build.stderr.strip()
+        die("cannot reconcile candidate page types: alias-index build failed"
+            + (f": {detail}" if detail else ""))
+    try:
+        index = json.loads(Path("wiki/.alias-index.json").read_text(encoding="utf-8"))
+        artifact = json.loads(read(intelligence_file))
+    except (OSError, json.JSONDecodeError) as exc:
+        die(f"cannot reconcile candidate page types: {exc}")
+    aliases = index.get("aliases", {}) if isinstance(index, dict) else {}
+    pages = index.get("pages", {}) if isinstance(index, dict) else {}
+    if not isinstance(aliases, dict) or not isinstance(pages, dict):
+        die("cannot reconcile candidate page types: malformed alias index")
+
+    entity_aliases: dict[str, list[str]] = {}
+    for entity in artifact.get("entities", []):
+        if not isinstance(entity, dict) or not isinstance(entity.get("name"), str):
+            continue
+        entity_aliases[normalize_name(entity["name"])] = [
+            alias for alias in entity.get("aliases", []) if isinstance(alias, str)
+        ]
+
+    changed: list[tuple[str, str, str]] = []
+    for candidate in artifact.get("page_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        name = candidate.get("name")
+        analyzer_type = candidate.get("page_type")
+        if not isinstance(name, str) or analyzer_type not in {"entity", "topic"}:
+            continue
+        identity_names = [name, *entity_aliases.get(normalize_name(name), [])]
+        page_ids = sorted({
+            page_id
+            for identity_name in identity_names
+            for page_id in aliases.get(normalize_name(identity_name), [])
+            if isinstance(page_id, str)
+        })
+        owners = []
+        for page_id in page_ids:
+            page = pages.get(page_id)
+            if not isinstance(page, dict):
+                continue
+            path = page.get("path")
+            page_type = str(page.get("type") or "").casefold()
+            if isinstance(path, str) and page_type in {"entity", "topic"}:
+                owners.append((path, page_type))
+        owners = sorted(set(owners))
+        if len(owners) != 1 or owners[0][1] == analyzer_type:
+            continue
+        path, existing_type = owners[0]
+        candidate["page_type"] = existing_type
+        changed.append((name, analyzer_type, existing_type))
+
+    if not changed:
+        return intelligence_file
+    projected = mktemp()
+    write(projected, json.dumps(artifact, ensure_ascii=False, separators=(",", ":")) + "\n")
+    for name, analyzer_type, existing_type in changed:
+        out(f"candidate identity type reconciled: {name} "
+            f"{analyzer_type} → {existing_type} (existing vault owner)")
+    return projected
 
 
 # ── globals populated from source-identity (§1) ──────────────────────────────
@@ -543,7 +938,7 @@ def _audit_extra() -> list[str]:
 
 
 def build_prompt(expand_file: str, out_file: str, all_source_ids: str,
-                 text_file: str, candidates_file: str, source_terms_file: str,
+                 text_file: str, candidates_file: str, source_intelligence_file: str,
                  section_label: str, operation: str = "digest") -> None:
     with open(out_file, "w", encoding="utf-8") as f:
         r = subprocess.run(
@@ -552,7 +947,7 @@ def build_prompt(expand_file: str, out_file: str, all_source_ids: str,
              "--added", SRC["ADDED"], "--origin-type", SRC["ORIGIN_TYPE"],
              "--origin-ref", SRC["ORIGIN_REF"], "--basename", SRC["DEST_BASENAME"],
              "--section-label", section_label, "--all-source-ids", all_source_ids,
-             "--source-terms-file", source_terms_file,
+             "--source-intelligence-file", source_intelligence_file,
              "--text-file", text_file, "--candidates-file", candidates_file,
              "--expand-file", expand_file, "--dest", SRC["DEST"],
              "--operation", operation],
@@ -589,9 +984,121 @@ def _log_line_marks_whole_source(line: str, source_id: str) -> bool:
     return "pages: (images-only)" not in line
 
 
-def handle_no_changes_or_continue(raw_file: str, section_label: str) -> None:
+def _candidate_paths(candidates_file: str) -> list[str]:
+    return sorted({
+        line.strip() for line in read(candidates_file).splitlines()
+        if line.strip() and Path(line.strip()).is_file()
+    })
+
+
+def _run_quality_gate(intelligence_file: str, candidates_file: str,
+                      section_label: str, modified: list[str]) -> tuple[int, dict]:
+    """Run the same deterministic coverage policy for diffs and NO_CHANGES."""
+    command = [
+        f"{SCRIPTS}/verify-ingest-quality.py",
+        "--intelligence", intelligence_file,
+        "--source-id", SRC["SOURCE_ID"],
+        "--section-label", section_label,
+    ]
+    if modified:
+        command += ["--modified", *modified]
+    modified_set = set(modified)
+    existing = [path for path in _candidate_paths(candidates_file)
+                if path not in modified_set]
+    if existing:
+        command += ["--existing", *existing]
+    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        receipt = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        die(f"ingest quality gate returned malformed JSON: {exc}")
+    return result.returncode, receipt
+
+
+def _report_quality_receipt(receipt: dict) -> None:
+    summary = receipt.get("summary", {})
+    out(
+        "quality coverage: "
+        f"{summary.get('represented_candidates', 0)}/"
+        f"{summary.get('required_candidates', 0)} required page candidate(s), "
+        f"{summary.get('already_covered_candidates', 0)} already covered, "
+        f"{summary.get('modified_substantive_paragraphs', 0)} changed paragraph(s)"
+    )
+    for warning in receipt.get("warnings", []):
+        if isinstance(warning, dict):
+            eout(f"quality warning [{warning.get('code', '?')}]: "
+                 f"{warning.get('message', '')}")
+    for error in receipt.get("errors", []):
+        if isinstance(error, dict):
+            detail = error.get("path") or error.get("candidate") or ""
+            suffix = f" ({detail})" if detail else ""
+            eout(f"quality error [{error.get('code', '?')}]: "
+                 f"{error.get('message', '')}{suffix}")
+
+
+def _iter_source_sidecar_ids(sources_dir: Path):
+    """Yield (source_id, sha256) from each sources/*.md sidecar's frontmatter."""
+    if not sources_dir.is_dir():
+        return
+    for sidecar in sorted(sources_dir.glob("*.md")):
+        if sidecar.name == "README.md":
+            continue
+        split = split_frontmatter(sidecar.read_text(encoding="utf-8", errors="replace"))
+        if not split:
+            continue
+        values: dict[str, str] = {}
+        for line in split[1].splitlines():
+            key, sep, value = line.partition(":")
+            if sep and key.strip() in {"source_id", "sha256"}:
+                values[key.strip()] = _yaml_scalar(value)
+        yield values.get("source_id"), values.get("sha256")
+
+
+def _source_sha_for_id(source_id: str) -> str | None:
+    matches = [
+        sha for sid, sha in _iter_source_sidecar_ids(Path("sources"))
+        if sid == source_id and sha
+    ]
+    return matches[0] if len(set(matches)) == 1 else None
+
+
+def _supersede_coverage_proven(superseded: str) -> bool:
+    """Only bypass re-synthesis when committed wiki pages cite the predecessor
+    AND the predecessor's committed text-artifact hash matches this run's."""
+    predecessor_sha = _source_sha_for_id(superseded)
+    current_sha = SRC.get("SHA256", "")
+    if not (predecessor_sha and current_sha and predecessor_sha == current_sha):
+        return False
+    result = subprocess.run(
+        ["git", "grep", "-l", "-F", f"src:{superseded}", "HEAD", "--",
+         "wiki/entities/", "wiki/topics/"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        _head, separator, rel = line.partition(":")
+        if not separator or not rel:
+            continue
+        page = subprocess.run(
+            ["git", "show", f"HEAD:{rel}"], text=True, capture_output=True,
+            check=False,
+        )
+        if page.returncode == 0 and any(
+            citation.source_id == superseded
+            for citation in iter_source_citations(page.stdout)
+        ):
+            return True
+    return False
+
+
+def handle_no_changes_or_continue(raw_file: str, section_label: str,
+                                  intelligence_file: str, candidates_file: str) -> None:
     """If the LLM response is a NO_CHANGES (and not a diff), log + commit the
     no-change run and exit 0. Otherwise return."""
+    global _ROLLBACK_ON_FAILURE
     raw = read(raw_file)
     if re.search(r"^diff --git ", raw, re.MULTILINE):
         return
@@ -611,6 +1118,18 @@ def handle_no_changes_or_continue(raw_file: str, section_label: str) -> None:
     # (orphaned). Mirror the main-path supersede here so the migrated pages land in this same
     # no-changes commit. (Same as §9: rewrite → stage wiki/ → re-validate media anchors.)
     superseded = SRC.get("SUPERSEDES")
+    identical_supersede = bool(superseded and _supersede_coverage_proven(superseded))
+    if not identical_supersede:
+        quality_rc, quality_receipt = _run_quality_gate(
+            intelligence_file, candidates_file, section_label, []
+        )
+        _report_quality_receipt(quality_receipt)
+        if quality_rc != 0 or not quality_receipt.get("ok"):
+            die("NO_CHANGES did not satisfy chapter-intelligence coverage; "
+                "the section was not logged as complete")
+    elif superseded:
+        out("supersede text artifact is byte-identical to its predecessor; "
+            "coverage migration may proceed without a new wiki diff")
     # Invariant: a supersede always mints a FRESH source (every SUPERSEDES emit pairs with
     # EXISTING_SIDECAR=""), so the two are mutually exclusive. If a future front-door path
     # ever broke that, the EXISTING_SIDECAR branch below would commit a new superseding
@@ -619,11 +1138,18 @@ def handle_no_changes_or_continue(raw_file: str, section_label: str) -> None:
         die("internal invariant violated: SUPERSEDES set together with EXISTING_SIDECAR "
             "(a supersede must mint a fresh source, not reuse one)")
     if superseded:
+        # Citation rewriting mutates and stages tracked wiki pages. Arm rollback
+        # before the first mutation so a rewrite/lint/git failure cannot leave
+        # migrated citations staged while failed-run cleanup removes provenance.
+        _ROLLBACK_ON_FAILURE = True
         out(f"superseding {superseded} → {SRC['SOURCE_ID']}: migrating live citations...")
         run_stream([f"{SCRIPTS}/rewrite-citations.py", superseded, SRC["SOURCE_ID"]])
         git_run("add", "--", "wiki/")
         out("re-validating migrated citations (lint --gate=media-anchors)...")
         run_stream([f"{SCRIPTS}/lint.py", "--gate=media-anchors"])
+    # Everything below mutates the log, sidecar, assets, or Git index.  Keep the
+    # transaction armed for ordinary NO_CHANGES runs too, not just supersedes.
+    _ROLLBACK_ON_FAILURE = True
     sup_note = f" (supersedes {superseded})" if superseded else ""
     Path(".wiki").mkdir(exist_ok=True)
     section_tag = f"#{section_label}" if section_label else ""
@@ -643,6 +1169,7 @@ def handle_no_changes_or_continue(raw_file: str, section_label: str) -> None:
         git_run("add", ".wiki/log.md", SRC["SIDECAR"], *SCAFFOLD_PATHS, *_audit_extra())
         git_run("commit", "-m", f"ingest (no-changes): {SRC['SOURCE_ID']}{section_tag} ({SRC['DEST_BASENAME']}){sup_note}")
         out("committed sidecar progress update for no-change run")
+    _ROLLBACK_ON_FAILURE = False
     _cleanup()
     sys.exit(0)
 
@@ -651,13 +1178,25 @@ def run_lang(dest: str) -> int:
     """Language profile: run the generator (it owns the chapter loop), then
     stage EXACT paths, assert the staged set ⊆ lang/, and commit (or no-op
     exit). The generator writes pages + appends the log AFTER rendering."""
+    global _ROLLBACK_ON_FAILURE
     out("generating language study/vocab/grammar pages...")
+    _ROLLBACK_ON_FAILURE = True
+    _ROLLBACK_EXTRA_PATHS.update({"_reading", ".wiki/log.md"})
+    log_preexisting = Path(".wiki/log.md").exists()
     manifest_file = mktemp()
     r = subprocess.run(
         ["uv", "run", f"{SCRIPTS}/generate-language-pages.py",
          "--source-id", SRC["SOURCE_ID"], "--manifest-out", manifest_file],
         text=True,
     )
+    _register_untracked_under("_reading")
+    if not SRC.get("EXISTING_SIDECAR"):
+        cache_dir = Path(".wiki/lang-cache")
+        for cache_path in cache_dir.glob(f"{SRC['SOURCE_ID']}.*"):
+            if cache_path.is_file():
+                _register_run_created_file(cache_path.as_posix())
+    if not log_preexisting:
+        _register_run_created_file(".wiki/log.md")
     if r.returncode != 0:
         die("language generator failed")
 
@@ -667,6 +1206,12 @@ def run_lang(dest: str) -> int:
         die(f"language generator wrote an invalid manifest: {exc}")
     if not isinstance(manifest, list) or not all(isinstance(p, str) for p in manifest):
         die("language generator wrote an invalid manifest: expected a JSON list of paths")
+    for path in manifest:
+        _ROLLBACK_EXTRA_PATHS.add(path)
+        if Path(path).is_dir():
+            _register_run_created_dir(path)
+        else:
+            _register_run_created_file(path)
 
     # Lint gate (cwd/env already point at content/lang, so lint resolves the
     # lang roots): source drift + duplicate ids + conflicts + citation orphans.
@@ -691,8 +1236,10 @@ def run_lang(dest: str) -> int:
     # No-op exit (nothing changed on a reused source).
     if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0:
         out("nothing to commit (lang pages already up to date)")
+        _ROLLBACK_ON_FAILURE = False
         return 0
     git_run("commit", "-m", f"lang: {SRC['SOURCE_ID']} ({SRC['DEST_BASENAME']})")
+    _ROLLBACK_ON_FAILURE = False
     out(f"committed lang pages for {SRC['SOURCE_ID']}")
     return 0
 
@@ -746,14 +1293,12 @@ def _merge_retry_targets(candidates_file: str, expand_file: str, retry_set: list
 
 
 def _citation_keys(text: str) -> set[str]:
-    keys: set[str] = set()
-    for inner in re.findall(r"\[([^\[\]]*src:[^\[\]]*)\]", text):
-        for part in inner.split(","):
-            m = re.search(r"src:([A-Z0-9]{26})(#[^\]]*)?", part.strip())
-            if not m:
-                continue
-            keys.add(m.group(1) + (m.group(2) or ""))
-    return keys
+    return {
+        citation.source_id + (
+            f"#{citation.raw_anchor}" if citation.raw_anchor else ""
+        )
+        for citation in iter_source_citations(text)
+    }
 
 
 def _citation_key_still_present(old_key: str, new_keys: set[str]) -> bool:
@@ -805,28 +1350,106 @@ def _anchored_regex(titles: list[str]) -> str:
 
 
 def _group_chapters(titles: list[str]) -> list[tuple[str, str]]:
-    """Fallback (no chapter markers): one ingest per distinct section title."""
-    return [(title, f"^{re.escape(title)}$") for title in dict.fromkeys(titles)]
+    """Fallback (no chapter markers): one ingest per section occurrence."""
+    return [(title, f"^{re.escape(title)}$") for title in titles]
 
 
-def _group_by_chapter(sections: list[tuple[str, int]]) -> list[tuple[str, list[str]]]:
-    """Group section titles under their parent chapter.
+_OCCURRENCE_LABEL_RX = re.compile(r" \[occurrence \d+/\d+\]$")
 
-    A title matching CHAPTER_HEADING_RX opens a chapter; subsequent titles
-    matching SECTION_HEADING_RX belong to it; any other title (front/back matter,
-    or a section appearing before the first chapter) is dropped — only content
-    inside a chapter is ingestable. Returns [(chapter_label, [member titles])],
-    or [] when no chapter heading is found (caller falls back to per-section)."""
-    groups: list[tuple[str, list[str]]] = []
-    current: list[str] | None = None
-    for title, _size in sections:
+
+def _stable_chapter_instances(
+    chapters: list[tuple[str, str]],
+) -> list[tuple[str, str, str, int | None]]:
+    """Attach stable identities without merging duplicate source headings.
+
+    Returns (log/analysis label, section regex, source heading, occurrence).
+    Unique headings retain their historical labels. Repeated headings receive
+    a deterministic occurrence suffix and are selected separately after extract.
+    """
+    totals = Counter(normalize_name(label) for label, _ in chapters)
+    seen: Counter[str] = Counter()
+    source_seen: Counter[str] = Counter()
+    result: list[tuple[str, str, str, int | None]] = []
+    for label, section in chapters:
+        key = normalize_name(label)
+        seen[key] += 1
+        source_seen[label] += 1
+        total = totals[key]
+        if total == 1:
+            result.append((label, section, label, None))
+            continue
+        suffix = f" [occurrence {seen[key]}/{total}]"
+        stable = f"{label[:SECTION_LABEL_MAX_CHARS - len(suffix)]}{suffix}"
+        result.append((stable, section, label, source_seen[label]))
+    return result
+
+
+def _heading_starts(lines: list[str], title: str | None = None) -> list[int]:
+    """Line indices of ``## `` headings, optionally only those titled ``title``."""
+    return [
+        index for index, line in enumerate(lines)
+        if (match := _HEADING_RX.match(line.rstrip("\r\n")))
+        and (title is None or match.group(1) == title)
+    ]
+
+
+def _select_section_occurrence(text: str, title: str, occurrence: int) -> str:
+    """Select one repeated `## title` span from extractor output."""
+    lines = text.splitlines(keepends=True)
+    starts = _heading_starts(lines, title)
+    if occurrence < 1 or occurrence > len(starts):
+        die(f"extractor returned {len(starts)} occurrence(s) of {title!r}; "
+            f"cannot select occurrence {occurrence}")
+    start = starts[occurrence - 1]
+    end = starts[occurrence] if occurrence < len(starts) else len(lines)
+    return "".join(lines[start:end])
+
+
+def _select_heading_range(text: str, start: int, end: int) -> str:
+    """Select a half-open range of ordered ``##`` section occurrences."""
+    lines = text.splitlines(keepends=True)
+    starts = _heading_starts(lines)
+    if start < 0 or end <= start or end > len(starts):
+        die(f"invalid chapter heading range {start}:{end} for {len(starts)} headings")
+    first_line = starts[start]
+    last_line = starts[end] if end < len(starts) else len(lines)
+    return "".join(lines[first_line:last_line])
+
+
+def _grouped_chapter_ranges(
+    sections: list[tuple[str, int]],
+) -> list[tuple[str, list[str], int, int]]:
+    """Group chapters and preserve their exact ordered heading boundaries.
+
+    Title-regex unions are insufficient because common subsection titles can
+    repeat in different chapters.  The returned ``start``/``end`` ordinals
+    select one contiguous range from the extractor's full ordered output.
+    """
+    groups: list[tuple[str, list[str], int, int]] = []
+    current_label: str | None = None
+    current_members: list[str] = []
+    current_start = 0
+
+    def finish(end: int) -> None:
+        nonlocal current_label, current_members
+        if current_label is not None:
+            groups.append((current_label, current_members, current_start, end))
+        current_label = None
+        current_members = []
+
+    for index, (title, size) in enumerate(sections):
         if CHAPTER_HEADING_RX.search(title):
-            current = [title]
-            groups.append((title, current))
-        elif current is not None and SECTION_HEADING_RX.search(title):
-            current.append(title)
-        else:
-            current = None  # front/back matter or stray section → excluded
+            finish(index)
+            current_label = title
+            current_members = [title]
+            current_start = index
+        elif current_label is None:
+            continue
+        elif NONCONTENT_HEADING_RX.search(title):
+            finish(index)
+        elif SECTION_HEADING_RX.search(title) or size >= CHAPTER_MIN_CHARS:
+            current_members.append(title)
+    finish(len(sections))
     return groups
 
 
@@ -866,7 +1489,7 @@ def _section_sizes(full_text: str) -> list[tuple[str, int]]:
     Body excludes the heading line and whitespace, so cover / copyright / TOC /
     chapter-title pages score ~0 and can be dropped — extract.py emits one `## `
     per EPUB spine item, and those structural pages otherwise crash the per-
-    section keyword pre-pass (empty text) and abort the whole book."""
+    chapter analysis (empty text) and abort the whole book."""
     sizes: list[tuple[str, int]] = []
     title: str | None = None
     count = 0
@@ -885,6 +1508,44 @@ def _section_sizes(full_text: str) -> list[tuple[str, int]]:
 
 def _has_extraction_truncation_marker(text: str) -> bool:
     return bool(_EXTRACTION_TRUNCATION_RX.search(text))
+
+
+def _require_complete_extraction(text: str, *, sliced: bool) -> None:
+    if not _has_extraction_truncation_marker(text):
+        return
+    scope = "selected section" if sliced else "whole source"
+    die(f"extractor hit the text limit for the {scope}; raise --limit or select "
+        "a smaller range so truncated text is never logged as complete")
+
+
+def _require_one_selected_heading(text: str, selector: str) -> None:
+    count = sum(1 for line in text.splitlines() if _HEADING_RX.match(line))
+    if count == 1:
+        return
+    if count == 0:
+        die(f"--section {selector!r} matched no section heading")
+    die(f"--section {selector!r} matched {count} section headings; refine the "
+        "selector or ingest the source in automatic chapter mode")
+
+
+def _enforce_selected_limit(text: str, limit: str, *, scope: str) -> None:
+    text_limit = int(limit)
+    if text_limit > 0 and len(text) > text_limit:
+        die(f"{scope} contains {len(text)} characters, exceeding --limit "
+            f"{text_limit}; raise --limit or select a smaller explicit section")
+
+
+def _validate_section_contract(section: str, label: str, internal_range: str) -> None:
+    if internal_range and section:
+        die("internal ordered section range cannot be combined with --section")
+    if internal_range and not label:
+        die("internal ordered section range requires --section-label")
+    if section and not label:
+        die("--section requires --section-label so a partial ingest cannot be logged "
+            "as whole-source completion")
+    if label and not section and not internal_range:
+        die("--section-label requires --section; a label alone would attach one "
+            "chapter citation to the whole source")
 
 
 def _enumerate_sections(input_path: Path) -> list[tuple[str, int]]:
@@ -919,26 +1580,17 @@ def _yaml_scalar(value: str) -> str:
 
 
 def _source_id_for_sha(sources_dir: Path, sha: str) -> str | None:
-    if not sources_dir.is_dir():
-        return None
-    for sidecar in sorted(sources_dir.glob("*.md")):
-        if sidecar.name == "README.md":
-            continue
-        split = split_frontmatter(sidecar.read_text(encoding="utf-8", errors="replace"))
-        if not split:
-            continue
-        values: dict[str, str] = {}
-        for line in split[1].splitlines():
-            key, sep, value = line.partition(":")
-            if sep and key.strip() in {"source_id", "sha256"}:
-                values[key.strip()] = _yaml_scalar(value)
-        if values.get("sha256") == sha and values.get("source_id"):
-            return values["source_id"]
+    for source_id, sidecar_sha in _iter_source_sidecar_ids(sources_dir):
+        if sidecar_sha == sha and source_id:
+            return source_id
     return None
 
 
 def _source_log_progress(lines: list[str], source_id: str) -> tuple[set[str], bool]:
-    labels = set(chapter_order_from_lines(lines, source_id))
+    completion_lines = [
+        line for line in lines if "pages: (images-only)" not in line
+    ]
+    labels = set(chapter_order_from_lines(completion_lines, source_id))
     whole_done = False
     for line in lines:
         if _log_line_marks_whole_source(line, source_id):
@@ -955,7 +1607,7 @@ def section_already_logged(source_id: str, section_label: str) -> bool:
         return False
     lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     done, whole_done = _source_log_progress(lines, source_id)
-    return whole_done or _chapter_done(section_label, done)
+    return whole_done or section_label in done
 
 
 def _label_matches_title(title: str, label: str) -> bool:
@@ -967,24 +1619,52 @@ def _label_matches_title(title: str, label: str) -> bool:
     return False
 
 
-def _chapter_done(title: str, done_labels: set[str]) -> bool:
-    return any(_label_matches_title(title, label) for label in done_labels)
+def _resolved_done_labels(current_labels: list[str], done_labels: set[str]) -> set[str]:
+    """Resolve historical abbreviated labels only when the match is unique.
+
+    Current logs use exact stable labels. Older logs sometimes stored a chapter
+    prefix such as ``第1章``. Preserve that migration path without allowing one
+    short legacy label to mark multiple similarly named chapters complete.
+    """
+    resolved = set(done_labels) & set(current_labels)
+    for legacy in done_labels - resolved:
+        matches = [
+            label for label in current_labels
+            if not _OCCURRENCE_LABEL_RX.search(label)
+            and _label_matches_title(label, legacy)
+        ]
+        if len(matches) == 1:
+            resolved.add(matches[0])
+    return resolved
 
 
-def _run_one_chapter(args, section: str | None, label: str | None, *, skip_assets: bool = False) -> int:
+def _run_one_chapter(args, section: str | None, label: str | None, *,
+                     skip_assets: bool = False, source_title: str | None = None,
+                     section_occurrence: int | None = None,
+                     section_range: tuple[int, int] | None = None) -> int:
     """Spawn a fresh single-section ingest (own process → own preflight, clean
     index, and git commit). Reuses the fully-tested single-run path unchanged."""
     argv = [sys.executable, str(Path(__file__).resolve()),
             "--limit", args.limit, "--profile", args.profile]
-    if section is not None:
+    if section is not None and section_range is None:
         argv += ["--section", section]
     if label is not None:
         argv += ["--section-label", label]
     if args.model:
         argv += ["--model", args.model]
+    if getattr(args, "analyze_model", ""):
+        argv += ["--analyze-model", args.analyze_model]
     argv.append(str(_resolve_input_path(args.input)))
     env = os.environ.copy()
     env["PW_INGEST_NO_AUTOCHAPTER"] = "1"   # child is a single-section run; never re-chapter
+    chapter_outline = getattr(args, "chapter_outline", None)
+    if chapter_outline:
+        env["PW_SOURCE_CHAPTER_OUTLINE"] = json.dumps(chapter_outline, ensure_ascii=False)
+    if section_occurrence is not None and section_range is None:
+        env["PW_SECTION_SOURCE_TITLE"] = source_title or ""
+        env["PW_SECTION_OCCURRENCE"] = str(section_occurrence)
+    if section_range is not None:
+        env["PW_SECTION_RANGE"] = f"{section_range[0]}:{section_range[1]}"
     if skip_assets:
         env["PW_INGEST_SKIP_ASSETS"] = "1"
     else:
@@ -1015,16 +1695,20 @@ def run_chaptered(args) -> int:
         die("--chapters is only supported for the wiki profile")
 
     sections = _enumerate_sections(input_path)
-    groups = _group_by_chapter(sections)
-    if groups:
+    grouped_ranges = _grouped_chapter_ranges(sections)
+    if grouped_ranges:
+        groups = [(label, members) for label, members, _start, _end in grouped_ranges]
         chapters = [(label, _anchored_regex(members)) for label, members in groups]
+        chapter_ranges: list[tuple[int, int] | None] = [
+            (start, end) for _label, _members, start, end in grouped_ranges
+        ]
         grouped = sum(len(members) for _, members in groups)
         out(f"detected {len(chapters)} chapter(s); {grouped} section(s) grouped "
             f"under them, {len(sections) - grouped} front/back-matter section(s) "
             f"excluded")
     else:
         # No chapter markers → one ingest per substantial section (structural
-        # cover/TOC/title pages, which would crash the keyword pre-pass, dropped).
+        # cover/TOC/title pages, which would produce empty chapter analysis, dropped).
         substantial = [title for title, size in sections if size >= CHAPTER_MIN_CHARS]
         thin = [title for title, size in sections if size < CHAPTER_MIN_CHARS]
         if thin:
@@ -1032,9 +1716,17 @@ def run_chaptered(args) -> int:
             out(f"no chapter markers; per-section ingest, skipping {len(thin)} "
                 f"empty/structural section(s): {preview}")
         chapters = _group_chapters(substantial)
+        chapter_ranges = [None] * len(chapters)
     if not chapters:
         out("no ingestable chapters detected — ingesting as a single unit")
         return _run_one_chapter(args, section=None, label=None)
+
+    chapter_instances = _stable_chapter_instances(chapters)
+
+    # Child processes analyze one section at a time. The ordered labels let a
+    # child include compact prior-chapter spines without resending prior text.
+    args.chapter_outline = [label for label, _section, _title, _occurrence
+                            in chapter_instances]
 
     # Resume: find this source (by sha256) and the chapters already committed.
     src_sha = sha256_of(input_path)
@@ -1046,22 +1738,39 @@ def run_chaptered(args) -> int:
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
         done, whole_done = _source_log_progress(lines, source_id)
 
-    total = len(chapters)
+    total = len(chapter_instances)
     if whole_done:
         out(f"chaptered ingest: {total} chapter(s), source already logged as a single unit, 0 to do")
         return 0
 
-    remaining = sum(1 for label, _ in chapters if not _chapter_done(label, done))
+    resolved_done = _resolved_done_labels(
+        [label for label, _section, _title, _occurrence in chapter_instances],
+        done,
+    )
+    remaining = sum(
+        1 for label, _section, _title, _occurrence in chapter_instances
+        if label not in resolved_done
+    )
     out(f"chaptered ingest: {total} chapter(s), {total - remaining} already done, "
         f"{remaining} to do")
     new = 0
     asset_pass_done = False
-    for i, (label, section) in enumerate(chapters, start=1):
-        if _chapter_done(label, done):
+    for i, ((label, section, source_title, occurrence), section_range) in enumerate(
+        zip(chapter_instances, chapter_ranges, strict=True), start=1
+    ):
+        if label in resolved_done:
             out(f"[{i}/{total}] skip (done): {label}")
             continue
         out(f"[{i}/{total}] ingesting: {label}")
-        rc = _run_one_chapter(args, section=section, label=label, skip_assets=asset_pass_done)
+        rc = _run_one_chapter(
+            args,
+            section=section,
+            label=label,
+            skip_assets=asset_pass_done,
+            source_title=source_title,
+            section_occurrence=occurrence,
+            section_range=section_range,
+        )
         if rc != 0:
             eout(f"[{i}/{total}] chapter failed (rc={rc}): {label}")
             eout("stopped — re-run the same command to resume from this chapter.")
@@ -1083,9 +1792,9 @@ def main() -> int:
                          "Defaults to PW_LLM_MODEL, else the CLI's own default. "
                          "Separate from the caption model (CAPTION_MODEL), so "
                          "ingest can run on a cheaper model than captioning.")
-    ap.add_argument("--keyword-model", default=os.environ.get("PW_KEYWORD_MODEL", ""),
-                    help="Optional cheaper model for the keyword/entity pre-pass "
-                         "(codex/API providers only). Defaults to PW_KEYWORD_MODEL.")
+    ap.add_argument("--analyze-model", default=os.environ.get("PW_ANALYZE_MODEL", ""),
+                    help="Optional model for structured chapter analysis. Defaults "
+                         "to PW_ANALYZE_MODEL or the main provider model.")
     ap.add_argument("--images-only", action="store_true")
     ap.add_argument("--chapters", action="store_true",
                     help="Ingest a whole book chapter-by-chapter: enumerate its "
@@ -1123,6 +1832,20 @@ def main() -> int:
     args = ap.parse_args()
     section_label = validate_section_label(args.section_label)
     args.section_label = section_label
+    try:
+        parsed_limit = int(args.limit)
+    except ValueError:
+        die("--limit must be a non-negative integer")
+    if parsed_limit < 0:
+        die("--limit must be a non-negative integer")
+    args.limit = str(parsed_limit)
+    internal_section_range = os.environ.get("PW_SECTION_RANGE", "").strip()
+    if internal_section_range and os.environ.get("PW_SECTION_OCCURRENCE", "").strip():
+        die("internal section range and occurrence selectors are mutually exclusive")
+    _validate_section_contract(args.section, section_label, internal_section_range)
+    if args.kind and (args.section or section_label):
+        die("media ingest does not support --section/--section-label; media text "
+            "would otherwise be cited as a section without being sliced")
 
     # Pin the ingest model for every downstream LLM call (llm_client reads this
     # from the env). Kept out of the caption path, which has its own model knob.
@@ -1185,8 +1908,7 @@ def main() -> int:
     preflight(args.profile, SCAFFOLD_PATHS)
     check_deps()
     global _PREEXISTING_SOURCE_PATHS
-    if args.profile == "wiki":
-        _PREEXISTING_SOURCE_PATHS = _source_path_snapshot()
+    _PREEXISTING_SOURCE_PATHS = _source_path_snapshot()
 
     # Whole-book mode loops the normal single-section ingest once per chapter.
     # It runs after the common setup gates so missing tools and dirty vault state
@@ -1243,16 +1965,15 @@ def main() -> int:
         src_input = args.input
         if not _is_http_url(src_input) and not os.path.isabs(src_input):
             src_input = str(INVOCATION_CWD / src_input)
-        r = subprocess.run([f"{SCRIPTS}/source-identity.py", src_input],
-                           text=True, capture_output=True)
+        r = run_source_identity(src_input)
     sys.stderr.write(r.stderr)
     if r.returncode != 0:
-        sys.exit(1)
+        die("media identity failed" if args.kind else "source identity failed")
     SRC.update(parse_shell_assignments(r.stdout))
     dest = SRC["DEST"]
-    if args.profile == "wiki" and not SRC.get("EXISTING_SIDECAR"):
+    if not SRC.get("EXISTING_SIDECAR"):
         _register_new_source_artifacts(dest)
-    elif args.profile == "wiki" and SRC.get("AUDIT_JSON"):
+    elif SRC.get("AUDIT_JSON"):
         _register_run_created_file(SRC["AUDIT_JSON"])
 
     if (
@@ -1288,9 +2009,15 @@ def main() -> int:
         _TEMPS.append(text_file)
     else:
         write_assets = args.images_only or os.environ.get("PW_INGEST_SKIP_ASSETS") != "1"
-        extract_args = [dest, "--limit", args.limit]
-        if args.section:
-            extract_args = [dest, "--section", args.section, "--limit", args.limit]
+        range_raw = os.environ.get("PW_SECTION_RANGE", "").strip()
+        occurrence_raw = os.environ.get("PW_SECTION_OCCURRENCE", "").strip()
+        select_after_extract = bool(range_raw or occurrence_raw)
+        extract_args = [dest, "--limit", "0" if select_after_extract else args.limit]
+        if args.section and not range_raw:
+            extract_args = [
+                dest, "--section", args.section,
+                "--limit", "0" if occurrence_raw else args.limit,
+            ]
         if write_assets:
             extract_args += ["--write-assets"]
         if SRC["ORIGIN_TYPE"] == "url":
@@ -1299,6 +2026,29 @@ def main() -> int:
         with open(text_file, "w", encoding="utf-8") as f:
             if subprocess.run([f"{SCRIPTS}/extract.py", *extract_args], stdout=f).returncode != 0:
                 die("extract failed")
+        if range_raw:
+            try:
+                start_raw, end_raw = range_raw.split(":", 1)
+                start, end = int(start_raw), int(end_raw)
+            except (ValueError, TypeError):
+                die("PW_SECTION_RANGE must be two integer heading ordinals: START:END")
+            selected = _select_heading_range(read(text_file), start, end)
+            _enforce_selected_limit(selected, args.limit, scope="selected chapter")
+            write(text_file, selected)
+        if occurrence_raw:
+            source_title = os.environ.get("PW_SECTION_SOURCE_TITLE", "")
+            try:
+                occurrence = int(occurrence_raw)
+            except ValueError:
+                die("PW_SECTION_OCCURRENCE must be a positive integer")
+            selected = _select_section_occurrence(read(text_file), source_title, occurrence)
+            _enforce_selected_limit(selected, args.limit, scope="selected section")
+            write(text_file, selected)
+
+    if args.section:
+        selected_text = read(text_file)
+        _require_one_selected_heading(selected_text, args.section)
+        _require_complete_extraction(selected_text, sliced=True)
 
     # caption new images (soft-fail)
     assets_dir = f"{dest}.assets"
@@ -1317,7 +2067,8 @@ def main() -> int:
 
     # ── §5(images-only) short-circuit ──
     if args.images_only:
-        out("--images-only — skipping keyword pre-pass and main LLM diff")
+        out("--images-only — skipping chapter analysis and main LLM diff")
+        _ROLLBACK_ON_FAILURE = True
         Path(".wiki").mkdir(exist_ok=True)
         with open(".wiki/log.md", "a", encoding="utf-8") as f:
             f.write(f"{SRC['ADDED']}  {SRC['SOURCE_ID']}{section_tag}  pages: (images-only)\n")
@@ -1332,8 +2083,10 @@ def main() -> int:
             git_run("add", ".wiki/log.md", SRC["SIDECAR"], *SCAFFOLD_PATHS, *_audit_extra())
         if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0:
             out("--images-only nothing to commit (assets already up to date)")
+            _ROLLBACK_ON_FAILURE = False
             return 0
         git_run("commit", "-m", f"images-only: {SRC['SOURCE_ID']}{section_tag} ({SRC['DEST_BASENAME']})")
+        _ROLLBACK_ON_FAILURE = False
         out("committed images-only update")
         return 0
 
@@ -1341,59 +2094,54 @@ def main() -> int:
     out(f"extracted {len(text)} characters")
     if len(text) == 0:
         die("extractor produced empty text")
-    if not args.section and _has_extraction_truncation_marker(text):
-        die("extractor hit the text limit during a whole-source ingest; use "
-            "--chapters for chaptered ingest or raise --limit so the source is "
-            "not logged as complete from truncated text")
-
-    # ── §5 source-term pre-pass / §6 collect candidates ──
-    cap = int(os.environ.get("CAND_CAP", "20"))
-    source_terms_file = mktemp()
-    candidates_file = mktemp()
-    pages = wiki_page_paths()
-    source_head = text[:KEYWORD_SOURCE_HEAD_CHARS]
-    kw_prompt = (
-        "Extract all salient entity and concept names (people, products,\n"
-        "projects, concepts, methods, organisms, enzymes, proteins,\n"
-        "hypotheses, mechanisms, organizations, places) from the text below.\n"
-        "Include every distinct, non-trivial name or concept that is central,\n"
-        "recurring, or likely to deserve a reusable wiki node; do not stop at\n"
-        "a fixed count. Output a newline-separated list with no numbering, no\n"
-        "commentary, just one name per line. Use the same language as the\n"
-        "source text (do not translate).\n\n"
-        f"---\n{source_head}\n---\n"
+    _require_complete_extraction(
+        text, sliced=bool(args.section or internal_section_range)
     )
-    out("extracting source key terms...")
-    write(source_terms_file, llm(kw_prompt, soft=True, model=args.keyword_model or None))
-    kw = read(source_terms_file)
-    nonws = sum(1 for c in kw if not c.isspace())
-    klines = kw.split("\n")
-    nonempty = sum(1 for ln in klines if ln.strip())
-    maxline = max((len(ln) for ln in klines), default=0)
-    kw_valid = nonws >= 5 and nonempty >= 2 and maxline <= 100
-    if not kw_valid:
-        eout("source key-term pre-pass output looks like an error/prose, not keywords.")
-        eout(f"  non-whitespace chars: {nonws} (need >=5)")
-        eout(f"  non-empty lines:      {nonempty} (need >=2)")
-        eout(f"  longest line:         {maxline} chars (need <=100)")
-        eout("  raw output:")
-        for ln in kw.splitlines():
-            print(f"  | {ln}", file=sys.stderr)
-        write(source_terms_file, "")
-        if len(pages) > cap:
-            die("source key-term pre-pass produced no usable output (LLM call failed?). "
-                "Aborting before candidate selection would run blind.")
-        eout("warn — continuing without source key terms because the full vault fits in the candidate cap")
-    else:
-        out("source key terms:")
-        for ln in kw.splitlines():
-            print(f"  - {ln}")
 
-    if len(pages) <= cap:
-        write(candidates_file, "".join(f"{p}\n" for p in pages))
-        out(f"{len(pages)} candidate pages (full vault, cap={cap})")
-    else:
-        collect_candidates(source_terms_file, candidates_file, cap)
+    # ── §5 reusable chapter analysis / §6 collect candidates ──
+    cap = int(os.environ.get("CAND_CAP", "20"))
+    source_intelligence_file = mktemp()
+    candidates_file = mktemp()
+    cache_dir = Path(".wiki") / "chapter-intelligence-cache"
+    analyze_cmd = [
+        f"{SCRIPTS}/analyze-chapter.py",
+        "--text-file", text_file,
+        "--source-id", SRC["SOURCE_ID"],
+        "--source-sha256", SRC["SHA256"],
+        "--section-label", section_label,
+        "--cache-dir", str(cache_dir),
+        "--output", source_intelligence_file,
+    ]
+    chapter_outline_json = os.environ.get("PW_SOURCE_CHAPTER_OUTLINE", "").strip()
+    if chapter_outline_json:
+        analyze_cmd += ["--chapter-outline-json", chapter_outline_json]
+    if args.analyze_model:
+        analyze_cmd += ["--model", args.analyze_model]
+    out("analyzing chapter intelligence...")
+    if run_stream(analyze_cmd, env=analyzer_env(), check=False) != 0:
+        die("chapter-intelligence analysis failed; no wiki diff was attempted")
+    try:
+        intelligence = json.loads(read(source_intelligence_file))
+    except json.JSONDecodeError as exc:
+        die(f"chapter-intelligence output is not valid JSON: {exc}")
+    out(
+        "chapter intelligence: "
+        f"{len(intelligence.get('claims', []))} claims, "
+        f"{len(intelligence.get('entities', []))} entities, "
+        f"{len(intelligence.get('topics', []))} topics, "
+        f"{len(intelligence.get('page_candidates', []))} page candidate(s)"
+    )
+    for candidate in intelligence.get("page_candidates", []):
+        if isinstance(candidate, dict):
+            print(
+                f"  - {candidate.get('page_type', '?')} "
+                f"{candidate.get('name', '?')} (importance={candidate.get('importance', '?')})"
+            )
+
+    collect_candidates(source_intelligence_file, candidates_file, cap)
+    renderer_intelligence_file = _renderer_intelligence_with_existing_types(
+        source_intelligence_file, candidates_file
+    )
 
     # ── §7 main ingest call ──
     # Sidecars only. git's `*` matches `/`, so "sources/*.md" also catches
@@ -1417,7 +2165,8 @@ def main() -> int:
     codex_workdir = mktempdir()
     os.environ["PW_CODEX_WORKDIR"] = codex_workdir
 
-    build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label, "digest")
+    build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file,
+                 renderer_intelligence_file, section_label, "digest")
     out(f"calling LLM (digest mode, {Path(prompt_file).stat().st_size} bytes)...")
     _seed_workset(codex_workdir, candidates_file, expand_file)
     write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
@@ -1428,12 +2177,15 @@ def main() -> int:
         out(f"LLM requested expansion of {n} file(s):")
         for ln in read(expand_file).splitlines():
             print(f"  - {ln}")
-        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label, "expand")
+        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file,
+                     renderer_intelligence_file, section_label, "expand")
         out(f"re-calling LLM with expanded content ({Path(prompt_file).stat().st_size} bytes)...")
         _seed_workset(codex_workdir, candidates_file, expand_file)
         write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
 
-    handle_no_changes_or_continue(diff_raw, section_label)
+    handle_no_changes_or_continue(
+        diff_raw, section_label, source_intelligence_file, candidates_file
+    )
     run_stream([f"{SCRIPTS}/apply-diff.py", "strip-fences", diff_raw, diff_file])
     ok, scope_stdout, scope_stderr = _scope_check_result(diff_file)
     if not ok:
@@ -1449,10 +2201,12 @@ def main() -> int:
             else:
                 eout("diff format invalid; auto-retry with git-format instructions...")
             build_prompt(expand_file, prompt_file, all_source_ids, text_file,
-                         candidates_file, source_terms_file, section_label, "retry")
+                         candidates_file, renderer_intelligence_file, section_label, "retry")
             _seed_workset(codex_workdir, candidates_file, expand_file)
             write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
-            handle_no_changes_or_continue(diff_raw, section_label)
+            handle_no_changes_or_continue(
+                diff_raw, section_label, source_intelligence_file, candidates_file
+            )
             run_stream([f"{SCRIPTS}/apply-diff.py", "strip-fences", diff_raw, diff_file])
             scope_check(diff_file, retry=True)
         else:
@@ -1526,10 +2280,13 @@ def main() -> int:
         _merge_retry_targets(candidates_file, expand_file, retry_set)
 
         eout(f"patch failed; auto-retry with {len(retry_set)} expanded path(s)...")
-        build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file, source_terms_file, section_label, "retry")
+        build_prompt(expand_file, prompt_file, all_source_ids, text_file,
+                     candidates_file, renderer_intelligence_file, section_label, "retry")
         _seed_workset(codex_workdir, candidates_file, expand_file)
         write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))  # bash: || die "LLM call failed (retry)"
-        handle_no_changes_or_continue(diff_raw, section_label)
+        handle_no_changes_or_continue(
+            diff_raw, section_label, source_intelligence_file, candidates_file
+        )
         run_stream([f"{SCRIPTS}/apply-diff.py", "strip-fences", diff_raw, diff_file])
         scope_check(diff_file, retry=True)
         retry_count += 1
@@ -1546,10 +2303,28 @@ def main() -> int:
     if modified:
         out("normalizing llm-zone formatting...")
         run_stream([f"{SCRIPTS}/format-llm-zone.py", *modified])
+
+        out("validating chapter-intelligence coverage and prose quality...")
+        quality_rc, quality_receipt = _run_quality_gate(
+            source_intelligence_file, candidates_file, section_label, modified
+        )
+        _report_quality_receipt(quality_receipt)
+        if quality_rc != 0 or not quality_receipt.get("ok"):
+            die("chapter-intelligence quality gate failed; staged wiki edits were rolled back")
+
         out("ensuring page_id on modified pages...")
         run_stream([f"{SCRIPTS}/add-page-id.py", *modified])
         out("syncing frontmatter on modified pages...")
         run_stream([f"{SCRIPTS}/sync-frontmatter.py", "--date", today_str, *modified])
+        out("validating alias uniqueness before vault-wide rewrites...")
+        if subprocess.run([f"{SCRIPTS}/alias-index.py", "check"],
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode != 0:
+            eout("ABORT — alias-uniqueness check failed:")
+            subprocess.run([f"{SCRIPTS}/alias-index.py", "check"])
+            eout("  Resolve the collision in the generated page identities, then re-run.")
+            eout("  This failed run will roll back its staged wiki/source edits.")
+            die("alias-uniqueness check failed")
         out("validating tags (lint --gate=tags)...")
         run_stream([f"{SCRIPTS}/lint.py", "--gate=tags"])
         out("validating image embeds (lint --gate=images)...")
@@ -1574,13 +2349,6 @@ def main() -> int:
     subprocess.run(["git", "--no-pager", "diff", "--cached", "--stat"])
 
     # ── §8b gates ──
-    if subprocess.run([f"{SCRIPTS}/alias-index.py", "check"],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        eout("ABORT — alias-uniqueness check failed:")
-        subprocess.run([f"{SCRIPTS}/alias-index.py", "check"])
-        eout("  Resolve the collision in the vault or candidate set, then re-run.")
-        eout("  This failed run will roll back its staged wiki/source edits.")
-        die("alias-uniqueness check failed")
     if subprocess.run([f"{SCRIPTS}/lint.py", "--gate=page-id"]).returncode != 0:
         eout("  Resolve the duplicate/malformed page_id cause and re-run")
         eout("  (the LLM should not emit page_id; add-page-id.py injects one).")

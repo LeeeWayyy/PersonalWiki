@@ -423,20 +423,27 @@ file under `sources/`.
 ### Section anchors
 
 For long sources where only part of the asset was ingested (a
-chapter of a book, a section of a long article), append a `#` and a
-short human-readable section label:
+chapter of a book, a section of a long article), append the canonical
+`#sec=` anchor followed by the RFC 3986 percent-encoded UTF-8 section label:
 
 ```markdown
-线粒体获得是复杂生命出现的前提 [src:01KPWHET#第一章].
-The hydrogen hypothesis was proposed in 1998 [src:01HQAB73#§3].
+线粒体获得是复杂生命出现的前提 [src:01KPWHET#sec=%E7%AC%AC%E4%B8%80%E7%AB%A0].
+The comparison is bounded to one section [src:01HQAB73#sec=A%2C%20B%5D%20%23100%25].
 ```
 
-The anchor scopes the citation to the part of the source that was
-actually ingested. When `ingest.py` is run with `--section-label`,
-every citation it emits in that run carries the anchor; without it,
-the citation is bare `[src:<id>]` (whole-asset). The `<id>` portion
-still resolves to the same sidecar — the anchor is informational
-provenance, not a separate source.
+Encoding is mandatory for newly emitted section anchors. It makes commas,
+`]`, `#`, `%`, whitespace, and Unicode round-trip as one citation even inside
+a comma-separated citation group. Producers MUST encode the label exactly
+once; consumers split the group first and decode only the value after `#sec=`.
+Legacy human-readable anchors such as `[src:<id>#第一章]` remain valid and MUST
+continue to resolve. Structured media anchors such as `#card-2`, `#frame-3`,
+and time ranges are not section labels and remain unencoded.
+
+The anchor scopes the citation to the part of the source that was actually
+ingested. When `ingest.py` is run with `--section-label`, every citation it
+emits in that run carries the encoded anchor; without it, the citation is bare
+`[src:<id>]` (whole-asset). The `<id>` portion still resolves to the same
+sidecar — the anchor is informational provenance, not a separate source.
 
 #### Structured media anchors
 

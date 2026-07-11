@@ -8,7 +8,7 @@ Deterministic stub for $LLM_CMD, used by scripts/tests/test_ingest_e2e.sh.
 Reads the prompt on stdin and emits a canned response so the full ingest
 pipeline can be exercised end-to-end with NO live LLM:
 
-  - Keyword pre-pass prompt  → a few keyword lines.
+  - Chapter analyzer prompt  → validated chapter-intelligence JSON.
   - Main ingest prompt       → a unified diff CREATING a new entity page
                                that cites the run's real source_id (parsed
                                out of the prompt's SOURCE_META block), so
@@ -35,10 +35,83 @@ def _slug(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "section"
 
+
+def _json_string_field(name: str) -> str:
+    match = re.search(rf'"{re.escape(name)}"\s*:\s*("(?:\\.|[^"\\])*")', prompt)
+    return json.loads(match.group(1)) if match else ""
+
+
+section_label = _json_string_field("section_label")
+if os.environ.get("STUB_ENTITY_FROM_SECTION") and section_label:
+    entity = f"{os.environ.get('STUB_ENTITY_PREFIX', '')}{_slug(section_label)}"
+
+
+if "You are a chapter-intelligence analyzer" in prompt:
+    text_match = re.search(
+        r"<EXTRACTED_SOURCE_TEXT>\n(.*?)\n</EXTRACTED_SOURCE_TEXT>",
+        prompt,
+        re.DOTALL,
+    )
+    source_text = text_match.group(1) if text_match else ""
+    quote = source_text[: min(80, len(source_text))]
+    artifact = {
+        "schema": "chapter-intelligence/1",
+        "source_id": _json_string_field("source_id"),
+        "source_sha256": _json_string_field("source_sha256"),
+        "text_sha256": _json_string_field("text_sha256"),
+        "section_label": _json_string_field("section_label"),
+        "prompt_version": _json_string_field("prompt_version"),
+        "language": "en",
+        "summary": f"Structured test analysis for {entity}.",
+        "central_question": f"Why does {entity} matter?",
+        "chapter_claim": f"{entity} is a reusable concept in this source.",
+        "builds_on": None,
+        "claims": [{
+            "id": "c1",
+            "kind": "claim",
+            "text": f"{entity} is a reusable concept in this source.",
+            "importance": 5,
+            "source_spans": ([{"start": 0, "end": len(quote), "quote": quote}]
+                             if quote else []),
+            "entities": [entity],
+        }],
+        "entities": [{
+            "name": entity,
+            "type": "concept",
+            "aliases": [],
+            "importance": 5,
+            "role": "Primary concept used by the deterministic ingest fixture.",
+            "page_hint": "entity",
+            "claim_ids": ["c1"],
+        }],
+        "topics": [],
+        "relations": [],
+        "page_candidates": [{
+            "page_type": "entity",
+            "name": entity,
+            "importance": 5,
+            "required": True,
+            "claim_ids": ["c1"],
+            "reason": "Reusable fixture concept.",
+        }],
+        "claim_coverage": [{
+            "claim_id": "c1",
+            "page_candidates": [{"page_type": "entity", "name": entity}],
+            "skip_reason": None,
+        }],
+        "open_questions": [],
+    }
+    print(json.dumps(artifact, ensure_ascii=False))
+    sys.exit(0)
+
 # Language-profile prompt (generate-language-pages.py): "## SENTENCES" and
 # "## WORDS" blocks. Emit the JSON the generator expects: every sentence
 # translated, every listed word glossed, plus one deterministic grammar point.
 if "## SENTENCES" in prompt and "## WORDS" in prompt:
+    fail_lang_chapter = os.environ.get("STUB_FAIL_LANG_CHAPTER", "")
+    if fail_lang_chapter and fail_lang_chapter in prompt:
+        print(f"stub language failure for {fail_lang_chapter}", file=sys.stderr)
+        sys.exit(9)
     sent_block = prompt.split("## SENTENCES", 1)[1].split("## WORDS", 1)[0]
     word_block = prompt.split("## WORDS", 1)[1]
     sentences = re.findall(r"^(\d+)\. (.+)$", sent_block, re.MULTILINE)
@@ -58,21 +131,11 @@ if "## SENTENCES" in prompt and "## WORDS" in prompt:
     print(json.dumps(obj, ensure_ascii=False))
     sys.exit(0)
 
-# The main ingest prompt contains the SOURCE_TEXT + CANDIDATE_PAGES blocks;
-# the keyword pre-pass prompt does not.
-if "## SOURCE_TEXT" not in prompt:
-    # Keyword pre-pass: short retrieval seeds, one per line.
-    print("\n".join(["mitochondria", "ATP", "energy", entity, "biology"]))
-    sys.exit(0)
-
-if os.environ.get("STUB_ENTITY_FROM_SECTION"):
-    m = re.search(
-        r"^## SECTION_LABEL\n(.+?)\n## SOURCE_TEXT",
-        prompt,
-        re.MULTILINE | re.DOTALL,
-    )
+if os.environ.get("STUB_ENTITY_FROM_SECTION") and not section_label:
+    m = re.search(r"^## SECTION_LABEL\n([^\n]*)$", prompt, re.MULTILINE)
     if m:
-        entity = f"{os.environ.get('STUB_ENTITY_PREFIX', '')}{_slug(m.group(1))}"
+        section_label = m.group(1).strip()
+        entity = f"{os.environ.get('STUB_ENTITY_PREFIX', '')}{_slug(section_label)}"
 
 # $STUB_NO_CHANGES=1 forces the main call to return NO_CHANGES (the LLM had nothing to add) —
 # the expected outcome of an --add-frames supersede, whose transcript is byte-identical to the
@@ -87,6 +150,15 @@ if not m:
     print("NO_CHANGES: stub could not find source_id in prompt", flush=True)
     sys.exit(0)
 sid = m.group(1)
+section_citation_match = re.search(
+    r"^## SECTION_CITATION\n(\[src:[^\n]+\])$", prompt, re.MULTILINE
+)
+if anchor:
+    citation = f"[src:{sid}#{anchor}]"
+elif section_citation_match:
+    citation = section_citation_match.group(1)
+else:
+    citation = f"[src:{sid}]"
 
 body = [
     "---",
@@ -104,7 +176,9 @@ body = [
     "<!-- llm-zone -->",
     "> [!AI] LLM Synthesis",
     ">",
-    f"> An end-to-end stub claim about {entity} [src:{sid}{('#' + anchor) if anchor else ''}].",
+    f"> {entity} is a reusable concept in the end-to-end fixture. It carries enough context to exercise the human-readable prose gate {citation}.",
+    ">",
+    f"> The second paragraph explains why {entity} belongs in the wiki graph. It also verifies paragraph-level provenance {citation}.",
     "<!-- /llm-zone -->",
 ]
 path = f"wiki/entities/{entity}.md"

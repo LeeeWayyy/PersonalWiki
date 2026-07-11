@@ -44,11 +44,21 @@ def digest(text: str, body_lines: int = 6) -> str:
     """Return compact digest preserving frontmatter + H1 + headings + first
     `body_lines` non-empty body lines after the H1.
 
-    Pages without frontmatter return unchanged but capped at body_lines+5.
+    Pages without frontmatter are capped at body_lines+5 and carry the same
+    explicit elision marker as frontmatter pages whenever content was omitted.
     """
     m = FM_RX.match(text)
     if not m:
-        capped = text.splitlines()[: body_lines + 5]
+        lines = text.splitlines()
+        limit = body_lines + 5
+        capped = lines[:limit]
+        omitted = len(lines) - len(capped)
+        if omitted:
+            capped.extend([
+                "",
+                f"<!-- digest: {omitted} body line(s) elided. "
+                "Request full content via expand action if needed. -->",
+            ])
         return "\n".join(capped) + "\n"
 
     fm = m.group(1)

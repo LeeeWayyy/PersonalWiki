@@ -63,12 +63,17 @@ build_candidate_blob() {
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
     printf '\n### %s\n```markdown\n' "$p"
+    local content="$TMP/candidate-content"
     if [[ -s "$expand_list" ]] && grep -qFx "$p" "$expand_list"; then
-      cat "$p"
+      cat "$p" > "$content"
     else
-      "$TOOLING_ROOT"/scripts/page-digest.py "$p" 2>/dev/null || cat "$p"
+      "$TOOLING_ROOT"/scripts/page-digest.py "$p" > "$content" 2>/dev/null || cat "$p" > "$content"
     fi
-    printf '\n```\n'
+    cat "$content"
+    if [[ -s "$content" ]] && [[ "$(tail -c 1 "$content" | od -An -t u1 | tr -d ' ')" != "10" ]]; then
+      printf '\n'
+    fi
+    printf '```\n'
   done < "$CANDIDATES_FILE"
 }
 
@@ -159,15 +164,17 @@ build_prompt() {
     printf '\n\n---\n\n## SOURCE_META\n'
     printf 'source_id: %s\nsha256: %s\nadded: %s\norigin_type: %s\norigin_ref: %s\nbasename: %s\n' \
       "$SOURCE_ID" "$SHA256" "$ADDED" "$ORIGIN_TYPE" "$ORIGIN_REF" "$DEST_BASENAME"
-    printf '\n## SOURCE_KEY_TERMS\n'
-    if [[ -s "$SOURCE_TERMS_FILE" ]]; then
-      terms="$(cat "$SOURCE_TERMS_FILE")"
-      printf '%s' "$terms"
-    else
-      printf '(not available)'
-    fi
+    printf '\n## SOURCE_INTELLIGENCE\n'
+    printf '%s' "$COMPACT_SOURCE_INTELLIGENCE"
     printf '\n'
     printf '\n## SECTION_LABEL\n%s\n' "${SECTION_LABEL:-<none — cite as bare [src:$SOURCE_ID]>}"
+    local section_citation="[src:$SOURCE_ID]"
+    if [[ -n "$SECTION_LABEL" ]]; then
+      local encoded
+      encoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$SECTION_LABEL")"
+      section_citation="[src:$SOURCE_ID#sec=$encoded]"
+    fi
+    printf '\n## SECTION_CITATION\n%s\n' "$section_citation"
     printf '\n## SOURCE_TEXT\n'
     cat "$TEXT_FILE"
     printf '\n\n---\n\n## CANDIDATE_PAGES'
@@ -203,8 +210,90 @@ export DEST_BASENAME="2026-05-28-test.epub"
 export ALL_SOURCE_IDS=$'01KQD4EYT6AR0DE208D70TCWCQ\n01TESTSOURCEID0000000000AB'
 TEXT_FILE="$TMP/text.md"; export TEXT_FILE
 printf '## 第一章\n这是一段用于测试 build-prompt 的源文本，含 ATP 与线粒体。\n' > "$TEXT_FILE"
-SOURCE_TERMS_FILE="$TMP/source-terms"; export SOURCE_TERMS_FILE
-printf 'ATP\n线粒体\n化学渗透偶联\n' > "$SOURCE_TERMS_FILE"
+SOURCE_INTELLIGENCE_FILE="$TMP/source-intelligence.json"; export SOURCE_INTELLIGENCE_FILE
+cat > "$SOURCE_INTELLIGENCE_FILE" <<'JSON'
+{
+  "schema": "chapter-intelligence/1",
+  "source_id": "01TESTSOURCEID0000000000AB",
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "text_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "section_label": "第一章",
+  "prompt_version": "v3",
+  "language": "zh",
+  "summary": "线粒体参与能量转换。",
+  "central_question": "线粒体如何支持复杂细胞？",
+  "chapter_claim": "线粒体提高了真核细胞可用的能量。",
+  "builds_on": null,
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "claim",
+      "text": "线粒体产生 ATP。",
+      "importance": 5,
+      "source_spans": [{"start": 41, "end": 44, "quote": "线粒体"}],
+      "entities": ["线粒体"]
+    },
+    {
+      "id": "c2",
+      "kind": "evidence",
+      "text": "ATP 支持复杂细胞活动。",
+      "importance": 4,
+      "source_spans": [{"start": 36, "end": 39, "quote": "ATP"}],
+      "entities": []
+    }
+  ],
+  "entities": [{
+    "name": "线粒体",
+    "type": "organelle",
+    "aliases": ["Mitochondria"],
+    "importance": 5,
+    "role": "能量转换细胞器",
+    "page_hint": "entity",
+    "claim_ids": ["c1"]
+  }],
+  "topics": [{
+    "name": "真核细胞起源",
+    "question": "真核细胞为何获得复杂性？",
+    "synthesis_angle": "连接能量与复杂性",
+    "importance": 5,
+    "claim_ids": ["c2"]
+  }],
+  "relations": [{"from": "c2", "to": "c1", "rel": "supports"}],
+  "page_candidates": [
+    {
+      "page_type": "entity",
+      "name": "线粒体",
+      "importance": 5,
+      "required": true,
+      "claim_ids": ["c1"],
+      "reason": "跨来源复用的核心概念"
+    },
+    {
+      "page_type": "topic",
+      "name": "真核细胞起源",
+      "importance": 5,
+      "required": true,
+      "claim_ids": ["c2"],
+      "reason": "跨实体综合问题"
+    }
+  ],
+  "claim_coverage": [
+    {
+      "claim_id": "c1",
+      "page_candidates": [{"page_type": "entity", "name": "线粒体"}],
+      "skip_reason": null
+    },
+    {
+      "claim_id": "c2",
+      "page_candidates": [{"page_type": "topic", "name": "真核细胞起源"}],
+      "skip_reason": null
+    }
+  ],
+  "open_questions": ["能量优势如何量化？"]
+}
+JSON
+COMPACT_SOURCE_INTELLIGENCE='{"language":"zh","summary":"线粒体参与能量转换。","central_question":"线粒体如何支持复杂细胞？","chapter_claim":"线粒体提高了真核细胞可用的能量。","builds_on":null,"claims":[{"id":"c1","kind":"claim","text":"线粒体产生 ATP。","importance":5,"entities":["线粒体"]},{"id":"c2","kind":"evidence","text":"ATP 支持复杂细胞活动。","importance":4,"entities":[]}],"entities":[{"name":"线粒体","type":"organelle","aliases":["Mitochondria"],"importance":5,"role":"能量转换细胞器","claim_ids":["c1"]}],"topics":[{"name":"真核细胞起源","question":"真核细胞为何获得复杂性？","synthesis_angle":"连接能量与复杂性","importance":5,"claim_ids":["c2"]}],"relations":[{"from":"c2","to":"c1","rel":"supports"}],"page_candidates":[{"page_type":"entity","name":"线粒体","importance":5,"required":true,"claim_ids":["c1"],"reason":"跨来源复用的核心概念"},{"page_type":"topic","name":"真核细胞起源","importance":5,"required":true,"claim_ids":["c2"],"reason":"跨实体综合问题"}],"open_questions":["能量优势如何量化？"]}'
+export COMPACT_SOURCE_INTELLIGENCE
 CANDIDATES_FILE="$TMP/cands"; export CANDIDATES_FILE
 printf 'wiki/entities/mitochondria.md\nwiki/topics/eukaryotes.md\n' > "$CANDIDATES_FILE"
 export DEST="sources/test.epub"
@@ -217,7 +306,7 @@ run_case() {
     --source-id "$SOURCE_ID" --sha256 "$SHA256" --added "$ADDED" \
     --origin-type "$ORIGIN_TYPE" --origin-ref "$ORIGIN_REF" --basename "$DEST_BASENAME" \
     --section-label "$SECTION_LABEL" --all-source-ids "$ALL_SOURCE_IDS" \
-    --source-terms-file "$SOURCE_TERMS_FILE" \
+    --source-intelligence-file "$SOURCE_INTELLIGENCE_FILE" \
     --text-file "$TEXT_FILE" --candidates-file "$CANDIDATES_FILE" \
     --expand-file "$expand_file" --dest "$DEST" \
     --operation "$operation" > "$TMP/py"

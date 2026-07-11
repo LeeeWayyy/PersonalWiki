@@ -20,6 +20,35 @@ git -C "$C" init -q; git -C "$C" config user.email t@t; git -C "$C" config user.
 ok() { echo "  ✓ $1"; }; bad() { echo "  ✗ $1"; rc=1; }
 run() { env VAULT_CONTENT_DIR="$C" EXTRACT_REMOTE_CMD="$STUB" "$@"; }
 
+# ── 0. destination ownership guards: sidecar-less user data is never replaced. ──
+DAY="$(date -u +%F)"
+GUARD_MD="$C/sources/${DAY}-rednote-guard-md.cards.md"
+printf 'user markdown\n' > "$GUARD_MD"
+if run "$MI" /tmp/export.zip --kind image_note --post-id guard-md --platform rednote >/dev/null 2>/tmp/in-guard-md.err; then
+  bad "sidecar-less untracked markdown should be refused"
+elif [[ "$(cat "$GUARD_MD")" == "user markdown" ]] && grep -q 'no coherent ownership sidecar' /tmp/in-guard-md.err; then
+  ok "sidecar-less untracked markdown is refused intact"
+else bad "untracked markdown guard changed data or gave wrong error"; fi
+rm -f "$GUARD_MD"
+
+GUARD_JSON="$C/sources/${DAY}-rednote-guard-json.cards.json"
+printf '{"user":true}\n' > "$GUARD_JSON"
+if run "$MI" /tmp/export.zip --kind image_note --post-id guard-json --platform rednote >/dev/null 2>/tmp/in-guard-json.err; then
+  bad "sidecar-less untracked audit JSON should be refused"
+elif [[ "$(cat "$GUARD_JSON")" == '{"user":true}' ]] && grep -q 'no coherent ownership sidecar' /tmp/in-guard-json.err; then
+  ok "sidecar-less untracked audit JSON is refused intact"
+else bad "untracked audit JSON guard changed data or gave wrong error"; fi
+rm -f "$GUARD_JSON"
+
+GUARD_ASSETS="$C/sources/${DAY}-rednote-guard-assets.cards.md.assets"
+mkdir -p "$GUARD_ASSETS"; printf 'user image\n' > "$GUARD_ASSETS/user.jpg"
+if run "$MI" /tmp/export.zip --kind image_note --post-id guard-assets --platform rednote >/dev/null 2>/tmp/in-guard-assets.err; then
+  bad "sidecar-less untracked assets should be refused"
+elif [[ "$(cat "$GUARD_ASSETS/user.jpg")" == "user image" ]] && grep -q 'no coherent ownership sidecar' /tmp/in-guard-assets.err; then
+  ok "sidecar-less untracked assets dir is refused intact"
+else bad "untracked assets guard changed data or gave wrong error"; fi
+rm -rf "$GUARD_ASSETS"
+
 # ── 1. happy path → committed image_note source ──
 OUT="$(run "$MI" "/tmp/export.zip" --kind image_note --post-id "64fABC" --platform rednote 2>/tmp/in.err)" \
   || { echo "  ✗ image_note ingest exited non-zero:"; sed 's/^/    | /' /tmp/in.err; exit 1; }
@@ -39,6 +68,17 @@ CJ="${MD%.cards.md}.cards.json"
 ADIR="$MD.assets"
 [[ -f "$ADIR/card-00000.jpg" && -f "$ADIR/card-00001.jpg" ]] && ok "card images committed under .cards.md.assets/" || bad "card images missing"
 echo "$OUT" | grep -q "AUDIT_JSON=.*cards.json" && echo "$OUT" | grep -q "DEST=.*cards.md" && ok "emit contract (DEST + AUDIT_JSON)" || { bad "emit contract"; echo "$OUT"; }
+
+# A coherent untracked sidecar only owns the exact evidenced payload. An extra
+# file in its asset directory could be user data and must survive a re-run.
+printf 'user extra\n' > "$ADIR/user-extra.jpg"
+if run "$MI" /tmp/export.zip --kind image_note --post-id 64fABC --platform rednote >/dev/null 2>/tmp/in-extra.err; then
+  bad "coherent orphan with an unlisted asset should be refused"
+elif [[ "$(cat "$ADIR/user-extra.jpg")" == "user extra" ]] \
+     && grep -q 'unlisted or does not match' /tmp/in-extra.err; then
+  ok "coherent sidecar does not authorize deletion of an unlisted asset"
+else bad "unlisted orphan asset changed or wrong error"; fi
+rm -f "$ADIR/user-extra.jpg"
 
 # ── 2. lint drift: evidence_artifacts (cards.json + images + bundle) all verify ──
 git -C "$C" add -A >/dev/null; git -C "$C" commit -qm c1

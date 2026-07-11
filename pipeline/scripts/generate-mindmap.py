@@ -12,11 +12,12 @@ NOT an index. A reading/argument map (schema §1 `type: map`,
 plan/expansion-plan.md §15): it captures the author's *thinking flow* —
 claims, questions and hypotheses linked by TYPED, DIRECTED relations —
 plus a chapter-by-chapter reading guide. The structure is extracted by
-one LLM pass over the SOURCE TEXT (the argument lives in the prose, not
-in the wiki link-graph), and is citation-grounded: every claim node and
-guide line carries `[src:<id>#<chapter>]`, so a human can verify it
-against the real source. The map is a derived view — never itself a
-source (schema §6).
+one LLM pass over validated chapter intelligence when a complete cache
+is available, with the SOURCE TEXT as an explicit fallback. It is
+citation-grounded: every claim node and guide line carries a canonical
+`[src:<id>#sec=<encoded-chapter>]`, so a human can verify it against the real
+source without delimiter-ambiguous anchors.
+The map is a derived view — never itself a source (schema §6).
 
 Run from vault root:
     scripts/generate-mindmap.py                    # all sources in the log
@@ -25,11 +26,13 @@ Run from vault root:
     scripts/generate-mindmap.py --dry-run
 
 Determinism / cost: the LLM JSON is cached in `.wiki/mindmap-cache/`
-keyed by source sha256 + prompt version. Render is deterministic from
-the cache, so re-runs are idempotent and free; the LLM is called only on
-first run, on `--refresh`, or when the source changes. LLM command comes
-from the shared LLM client. `LLM_CMD` remains available as an advanced
-stdin/stdout command override.
+keyed by input identity + prompt version. The input identity is either
+the source sha256 or a digest of the complete validated chapter-
+intelligence set. Render is deterministic from the cache, so re-runs are
+idempotent and free; the LLM is called only on first run, on `--refresh`,
+or when its selected input changes. LLM command comes from the shared LLM
+client. `LLM_CMD` remains available as an advanced stdin/stdout command
+override.
 """
 
 from __future__ import annotations
@@ -49,7 +52,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _util import default_vault_root  # noqa: E402
 from autolink import _autolink_body, _build_entries  # noqa: E402
+import chapter_intelligence as ci  # noqa: E402
 import derived_lib as dl  # noqa: E402
+from source_citations import source_citation  # noqa: E402
 
 TOOLING_ROOT = Path(__file__).resolve().parent.parent  # tooling repo (scripts/, schema.md)
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
@@ -58,6 +63,7 @@ MAPS_DIR = WIKI_DIR / "_maps"
 SOURCES_DIR = VAULT_ROOT / "sources"
 LOG_PATH = VAULT_ROOT / ".wiki" / "log.md"
 CACHE_DIR = VAULT_ROOT / ".wiki" / "mindmap-cache"
+CHAPTER_INTELLIGENCE_CACHE_DIR = VAULT_ROOT / ".wiki" / "chapter-intelligence-cache"
 EXTRACT = TOOLING_ROOT / "scripts" / "extract.py"
 
 PROMPT_VERSION = "v2"
@@ -90,6 +96,89 @@ def chapter_order(source_id: str) -> list[str]:
         return []
     lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
     return dl.chapter_order_from_lines(lines, source_id)
+
+
+def load_chapter_intelligence(
+    source_id: str,
+    source_sha256: str,
+    chapters: list[str],
+) -> tuple[dict | None, str]:
+    """Load one current, validated artifact for every log chapter.
+
+    Chapter text is intentionally unavailable here. As in
+    ``discover_prior_spines``, source spans were checked before the analyzer's
+    atomic cache write. This consumer revalidates each artifact and its cache
+    manifest without assuming the producer's model is still configured.
+    """
+    if not chapters:
+        return None, "no chapter labels in .wiki/log.md"
+
+    expected_labels = set(chapters)
+    artifacts_by_label: dict[str, list[tuple[int, str, dict]]] = {
+        label: [] for label in chapters
+    }
+    # The analyzer's shared cache scanner requires a manifest and checks the
+    # artifact/manifest agreement and ordered_sections. This consumer does not
+    # assume the producer's model/schema/template is still configured, so it
+    # applies no further producer-identity predicate — only the log's labels.
+    for section, modified_ns, name, validated, _inputs in ci.scan_validated_entries(
+        CHAPTER_INTELLIGENCE_CACHE_DIR,
+        source_id=source_id,
+        source_sha256=source_sha256,
+        prompt_version=ci.PROMPT_VERSION,
+        ordered_sections=chapters,
+    ):
+        if section in expected_labels:
+            artifacts_by_label[section].append((modified_ns, name, validated))
+
+    incomplete = [label for label in chapters if not artifacts_by_label[label]]
+    if incomplete:
+        return None, "incomplete chapter intelligence: " + ", ".join(incomplete)
+
+    selected = {
+        label: max(artifacts_by_label[label], key=lambda item: (item[0], item[1]))[2]
+        for label in chapters
+    }
+
+    return {
+        "schema": ci.SCHEMA_VERSION,
+        "artifacts": [selected[label] for label in chapters],
+    }, f"complete chapter intelligence ({len(chapters)} chapters)"
+
+
+def compact_intelligence_input(bundle: dict) -> dict:
+    """Project validated artifacts to the evidence needed by the map model."""
+    compact_chapters = []
+    for artifact in bundle["artifacts"]:
+        compact_chapters.append(
+            {
+                "label": artifact["section_label"],
+                "question": artifact["central_question"],
+                "claim": artifact["chapter_claim"],
+                "builds_on": artifact["builds_on"],
+                "claims": [
+                    {key: claim[key] for key in ci.CLAIM_PROJECTION_FIELDS}
+                    for claim in artifact["claims"]
+                ],
+                "relations": artifact["relations"],
+                "entities": [
+                    {key: entity[key] for key in ci.ENTITY_PROJECTION_FIELDS}
+                    for entity in artifact["entities"]
+                ],
+                "topics": artifact["topics"],
+            }
+        )
+    return {
+        "schema": "mindmap-chapter-intelligence-input/1",
+        "chapters": compact_chapters,
+    }
+
+
+def intelligence_cache_identity(compact_input: dict) -> str:
+    """Hash exactly the compact intelligence object supplied to the map model."""
+    # The leading non-hex marker guarantees separation from raw source SHA
+    # identities while retaining 44 digest bits in derived_lib's sha12 path.
+    return "i" + ci.json_digest(compact_input)
 
 
 def mermaid_label(s: str) -> str:
@@ -145,10 +234,22 @@ def autolink_prose(s: str) -> str:
 # ─── LLM extraction ──────────────────────────────────────────────────────────
 
 
-def build_prompt(text: str, chapters: list[str], title: str) -> str:
-    chap_list = ", ".join(chapters) if chapters else "(use the 第N章 / Chapter-N headings in the text)"
+def _build_prompt(
+    evidence: str,
+    chapters: list[str],
+    title: str,
+    *,
+    evidence_instruction: str,
+    evidence_heading: str,
+    evidence_rules: str = "",
+) -> str:
+    chap_list = (
+        ", ".join(chapters)
+        if chapters
+        else "(use the 第N章 / Chapter-N headings in the text)"
+    )
     return f"""You map the ARGUMENT of a book — its author's reasoning flow — for a
-reading aid. Read the SOURCE TEXT and output ONE JSON object (no prose,
+reading aid. {evidence_instruction} and output ONE JSON object (no prose,
 no markdown fences) with exactly this shape:
 
 {{
@@ -184,11 +285,41 @@ Rules:
 - Every node's `chapter` MUST be one of: {chap_list}.
 - `id`s are short ascii tokens (n1, n2, …), unique; edges reference them.
 - Labels in the book's own language ({title!r} is in Chinese → Chinese labels).
-- Output ONLY the JSON object.
+{evidence_rules}- Output ONLY the JSON object.
 
-SOURCE TEXT:
-{text}
+{evidence_heading}:
+{evidence}
 """
+
+
+def build_prompt(text: str, chapters: list[str], title: str) -> str:
+    return _build_prompt(
+        text,
+        chapters,
+        title,
+        evidence_instruction="Read the SOURCE TEXT",
+        evidence_heading="SOURCE TEXT",
+    )
+
+
+def build_intelligence_prompt(compact_input: dict, chapters: list[str], title: str) -> str:
+    compact = ci.canonical_json(compact_input)
+    rules = """- CHAPTER INTELLIGENCE is already source-grounded and validated. Use its
+  chapter question/claim/builds_on spine, claims, and directed relations as
+  the evidence for the argument flow; do not invent claims beyond it.
+- Claim ids are local to each chapter. Preserve chapter provenance when
+  turning them into globally unique map nodes.
+- Entities and topics provide context for precise claim labels. They are not
+  themselves argument nodes.
+"""
+    return _build_prompt(
+        compact,
+        chapters,
+        title,
+        evidence_instruction="Read the VALIDATED CHAPTER INTELLIGENCE",
+        evidence_heading="VALIDATED CHAPTER INTELLIGENCE",
+        evidence_rules=rules,
+    )
 
 
 def validate(obj: dict, chapters: list[str]) -> dict:
@@ -267,12 +398,12 @@ def render_map(source_id: str, title: str, chapters: list[str], data: dict,
               [c for c in by_chapter if c not in chapters]
 
     def cite(chap: str) -> str:
-        return f"[src:{source_id}#{chap}]" if chap and chap in chapters else f"[src:{source_id}]"
+        return source_citation(source_id, chap if chap and chap in chapters else "")
 
     # ---- Mermaid argument flow ----
     mer = ["```mermaid", "flowchart TD"]
-    for ci, chap in enumerate(ordered):
-        mer.append(f'  subgraph c{ci}["{mermaid_label(chap)}"]')
+    for chapter_index, chap in enumerate(ordered):
+        mer.append(f'  subgraph c{chapter_index}["{mermaid_label(chap)}"]')
         for n in by_chapter[chap]:
             o, c = KIND_SHAPE.get(n["kind"], ('["', '"]'))
             mer.append(f'    {n["id"]}{o}{mermaid_node_label(n["label"])}{c}')
@@ -342,16 +473,40 @@ def render_map(source_id: str, title: str, chapters: list[str], data: dict,
 def generate_one(source_id: str, meta: dict, refresh: bool, dry_run: bool) -> tuple[bool, str]:
     chapters = chapter_order(source_id)
     sha = meta["sha256"]
-    data = None if refresh else dl.load_flat_cache(CACHE_DIR, PROMPT_VERSION, source_id, sha)
+    intelligence, intelligence_status = load_chapter_intelligence(
+        source_id, sha, chapters
+    )
+    if intelligence is not None:
+        compact_intelligence = compact_intelligence_input(intelligence)
+        input_identity = intelligence_cache_identity(compact_intelligence)
+        input_path = intelligence_status
+    else:
+        compact_intelligence = None
+        input_identity = sha
+        input_path = f"raw-source fallback ({intelligence_status})"
+
+    data = (
+        None
+        if refresh
+        else dl.load_flat_cache(CACHE_DIR, PROMPT_VERSION, source_id, input_identity)
+    )
     used_llm = False
     if data is None:
         if dry_run:
-            return False, f"  ⟳ {source_id}: needs LLM extraction (no cache) — skipped under --dry-run"
-        text = dl.extract_source_text(EXTRACT, meta["asset"], SOURCE_CHAR_LIMIT)
-        prompt = build_prompt(text, chapters, meta["title"])
+            return False, (
+                f"  ⟳ {source_id}: needs LLM extraction via {input_path} "
+                "(no map cache) — skipped under --dry-run"
+            )
+        if intelligence is not None:
+            prompt = build_intelligence_prompt(
+                compact_intelligence, chapters, meta["title"]
+            )
+        else:
+            text = dl.extract_source_text(EXTRACT, meta["asset"], SOURCE_CHAR_LIMIT)
+            prompt = build_prompt(text, chapters, meta["title"])
         raw = dl.call_llm(prompt, LLM_TIMEOUT_S)
         data = validate(dl.extract_json(raw), chapters)
-        dl.save_flat_cache(CACHE_DIR, PROMPT_VERSION, source_id, sha, data)
+        dl.save_flat_cache(CACHE_DIR, PROMPT_VERSION, source_id, input_identity, data)
         used_llm = True
 
     chash = content_hash(data)
@@ -362,7 +517,7 @@ def generate_one(source_id: str, meta: dict, refresh: bool, dry_run: bool) -> tu
     prior = dl.existing_last_generated(existing)
     display = dl.clean_title(meta["title"])
     preserved = render_map(source_id, display, chapters, data, chash, prior or today, existing)
-    tag = " [LLM]" if used_llm else ""
+    tag = f" [{input_path}{', LLM' if used_llm else ''}]"
     if existing is not None and existing == preserved:
         return False, f"  = {path.relative_to(VAULT_ROOT)} unchanged ({len(data['nodes'])} nodes){tag}"
     content = render_map(source_id, display, chapters, data, chash, today, existing)
@@ -397,18 +552,20 @@ def main() -> int:
                     targets.append(m.group(1))
 
     written = 0
+    failures = 0
     for sid in targets:
         try:
             wrote, msg = generate_one(sid, sources[sid], args.refresh, args.dry_run)
         except Exception as exc:  # noqa: BLE001 — surface, don't crash the batch
             wrote, msg = False, f"  ✗ {sid}: {exc}"
+            failures += 1
         written += 1 if wrote else 0
         print(msg)
 
     print()
     label = "would change" if args.dry_run else "written/updated"
     print(f"generate-mindmap: {written} map(s) {label} of {len(targets)} source(s).")
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

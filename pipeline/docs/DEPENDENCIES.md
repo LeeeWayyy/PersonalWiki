@@ -32,7 +32,7 @@ Used by `ingest.py` and the `scripts/`. All present on this machine.
 | Tool | Purpose | Install (macOS) | Verify |
 |---|---|---|---|
 | `git` | version control / audit trail | `brew install git` | `git --version` |
-| `ripgrep` (`rg`) | keyword pre-pass, conflict scan | `brew install ripgrep` | `rg --version` |
+| `ripgrep` (`rg`) | intelligence-based candidate retrieval, conflict scan | `brew install ripgrep` | `rg --version` |
 | `curl` | URL fetch | (system) | `curl --version` |
 | `shasum` | sha256 of sources | (system) | `shasum -a 256 <f>` |
 | `python3` | scripts runtime (≥3.11) | `brew install python@3.11` / pyenv | `python3 --version` |

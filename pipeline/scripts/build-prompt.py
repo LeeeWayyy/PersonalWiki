@@ -13,7 +13,7 @@ Inputs (all from ingest.py variables / files):
     --source-id --sha256 --added --origin-type --origin-ref --basename
     --section-label   (may be empty → a <none …> default that embeds the id)
     --all-source-ids  (newline-separated, may be empty)
-    --source-terms-file salient source terms, one per line (may be empty)
+    --source-intelligence-file validated chapter-intelligence/1 JSON
     --text-file       extracted SOURCE_TEXT
     --candidates-file one candidate path per line (may be empty/missing)
     --expand-file     paths to inline FULL; others are digests (may be empty)
@@ -30,9 +30,13 @@ tooling).
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
+
+import chapter_intelligence as ci
+from source_citations import source_citation
 
 from _util import default_vault_root
 
@@ -52,6 +56,38 @@ CORE_SCHEMA_SECTIONS = [
     "Prose Shape",
 ]
 
+# The analyzer artifact contains provenance and validation bookkeeping that the
+# renderer does not need because SOURCE_TEXT remains its evidence authority.
+# Keep this projection explicit and ordered so prompt bytes are stable and new
+# analyzer fields do not silently increase every renderer call.
+SOURCE_INTELLIGENCE_FIELDS = (
+    "language",
+    "summary",
+    "central_question",
+    "chapter_claim",
+    "builds_on",
+    "claims",
+    "entities",
+    "topics",
+    "relations",
+    "page_candidates",
+    "open_questions",
+)
+SOURCE_INTELLIGENCE_ITEM_FIELDS = {
+    "claims": ci.CLAIM_PROJECTION_FIELDS,
+    "entities": ci.ENTITY_PROJECTION_FIELDS,
+    "topics": ("name", "question", "synthesis_angle", "importance", "claim_ids"),
+    "relations": ("from", "to", "rel"),
+    "page_candidates": (
+        "page_type",
+        "name",
+        "importance",
+        "required",
+        "claim_ids",
+        "reason",
+    ),
+}
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -61,6 +97,36 @@ def _nonempty_lines(path: Path) -> list[str]:
     if not path.is_file() or path.stat().st_size == 0:
         return []
     return [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _compact_source_intelligence(path: Path) -> str:
+    raw = _read(path).strip()
+    if not raw:
+        return "(not available)"
+
+    artifact = json.loads(raw)
+    if not isinstance(artifact, dict):
+        raise ValueError("source intelligence must be a JSON object")
+
+    projection: dict[str, object] = {}
+    for field in SOURCE_INTELLIGENCE_FIELDS:
+        if field not in artifact:
+            continue
+        value = artifact[field]
+        item_fields = SOURCE_INTELLIGENCE_ITEM_FIELDS.get(field)
+        if item_fields is not None:
+            if not isinstance(value, list):
+                raise ValueError(f"source intelligence field {field!r} must be a list")
+            projected_items = []
+            for index, item in enumerate(value):
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"source intelligence field {field!r}[{index}] must be an object"
+                    )
+                projected_items.append({key: item[key] for key in item_fields if key in item})
+            value = projected_items
+        projection[field] = value
+    return json.dumps(projection, ensure_ascii=False, separators=(",", ":"))
 
 
 def _split_schema_blocks(text: str) -> tuple[str, dict[str, str]]:
@@ -143,14 +209,20 @@ def build_candidate_blob(candidates_file: Path, expand_file: Path, out) -> None:
             continue
         out.write(f"\n### {p}\n```markdown\n")
         if p in expand_paths:
-            out.write(_read(Path(p)))
+            content = _read(Path(p))
         else:
             res = subprocess.run(
                 [str(SCRIPTS / "page-digest.py"), p],
                 capture_output=True, text=True,
             )
-            out.write(res.stdout if res.returncode == 0 else _read(Path(p)))
-        out.write("\n```\n")
+            content = res.stdout if res.returncode == 0 else _read(Path(p))
+        # The fence delimiter is prompt syntax, not candidate file content.
+        # Add a delimiter newline only when the content does not already end in
+        # one, so the model sees no synthetic blank line at EOF.
+        out.write(content)
+        if content and not content.endswith("\n"):
+            out.write("\n")
+        out.write("```\n")
 
 
 def main() -> int:
@@ -163,7 +235,7 @@ def main() -> int:
     ap.add_argument("--basename", required=True)
     ap.add_argument("--section-label", default="")
     ap.add_argument("--all-source-ids", default="")
-    ap.add_argument("--source-terms-file", required=True)
+    ap.add_argument("--source-intelligence-file", required=True)
     ap.add_argument("--text-file", required=True)
     ap.add_argument("--candidates-file", required=True)
     ap.add_argument("--expand-file", required=True)
@@ -199,14 +271,18 @@ def main() -> int:
         f"origin_ref: {args.origin_ref}\n"
         f"basename: {args.basename}\n"
     )
-    # 6. SOURCE_KEY_TERMS
-    out.write("\n## SOURCE_KEY_TERMS\n")
-    terms = _read(Path(args.source_terms_file)).strip()
-    out.write(terms if terms else "(not available)")
+    # 6. SOURCE_INTELLIGENCE
+    out.write("\n## SOURCE_INTELLIGENCE\n")
+    out.write(_compact_source_intelligence(Path(args.source_intelligence_file)))
     out.write("\n")
-    # 7. SECTION_LABEL — bash default embeds the source_id.
+    # 7. SECTION_LABEL + exact citation token. Encoding is deterministic here;
+    # the LLM must copy the token rather than reproduce the codec.
     section = args.section_label or f"<none — cite as bare [src:{args.source_id}]>"
     out.write(f"\n## SECTION_LABEL\n{section}\n")
+    out.write(
+        f"\n## SECTION_CITATION\n"
+        f"{source_citation(args.source_id, args.section_label)}\n"
+    )
     # 8. SOURCE_TEXT
     out.write("\n## SOURCE_TEXT\n")
     out.write(_read(Path(args.text_file)))

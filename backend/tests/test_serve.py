@@ -87,3 +87,104 @@ def test_configure_environment_rejects_missing_content(tmp_path):
         assert "wiki folder not found" in str(exc)
     else:
         raise AssertionError("missing content should fail backend startup")
+
+
+def test_require_single_worker_accepts_default_and_single_worker_env():
+    serve.require_single_worker([], {})
+    serve.require_single_worker(["--log-level", "debug"], {})
+    serve.require_single_worker([], {"UVICORN_WORKERS": "1", "WEB_CONCURRENCY": "8"})
+    serve.require_single_worker([], {"WEB_CONCURRENCY": " 1 "})
+
+
+def test_require_single_worker_rejects_cli_and_environment_counts():
+    for args, env in [
+        (["--workers", "2"], {}),
+        (["--workers", "1"], {}),
+        (["--workers=3"], {}),
+        (["-w", "4"], {}),
+        (["-w=1"], {}),
+        ([], {"WEB_CONCURRENCY": "2"}),
+        ([], {"UVICORN_WORKERS": "2", "WEB_CONCURRENCY": "1"}),
+        ([], {"UVICORN_WORKERS": "abc"}),
+    ]:
+        try:
+            serve.require_single_worker(args, env)
+        except serve.ServeConfigError as exc:
+            assert "exactly one Uvicorn worker" in str(exc)
+            assert "process-local" in str(exc)
+        else:
+            raise AssertionError(f"multi-worker startup should fail: args={args!r}, env={env!r}")
+
+
+def test_exec_uvicorn_forces_one_worker_after_user_arguments(monkeypatch, tmp_path):
+    config = serve.RuntimeConfig(
+        backend_dir=tmp_path,
+        content_dir=tmp_path / "content",
+        host="127.0.0.1",
+        port=8787,
+    )
+    called = {}
+    monkeypatch.setattr(serve.os, "chdir", lambda path: called.setdefault("cwd", path))
+    monkeypatch.setattr(
+        serve.os,
+        "execvpe",
+        lambda executable, argv, environ: called.update(
+            executable=executable, argv=argv, environ=environ
+        ),
+    )
+
+    serve.exec_uvicorn(config, ["--log-level", "debug"])
+
+    assert called["cwd"] == tmp_path
+    assert called["argv"][-4:] == ["--log-level", "debug", "--workers", "1"]
+
+
+def test_main_rejects_multiple_workers_before_exec(monkeypatch, capsys, tmp_path):
+    config = serve.RuntimeConfig(
+        backend_dir=tmp_path,
+        content_dir=tmp_path / "content",
+        host="127.0.0.1",
+        port=8787,
+    )
+    called = []
+    monkeypatch.setattr(serve, "configure_environment", lambda: config)
+    monkeypatch.setattr(serve, "exec_uvicorn", lambda *_args: called.append(True))
+
+    assert serve.main(["--workers", "2"]) == 1
+    assert called == []
+    assert "exactly one Uvicorn worker" in capsys.readouterr().err
+
+
+def test_main_rejects_web_concurrency_on_run_path(monkeypatch, capsys, tmp_path):
+    config = serve.RuntimeConfig(
+        backend_dir=tmp_path,
+        content_dir=tmp_path / "content",
+        host="127.0.0.1",
+        port=8787,
+    )
+    called = []
+    monkeypatch.setattr(serve, "configure_environment", lambda: config)
+    monkeypatch.setattr(serve, "exec_uvicorn", lambda *_args: called.append(True))
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+
+    assert serve.main([]) == 1
+    assert called == []
+    assert "process-local" in capsys.readouterr().err
+
+
+def test_main_rejects_uvicorn_workers_on_run_path(monkeypatch, capsys, tmp_path):
+    config = serve.RuntimeConfig(
+        backend_dir=tmp_path,
+        content_dir=tmp_path / "content",
+        host="127.0.0.1",
+        port=8787,
+    )
+    called = []
+    monkeypatch.setattr(serve, "configure_environment", lambda: config)
+    monkeypatch.setattr(serve, "exec_uvicorn", lambda *_args: called.append(True))
+    monkeypatch.setenv("UVICORN_WORKERS", "2")
+    monkeypatch.setenv("WEB_CONCURRENCY", "1")
+
+    assert serve.main([]) == 1
+    assert called == []
+    assert "process-local" in capsys.readouterr().err

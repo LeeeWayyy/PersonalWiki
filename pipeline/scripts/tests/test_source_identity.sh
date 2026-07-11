@@ -122,7 +122,79 @@ SH
   else
     fail "url fetch bounds missing: args=$(cat "$TMP/curl.args" 2>/dev/null) err=$(cat "$TMP/url.err" 2>/dev/null)"
   fi
+
+  # B5: transactional mode reports every future path before publication and
+  # waits for the parent acknowledgement. Killing it before PUBLISH must leave
+  # the vault untouched.
+  printf 'handshake cancellation source\n' > /tmp/si_handshake_cancel.txt
+  if SI="$SI" python3 - /tmp/si_handshake_cancel.txt <<'PY'
+import os, shlex, subprocess, sys
+p = subprocess.Popen(
+    [os.environ["SI"], "--reserve-handshake", sys.argv[1]],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+)
+values = {}
+for line in p.stdout:
+    key, sep, raw = line.partition("=")
+    if sep:
+        parts = shlex.split(raw)
+        values[key] = parts[0] if parts else ""
+    if key == "IDENTITY_READY":
+        break
+assert values["IDENTITY_READY"] == "new", values
+assert not os.path.exists(values["DEST"]), values
+assert not os.path.exists(values["SIDECAR"]), values
+p.terminate()
+p.wait(timeout=5)
+assert not os.path.exists(values["DEST"]), values
+assert not os.path.exists(values["SIDECAR"]), values
+PY
+  then pass "reservation handshake: cancel before PUBLISH leaves no vault artifacts"
+  else fail "reservation handshake cancellation safety"; fi
+
+  # B6: after the parent has read and registered the paths, PUBLISH creates the
+  # asset and sidecar and exits with the same machine-readable contract.
+  printf 'handshake publication source\n' > /tmp/si_handshake_publish.txt
+  if SI="$SI" python3 - /tmp/si_handshake_publish.txt <<'PY'
+import os, shlex, subprocess, sys
+p = subprocess.Popen(
+    [os.environ["SI"], "--reserve-handshake", sys.argv[1]],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+)
+values = {}
+for line in p.stdout:
+    key, sep, raw = line.partition("=")
+    if sep:
+        parts = shlex.split(raw)
+        values[key] = parts[0] if parts else ""
+    if key == "IDENTITY_READY":
+        break
+assert values["IDENTITY_READY"] == "new", values
+assert not os.path.exists(values["DEST"]), values
+p.stdin.write("PUBLISH\n"); p.stdin.flush()
+_out, err = p.communicate(timeout=5)
+assert p.returncode == 0, err
+assert os.path.isfile(values["DEST"]), values
+assert os.path.isfile(values["SIDECAR"]), values
+PY
+  then pass "reservation handshake: publication starts only after parent acknowledgement"
+  else fail "reservation handshake publication"; fi
+
+  # B7: the sidecar path is independently protected. Previously a user-created
+  # untracked sidecar was overwritten whenever the sibling asset was absent.
+  printf 'collision source\n' > /tmp/si_sidecar_collision.txt
+  COLLISION_SC="sources/$(date -u +%F)-si_sidecar_collision.txt.md"
+  printf 'user-owned sidecar\n' > "$COLLISION_SC"
+  if "$SI" /tmp/si_sidecar_collision.txt >/dev/null 2>"$TMP/sidecar.err"; then
+    fail "pre-existing untracked sidecar should be refused"
+  elif [[ "$(cat "$COLLISION_SC")" == "user-owned sidecar" ]] \
+       && grep -q 'refusing to overwrite pre-existing data' "$TMP/sidecar.err"; then
+    pass "pre-existing untracked sidecar is refused without modification"
+  else
+    fail "pre-existing sidecar was changed or wrong error: $(cat "$TMP/sidecar.err")"
+  fi
   rm -f /tmp/si_dup.txt /tmp/si_new.txt /tmp/si_dup2.txt
+  rm -f /tmp/si_handshake_cancel.txt /tmp/si_handshake_publish.txt /tmp/si_sidecar_collision.txt
   exit $rc
 ) || rc=1
 

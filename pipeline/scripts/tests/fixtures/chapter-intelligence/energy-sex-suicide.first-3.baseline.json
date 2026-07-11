@@ -1,0 +1,129 @@
+{
+  "schema": "chapter-intelligence-baseline/1",
+  "title": "能量,性,自杀 线粒体与生命的意义",
+  "source_sha256": "734d55d43b8a1618f12123d5beeb6f9efee4e9af716bca59b8c7ae8a09b87ea3",
+  "chapters": [
+    {
+      "label": "第一章 有希望的怪物：真核细胞的起源",
+      "member_sections": [
+        "第一章 有希望的怪物：真核细胞的起源",
+        "第一节 最深的演化鸿沟",
+        "第二节 追寻祖先",
+        "第三节 氢假说"
+      ],
+      "required_entity_alias_groups": [
+        ["α-变形菌", "Alpha-proteobacteria"],
+        ["产甲烷菌", "Methanogen"],
+        ["古真核生物", "Archezoa"],
+        ["古细菌", "古菌", "Archaea"],
+        ["氢假说", "Hydrogen hypothesis"],
+        ["氢化酶体", "Hydrogenosome"],
+        ["真核细胞", "Eukaryotic cell"],
+        ["线粒体", "Mitochondria"],
+        ["细胞骨架", "Cytoskeleton"]
+      ],
+      "required_topic_alias_groups": [
+        ["真核细胞起源", "Origin of eukaryotes"]
+      ],
+      "analysis_only_concepts": [
+        "内共生",
+        "硫酸盐还原菌",
+        "ATP出口转运蛋白"
+      ],
+      "required_claim_term_groups": [
+        ["真核", "线粒体", "所有"],
+        ["古真核", "线粒体"],
+        ["氢假说", "产甲烷", "α-变形菌"],
+        ["氢化酶体", "共同祖先"],
+        ["基因转移", "ATP", "共生"],
+        ["线粒体", "复杂性", "能量"]
+      ],
+      "required_relation_kinds": [
+        "supports",
+        "explains"
+      ]
+    },
+    {
+      "label": "第二章 生命力：质子动力与生命起源",
+      "member_sections": [
+        "第二章 生命力：质子动力与生命起源",
+        "第四节 呼吸作用的意义",
+        "第五节 质子动力",
+        "第六节 生命的起源"
+      ],
+      "required_entity_alias_groups": [
+        ["ATP"],
+        ["ATP酶", "ATP synthase"],
+        ["化学渗透", "Chemiosmosis"],
+        ["呼吸链", "Respiratory chain"],
+        ["彼得·米切尔", "Peter Mitchell"],
+        ["质子驱动力", "Proton motive force"]
+      ],
+      "required_topic_alias_groups": [
+        ["生命起源", "Origin of life"],
+        ["真核细胞起源", "Origin of eukaryotes"]
+      ],
+      "analysis_only_concepts": [
+        "LUCA",
+        "RNA世界",
+        "发酵",
+        "碱性热液喷口",
+        "铁硫微室"
+      ],
+      "required_claim_term_groups": [
+        ["呼吸链", "氧化还原", "质子"],
+        ["电位", "pH", "质子驱动力"],
+        ["ATP酶", "质子", "ATP"],
+        ["完整膜", "解偶联", "化学渗透"],
+        ["细菌", "古菌", "膜"],
+        ["碱性热液", "梯度", "生命起源"]
+      ],
+      "required_relation_kinds": [
+        "causes",
+        "leads-to"
+      ]
+    },
+    {
+      "label": "第三章 内幕交易：复杂性的基础",
+      "member_sections": [
+        "第三章 内幕交易：复杂性的基础",
+        "第七节 细菌为何如此简单",
+        "第八节 为什么线粒体使复杂性成为可能"
+      ],
+      "required_entity_alias_groups": [
+        ["吞噬作用", "Phagocytosis"],
+        ["核内线粒体序列", "NUMTs"],
+        ["横向基因转移", "Horizontal gene transfer"],
+        ["细菌", "Bacteria"]
+      ],
+      "required_topic_alias_groups": [
+        ["线粒体基因保留", "Mitochondrial gene retention"]
+      ],
+      "analysis_only_concepts": [
+        "线粒体DNA",
+        "局部氧化还原调控",
+        "ATP出口转运蛋白"
+      ],
+      "required_claim_term_groups": [
+        ["细菌", "快速复制", "小基因组"],
+        ["细菌", "表面积", "体积", "呼吸"],
+        ["线粒体", "内部", "能量膜", "大型细胞"],
+        ["NUMTs", "线粒体", "细胞核"],
+        ["呼吸链", "基因保留", "氧化还原"],
+        ["氢化酶体", "基因组", "丢失"],
+        ["内共生", "ATP出口", "过渡"]
+      ],
+      "required_relation_kinds": [
+        "explains",
+        "causes"
+      ]
+    }
+  ],
+  "forbidden_page_candidates": [
+    "第一章 有希望的怪物：真核细胞的起源",
+    "第二章 生命力：质子动力与生命起源",
+    "第三章 内幕交易：复杂性的基础",
+    "有希望的怪物",
+    "细菌为何如此简单"
+  ]
+}

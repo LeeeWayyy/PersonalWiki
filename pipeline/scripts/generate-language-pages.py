@@ -56,6 +56,7 @@ import fugashi
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _util import default_vault_root  # noqa: E402
 import derived_lib as dl  # noqa: E402
+from source_citations import source_citation  # noqa: E402
 
 TOOLING_ROOT = Path(__file__).resolve().parent.parent
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
@@ -100,13 +101,11 @@ def has_kanji(s: str) -> bool:
 
 def chapter_key(raw_title: str) -> str:
     """Canonical chapter identity used EVERYWHERE — render slug, log `#chapter`
-    token, citation anchor, and the idempotency dedup key — so a metachar/space
-    heading can't render one page but log/dedupe another. Besides collapsing
-    whitespace, it strips the ASCII chars that would break the structured
-    contexts the key is embedded in: `[ ] #` (citation anchor `[src:#<key>]`),
-    `|` (markdown table cell), and `:` (the `…#<key>  pages:` log delimiter, via
-    `LOG_LINE_RX`). CJK and ordinary text are unaffected."""
-    cleaned = re.sub(r"[\[\]#|:]", " ", raw_title)
+    token, citation anchor, and the idempotency dedup key. Citation punctuation
+    is preserved because source_citation() percent-encodes it. Only `|` and `:`
+    remain stripped for the Markdown/log contexts that still embed the display
+    label directly; whitespace is collapsed for stable identity."""
+    cleaned = re.sub(r"[|:]", " ", raw_title)
     return re.sub(r"\s+", " ", cleaned).strip() or WHOLE_LABEL
 
 
@@ -322,11 +321,11 @@ def chapter_data(meta: dict, idx: int, chapter: str, section: str | None,
 
 
 def cite(source_id: str, chapter: str) -> str:
-    return f"[src:{source_id}#{chapter_key(chapter)}]"
+    return source_citation(source_id, chapter_key(chapter))
 
 
 def source_cite(source_id: str) -> str:
-    return f"[src:{source_id}]"
+    return source_citation(source_id)
 
 
 def esc(s: str) -> str:

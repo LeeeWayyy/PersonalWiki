@@ -47,7 +47,7 @@ grep -qF "[src:${sidA}#card-1]" "$CROOT/wiki/entities/note1.md" && ok "note1 cit
 
 # ── run 2: --reocr → supersede A with B ──
 echo "  run 2: ingest post P1 --reocr (stub)…"
-run_ingest note2 --reocr > "$TMP/out2" 2>&1 || { echo "  ✗ run2 (--reocr) failed:"; sed 's/^/    | /' "$TMP/out2" | tail -30; exit 1; }
+STUB_TEXT_VARIANT=reocr run_ingest note2 --reocr > "$TMP/out2" 2>&1 || { echo "  ✗ run2 (--reocr) failed:"; sed 's/^/    | /' "$TMP/out2" | tail -30; exit 1; }
 sidB="$(git -C "$CROOT" log -1 --format=%s | sed -nE 's/^ingest: ([0-9A-Z]{26}).*/\1/p')"
 [[ -n "$sidB" && "$sidB" != "$sidA" ]] && ok "run2 committed a NEW source B=$sidB" || bad "run2 did not mint a new source"
 

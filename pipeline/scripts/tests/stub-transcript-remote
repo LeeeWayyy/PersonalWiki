@@ -27,13 +27,16 @@ for i, a in enumerate(args):
         out = args[i + 1]
 src = next((a for a in args if a.startswith("http")), "<submitted>")
 vid_m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", src)
+variant = os.environ.get("STUB_TEXT_VARIANT", "").strip()
+variant_suffix = f" {variant}" if variant else ""
 
 doc = {
     "segments": [
         {"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00",
          "text": "This stub transcript discusses mitochondria and ATP in cells.", "words": []},
         {"start": 4.0, "end": 9.0, "speaker": "SPEAKER_01",
-         "text": "The e2e entity is the subject of this end-to-end media ingest test.", "words": []},
+         "text": "The e2e entity is the subject of this end-to-end media ingest test."
+                 + variant_suffix, "words": []},
         {"start": 9.0, "end": 14.0, "speaker": "SPEAKER_00",
          "text": "Energy and biology are recurring themes throughout the discussion.", "words": []},
     ],

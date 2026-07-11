@@ -43,6 +43,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # scripts/ — for med
 from _util import default_vault_root  # noqa: E402
 import media_resolver  # noqa: E402  (shared evidence-completeness check, §8.0)
 from media_resolver import parse_frontmatter, sha256_of  # noqa: E402  (single source of truth)
+from source_citations import (  # noqa: E402
+    BRACKETED_CITATION_RX,
+    iter_source_citations,
+)
 
 TOOLING_ROOT = Path(__file__).resolve().parent.parent  # tooling repo (scripts/, schema.md)
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
@@ -66,10 +70,6 @@ LOOSE_BULLET_RX = re.compile(r"^- ")
 # legal interior whitespace (e.g. `[src:a, src:b]`) and any anchor form
 # (`#§1`, `#第一章`), while preventing matches in headings/prose like
 # `### From src:01K…` (where `src:` is not inside brackets).
-BRACKETED_CITATION_RX = re.compile(r"\[([^\[\]]*src:[^\[\]]*)\]")
-SRC_ID_RX = re.compile(r"src:([A-Z0-9]{26})")
-
-
 _FENCED_CODE_RX = re.compile(r"```.*?```", re.DOTALL)
 
 
@@ -78,10 +78,9 @@ def extract_citations(text: str) -> list[str]:
     Order is body order; duplicates allowed. Citations inside fenced code
     blocks are excluded — those are examples, not real provenance."""
     text = _FENCED_CODE_RX.sub("", text)
-    out: list[str] = []
-    for m in BRACKETED_CITATION_RX.finditer(text):
-        out.extend(SRC_ID_RX.findall(m.group(1)))
-    return out
+    # Keep malformed ids too: the orphan gate must reject them rather than
+    # silently treating a page with bad citations as uncited.
+    return [citation.source_id for citation in iter_source_citations(text)]
 
 
 def extract_citation_keys(text: str) -> list[str]:
@@ -89,11 +88,9 @@ def extract_citation_keys(text: str) -> list[str]:
     Used when section/chapter granularity matters."""
     text = _FENCED_CODE_RX.sub("", text)
     out: list[str] = []
-    for m in BRACKETED_CITATION_RX.finditer(text):
-        for part in m.group(1).split(","):
-            cm = re.search(r"src:([A-Z0-9]{26})(#[^\]]*)?", part.strip())
-            if cm:
-                out.append(cm.group(1) + (cm.group(2) or ""))
+    for citation in iter_source_citations(text):
+        suffix = f"#{citation.raw_anchor}" if citation.raw_anchor else ""
+        out.append(citation.source_id + suffix)
     return out
 
 

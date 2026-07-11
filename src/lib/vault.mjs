@@ -9,6 +9,7 @@ import { gfm } from 'micromark-extension-gfm';
 import { gfmFromMarkdown } from 'mdast-util-gfm';
 import { toString as mdastToString } from 'mdast-util-to-string';
 import { sourceReaderHrefForAnchor, sourceReaderSections } from './source-reader-chapters.mjs';
+import { citationParts } from './source-citations.mjs';
 
 const ROOT = process.cwd();
 export const VAULT = join(ROOT, 'vault');
@@ -334,22 +335,6 @@ export function sourceReaderHref(sourceId, anchor = '') {
 const _BLOCK_TYPES = new Set(['paragraph', 'heading', 'listItem', 'blockquote', 'tableCell']);
 const _CITE_RE = /\[src:([^\]]+)\]/g;
 
-function _citationParts(value) {
-  return String(value || '')
-    .split(',')
-    .map((part) => part.trim().replace(/^src:\s*/i, ''))
-    .filter(Boolean)
-    .map((part) => {
-      const hash = part.indexOf('#');
-      if (hash < 0) return { id: part.trim(), anchor: '' };
-      return {
-        id: part.slice(0, hash).trim(),
-        anchor: part.slice(hash + 1).trim(),
-      };
-    })
-    .filter((part) => part.id);
-}
-
 function _cleanExcerpt(s, max = 150) {
   let t = (s || '')
     .replace(/^\s*\[!\w+\]\s*/, '')                                   // callout marker [!AI]
@@ -369,7 +354,7 @@ function _collectCitations(node, block, out) {
     _CITE_RE.lastIndex = 0;
     let m;
     while ((m = _CITE_RE.exec(node.value))) {
-      for (const { id, anchor } of _citationParts(m[1])) {
+      for (const { id, anchor } of citationParts(m[1])) {
         out.push({ source_id: id, anchor: anchor || '', block: cur });
       }
     }

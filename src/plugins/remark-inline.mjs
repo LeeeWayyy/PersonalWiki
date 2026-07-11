@@ -6,6 +6,7 @@
 //   ==CONFLICT: …== / ==…==     → <mark> highlights (conflicts flagged)
 import { visit } from 'unist-util-visit';
 import { resolveSource, resolveWikilink, sourceReaderHref } from '../lib/vault.mjs';
+import { citationParts } from '../lib/source-citations.mjs';
 
 const IMG_EXT = /\.(png|jpe?g|gif|svg|webp|avif)$/i;
 
@@ -45,22 +46,6 @@ function citationChip(id, anchor) {
     data: { hProperties: { className: cls, 'data-src': id } },
     children: [{ type: 'text', value: label }],
   };
-}
-
-function citationParts(value) {
-  return String(value || '')
-    .split(',')
-    .map((part) => part.trim().replace(/^src:\s*/i, ''))
-    .filter(Boolean)
-    .map((part) => {
-      const hash = part.indexOf('#');
-      if (hash < 0) return { id: part.trim(), anchor: '' };
-      return {
-        id: part.slice(0, hash).trim(),
-        anchor: part.slice(hash + 1).trim(),
-      };
-    })
-    .filter((part) => part.id);
 }
 
 function vaultAssetUrl(target) {

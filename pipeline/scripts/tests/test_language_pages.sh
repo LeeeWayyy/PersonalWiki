@@ -131,6 +131,29 @@ ING "$TMP/jp.txt" >/dev/null 2>&1
 commits_after="$(git -C "$BASE" rev-list --count HEAD)"
 [[ "$commits_before" == "$commits_after" ]] && ok "idempotent re-run made no new commit" || bad "clean re-run created a commit"
 
+# ── failed generation cleans the newly copied source/sidecar and leaves Git clean ──
+cat > "$TMP/fail.txt" <<'MD'
+## First succeeds
+This chapter writes one reusable language cache entry.
+## Second fails
+This chapter deliberately fails after the first cache write.
+MD
+status_before="$(git -C "$BASE" status --porcelain)"
+cache_before="$(find "$BASE/lang/.wiki/lang-cache" -type f -print 2>/dev/null | sort)"
+PW_LANG_JOBS=1 STUB_FAIL_LANG_CHAPTER="Second fails" \
+  LLM_CMD="$STUB" VAULT_CONTENT_DIR="$BASE" \
+  python3 "$PIPELINE_ROOT/ingest.py" --profile lang "$TMP/fail.txt" >/dev/null 2>&1 \
+  && bad "failing language model unexpectedly succeeded" \
+  || ok "language generation failure propagated"
+status_after="$(git -C "$BASE" status --porcelain)"
+cache_after="$(find "$BASE/lang/.wiki/lang-cache" -type f -print 2>/dev/null | sort)"
+[[ "$status_after" == "$status_before" ]] \
+  && ok "failed language ingest restored the source tree and Git state" \
+  || { bad "failed language ingest left dirty/untracked artifacts"; printf '%s\n' "$status_after"; }
+[[ "$cache_after" == "$cache_before" ]] \
+  && ok "failed fresh language ingest removed its ignored cache entries" \
+  || bad "failed fresh language ingest left orphaned ignored cache entries"
+
 # ── cache-collision regression: two chapters whose fs-safe slugs collapse
 #    (甲/X and 甲:X → 甲-X) must keep separate cache entries by ordinal. ──
 cat > "$TMP/coll.txt" <<'MD'
@@ -145,21 +168,30 @@ json_query "$RJ_COLL" "len(d.get('chapters', [])) == 2 and any(t.get('t') == '�
   && ok "collapsing-slug chapters keep separate caches (ch2 has 窓, not ch1's 机)" \
   || bad "cache-key collision: ch2 reading wrong (expected 窓, not 机)"
 
-# ── structural-char regression: heading chars that break citation/log syntax
-#    must be stripped consistently and remain log-idempotent. ──
-cat > "$TMP/sc.txt" <<'MD'
-## 第1章 [導入: pages]
-机がある。
-MD
+# ── shared citation-contract regression: punctuation stays in the chapter
+#    identity while the rendered source anchor is encoded exactly once. ──
+contract_label="$(python3 - "$PROJECT_ROOT/ci-fixtures/source-citation-contract.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))[1]["label"])
+PY
+)"
+contract_citation="$(PYTHONPATH="$PIPELINE_ROOT/scripts" python3 - "$contract_label" <<'PY'
+import sys
+from source_citations import source_citation
+print(source_citation("__SID__", sys.argv[1]))
+PY
+)"
+printf '## %s\n机がある。\n' "$contract_label" > "$TMP/sc.txt"
 ING "$TMP/sc.txt" >/dev/null 2>&1
 sid_sc="$(current_sid)"
 RH_SC="$(latest_reading_html)"
-grep -qE "\\[src:${sid_sc}#[^][]+\\]" "$RH_SC" \
-  && ok "bracket/colon heading → well-formed citation anchor" \
+expected_sc="${contract_citation/__SID__/$sid_sc}"
+grep -qF "<!-- $expected_sc -->" "$RH_SC" \
+  && ok "comma/bracket/hash/percent/Unicode heading → canonical citation" \
   || { bad "structural chars leaked into citation anchor"; grep -o '\[src:[^]]*\]*' "$RH_SC" | head -2; }
-sc_log_before="$(grep -c '#第1章 導入 pages ' "$BASE/lang/.wiki/log.md" 2>/dev/null || echo 0)"
+sc_log_before="$(grep -cF "#${contract_label}  pages:" "$BASE/lang/.wiki/log.md" 2>/dev/null || echo 0)"
 ING "$TMP/sc.txt" >/dev/null 2>&1
-sc_log_after="$(grep -c '#第1章 導入 pages ' "$BASE/lang/.wiki/log.md" 2>/dev/null || echo 0)"
+sc_log_after="$(grep -cF "#${contract_label}  pages:" "$BASE/lang/.wiki/log.md" 2>/dev/null || echo 0)"
 [[ "$sc_log_before" == "1" && "$sc_log_after" == "1" ]] \
   && ok "structural-char chapter is log-idempotent (1 line, no dup on re-run)" \
   || bad "log idempotency broke for structural-char heading (before=$sc_log_before after=$sc_log_after)"
@@ -180,7 +212,7 @@ RJ_EDGE="$(latest_reading_json)"
 RH_EDGE="$(latest_reading_html)"
 json_query "$RJ_EDGE" "len(d.get('chapters', [])) == 2" \
   && ok "duplicate まとめ merged → 2 chapters total, not 3" || bad "duplicate heading not merged"
-grep -qE "\\[src:${sid_edge}#まとめ\\]" "$RH_EDGE" \
+grep -qE "\\[src:${sid_edge}#sec=%E3%81%BE%E3%81%A8%E3%82%81\\]" "$RH_EDGE" \
   && ok "empty-vocab/grammar chapter still carries a chapter citation" || bad "empty chapter has no [src:] anchor"
 grep -qE "\\[src:${sid_edge}\\]" "$RH_EDGE" \
   && ok "reader HTML carries a source-level [src:] citation" || bad "reader HTML missing source citation"

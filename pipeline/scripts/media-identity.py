@@ -297,6 +297,79 @@ def _media_resolver_own_orphan(identity, origin_ref):
     return check
 
 
+def _git_tracked_under(path: str) -> bool:
+    result = subprocess.run(
+        ["git", "ls-files", "--", f"{path.rstrip('/')}/"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def _evidence_file_hashes(fm: dict) -> dict[str, str]:
+    artifacts = (fm.get("media") or {}).get("evidence_artifacts") or []
+    if not isinstance(artifacts, list):
+        return {}
+    return {
+        item["path"]: item["sha256"]
+        for item in artifacts
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("sha256"), str)
+        and "bundle_recipe" not in item
+    }
+
+
+def _verify_owned_orphan_paths(*, sidecar: str, fm: dict, dest_md: str,
+                               dest_json: str, dest_assets: str | None) -> None:
+    """Prove every pre-existing untracked payload belongs to this sidecar.
+
+    A matching identity alone is insufficient: a user file can share the
+    deterministic slug. Existing bytes must also match hashes recorded by the
+    coherent sidecar, and asset directories may contain no unlisted files.
+    """
+    expected_md = fm.get("sha256")
+    if Path(dest_md).exists():
+        if not Path(dest_md).is_file() or not isinstance(expected_md, str):
+            die(f"untracked canonical artifact is not verifiably owned: {dest_md}")
+        if sha256_of(dest_md) != expected_md:
+            die(f"untracked canonical artifact does not match its sidecar: {dest_md}")
+
+    evidence = _evidence_file_hashes(fm)
+    media = fm.get("media") or {}
+    expected_json = evidence.get(dest_json) or media.get("transcript_json_sha256")
+    if Path(dest_json).exists():
+        if not Path(dest_json).is_file() or not isinstance(expected_json, str):
+            die(f"untracked audit artifact is not verifiably owned: {dest_json}")
+        if sha256_of(dest_json) != expected_json:
+            die(f"untracked audit artifact does not match its sidecar: {dest_json}")
+
+    if not dest_assets or not Path(dest_assets).exists():
+        return
+    assets = Path(dest_assets)
+    if not assets.is_dir() or assets.is_symlink():
+        die(f"untracked assets path is not a verifiable directory: {dest_assets}")
+    expected_under = {
+        path: digest for path, digest in evidence.items()
+        if Path(path).is_relative_to(assets)
+    }
+    if not expected_under:
+        die(f"untracked assets dir has no ownership evidence in {sidecar}: {dest_assets}")
+    actual: set[str] = set()
+    for path in assets.rglob("*"):
+        if path.is_symlink():
+            die(f"untracked assets dir contains a symlink; refusing to replace: {path}")
+        if not path.is_file():
+            continue
+        rel = path.as_posix()
+        actual.add(rel)
+        expected = expected_under.get(rel)
+        if not expected or sha256_of(path) != expected:
+            die(f"untracked asset is unlisted or does not match its sidecar: {rel}")
+    if actual != set(expected_under):
+        missing = sorted(set(expected_under) - actual)
+        die(f"untracked assets dir is incomplete for its sidecar: {', '.join(missing)}")
+
+
 def _stage_media_artifacts(*, slug, md_path, json_path, sidecar, sidecar_text,
                            md_suffix, json_suffix, origin_ref, identity=None,
                            assets_path=None, assets_suffix=None,
@@ -310,16 +383,34 @@ def _stage_media_artifacts(*, slug, md_path, json_path, sidecar, sidecar_text,
     dest_md = f"sources/{slug}{md_suffix}"
     dest_json = f"sources/{slug}{json_suffix}"
     dest_assets = f"sources/{slug}{assets_suffix}" if assets_suffix else None
-    for t in (dest_md, dest_json, sidecar):
+    targets = (dest_md, dest_json, sidecar)
+    for t in targets:
+        if Path(t).is_symlink():
+            die(f"target is a symlink (refusing to replace or follow it): {t}")
         if Path(t).exists() and git_tracked(t):
             die(f"target already tracked (refusing to overwrite): {t}")
-    if dest_assets and Path(dest_assets).exists() and git_tracked(dest_assets):
+    if dest_assets and Path(dest_assets).exists() and _git_tracked_under(dest_assets):
         die(f"assets dir has git-tracked files (refusing to clobber): {dest_assets}")
+    existing_payload = any(Path(t).exists() for t in (dest_md, dest_json))
+    existing_payload = existing_payload or bool(dest_assets and Path(dest_assets).exists())
+    if existing_payload and not Path(sidecar).is_file():
+        die("pre-existing untracked media artifacts have no coherent ownership sidecar; "
+            f"refusing to overwrite: {dest_md}")
     if Path(sidecar).exists():
+        if not Path(sidecar).is_file():
+            die(f"untracked sidecar path is not a file: {sidecar}")
         ofm = parse_frontmatter(Path(sidecar))
         check = own_orphan_check or _media_resolver_own_orphan(identity, origin_ref)
         if not check(ofm, dest_json):
             die(f"untracked sidecar exists and is not a recognizable own-orphan: {sidecar}")
+        if (ofm.get("type") != "source"
+                or not re.fullmatch(r"[0-9A-Z]{26}", str(ofm.get("source_id", "")))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(ofm.get("sha256", "")))):
+            die(f"untracked sidecar lacks a coherent source identity/hash: {sidecar}")
+        _verify_owned_orphan_paths(
+            sidecar=sidecar, fm=ofm, dest_md=dest_md,
+            dest_json=dest_json, dest_assets=dest_assets,
+        )
     Path("sources").mkdir(exist_ok=True)
     shutil.move(md_path, dest_md)
     shutil.move(json_path, dest_json)
@@ -850,7 +941,8 @@ def _build_image_note_sidecar(*, source_id, sha, added, origin_ref, title, platf
     ocr_params = meta.get("ocr_params")
     if isinstance(ocr_params, (dict, list)):
         ocr_params = json.dumps(ocr_params, ensure_ascii=False, sort_keys=True)
-    qopt = lambda v: _yopt(v, quote_bools=True)
+    def qopt(value):
+        return _yopt(value, quote_bools=True)
     media_lines = [
         f"  platform: {platform}",
         f"  post_id: {qopt(post_id)}",

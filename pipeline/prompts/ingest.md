@@ -9,10 +9,14 @@ vault. Your job is to integrate a new source into the existing wiki.
 - `ALL_SOURCE_IDS` — every valid source id currently in the vault.
 - `TAXONOMY` — allowed `tags:` values. Do not invent tags.
 - `SOURCE_META` — this run's source metadata, including `source_id`.
-- `SOURCE_KEY_TERMS` — a recall checklist extracted from the source.
-  It is not a quota and not a substitute for reading `SOURCE_TEXT`.
-- `SECTION_LABEL` — optional section/chapter anchor. If present,
-  citations to this run's source use `[src:<id>#<SECTION_LABEL>]`.
+- `SOURCE_INTELLIGENCE` — a validated, source-grounded analysis of the
+  section's claims, entities, topics, relationships, and possible page
+  destinations. It is a recall and planning aid, not a quota and not a
+  substitute for reading `SOURCE_TEXT`. Resolve any disagreement in favor of
+  `SOURCE_TEXT`.
+- `SECTION_LABEL` — optional human-readable section/chapter label.
+- `SECTION_CITATION` — the exact delimiter-safe citation token for this
+  run. Copy it verbatim whenever citing the current source.
 - `SOURCE_TEXT` — source text for this run.
 - `CANDIDATE_PAGES` — existing wiki pages that may be relevant.
 - `IMAGES` — source images available for embedding, if any.
@@ -32,9 +36,35 @@ Do not summarize the chapter as a chapter. Build graph nodes and
 synthesis pages. Obey `SCHEMA` for coverage, voice, citations, zones,
 frontmatter, tags, naming, images, and candidate-editing rules.
 
+Use `SOURCE_INTELLIGENCE.page_candidates` to check coverage before emitting the
+diff. Every high-importance claim and reusable central concept should have a
+home in an updated or newly created page. You may reject a suggested page when
+the source text or existing vault structure warrants a better grouping, but do
+not silently drop the underlying claims. There is no fixed entity or topic
+count.
+
+For candidate consolidation, compare `claim_ids` explicitly. You may omit a
+required candidate only when every one of its claim IDs is assigned to another
+candidate that the diff creates or updates. If a candidate owns any claim ID
+not represented by another emitted candidate, that candidate must be created or
+updated. This is enforced after apply.
+
+Treat page filenames/H1s and every frontmatter alias as one global identity
+namespace across both Entities and Topics. Assign each normalized surface form
+to exactly one page. Before emitting the diff, compare all new aliases against
+new page names, other new aliases, and every `CANDIDATE_PAGES` name/alias. When
+two planned pages overlap, keep the surface form only on its canonical page;
+never duplicate it merely to improve recall.
+
 Write useful human-facing notes. Important pages should read like
 compact explanatory wiki entries with context and synthesis, not like
 one-sentence fact cards.
+
+Before emitting the diff, perform a literal final scan of every new or changed
+Entity paragraph for the forbidden source/chapter-as-agent phrases listed in
+SCHEMA. Rewrite every match. A chapter label inside `[src:<id>#sec=<encoded>]` is
+provenance and does not count; those phrases anywhere else fail the post-apply
+quality gate.
 
 ## Scope
 

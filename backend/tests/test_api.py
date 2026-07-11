@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import json
 import os
+import signal
 import shlex
 import sqlite3
 import subprocess
@@ -333,12 +334,22 @@ def test_build_argv_leaves_document_chaptering_to_ingest():
 
     # Document-vs-URL chaptering is decided by ingest.py, which can inspect the
     # local file and shares the pipeline's format policy.
-    assert "--chapters" not in argv("/stage/book.epub")
+    default_epub = argv("/stage/book.epub")
+    assert "--chapters" not in default_epub
+    assert "--section" not in default_epub
+    assert "--section-label" not in default_epub
     assert "--chapters" not in argv("/stage/book.MOBI")
     assert "--chapters" not in argv("/stage/book.azw3")
     assert "--chapters" not in argv("/stage/paper.pdf")
     assert "--chapters" not in argv("https://example.com/book.epub")
-    assert "--chapters" not in argv("/stage/book.epub", section_label="第1章")
+    selected = argv("/stage/book.epub", section_heading="第二章 (测试)")
+    assert selected[-5:] == [
+        "--section",
+        r"^第二章\ \(测试\)$",
+        "--section-label",
+        "第二章 (测试)",
+        "/stage/book.epub",
+    ]
     assert argv("/stage/book.epub", kind="wiki")[-1] == "/stage/book.epub"
 
 
@@ -632,6 +643,34 @@ def test_run_job_passes_run_id_uses_threads_and_removes_stage_upload(tmp_path, m
     assert "run-id=runidjob" in (tmp_path / "logs" / "runidjob.log").read_text(encoding="utf-8")
 
 
+def test_idle_sleep_guard_wraps_only_on_macos_with_caffeinate(monkeypatch):
+    from app import ingest_runner as ir
+
+    argv = ["python3", "ingest.py", "book.epub"]
+    monkeypatch.setattr(ir.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        ir.shutil,
+        "which",
+        lambda name: "/usr/bin/caffeinate" if name == "caffeinate" else None,
+    )
+    guarded = ir._idle_sleep_guarded_argv(argv)
+    assert guarded == ["/usr/bin/caffeinate", "-i", *argv]
+    assert guarded is not argv
+    assert argv == ["python3", "ingest.py", "book.epub"]
+
+    monkeypatch.setattr(ir.sys, "platform", "linux")
+    assert ir._idle_sleep_guarded_argv(argv) is argv
+
+
+def test_idle_sleep_guard_falls_back_when_caffeinate_is_missing(monkeypatch):
+    from app import ingest_runner as ir
+
+    argv = ["python3", "ingest.py"]
+    monkeypatch.setattr(ir.sys, "platform", "darwin")
+    monkeypatch.setattr(ir.shutil, "which", lambda _name: None)
+    assert ir._idle_sleep_guarded_argv(argv) is argv
+
+
 def test_run_job_catches_unhandled_exception_ends_and_cleans_stage_upload(tmp_path, monkeypatch):
     from app import ingest_runner as ir
     from app import settings
@@ -853,6 +892,63 @@ def test_timeout_cleanup_escalates_to_sigkill(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+def test_timeout_cleanup_kills_ignoring_descendant_after_leader_exits(monkeypatch, tmp_path):
+    from app import ingest_runner as ir
+
+    child_ready = tmp_path / "child-ready"
+    child_pid_file = tmp_path / "child-pid"
+    parent_script = tmp_path / "parent.py"
+    child_code = (
+        "import pathlib, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "pathlib.Path(sys.argv[1]).write_text(str(__import__('os').getpid()), encoding='utf-8'); "
+        "time.sleep(30)"
+    )
+    parent_script.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        f"child_code = {child_code!r}\n"
+        "child = subprocess.Popen([sys.executable, '-c', child_code, sys.argv[1]])\n"
+        "pathlib.Path(sys.argv[2]).write_text(str(child.pid), encoding='utf-8')\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n",
+        encoding="utf-8",
+    )
+
+    async def run():
+        monkeypatch.setattr(ir, "PROCESS_TERMINATE_GRACE_S", 0.2)
+        monkeypatch.setattr(ir, "PROCESS_CLEANUP_TIMEOUT_S", 3)
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(parent_script),
+            str(child_ready),
+            str(child_pid_file),
+            start_new_session=True,
+        )
+        deadline = time.time() + 3
+        while (not child_ready.exists() or not child_pid_file.exists()) and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        assert child_ready.exists()
+        child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+        job = ir.Job("descendantkilljob")
+        try:
+            await ir._kill_process_group(proc, job, "test")
+            assert proc.returncode is not None
+            assert "escalating to SIGKILL" in "\n".join(job.visible_lines())
+            deadline = time.time() + 2
+            while ir._process_group_exists(proc.pid) and time.time() < deadline:
+                await asyncio.sleep(0.05)
+            assert not ir._process_group_exists(proc.pid)
+            with pytest.raises(ProcessLookupError):
+                os.kill(child_pid, 0)
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    asyncio.run(run())
+
+
 def test_ingest_upload_streams_to_stage_before_starting_job(client, auth, monkeypatch, tmp_path):
     from app import ingest_runner as ir
     from app import settings
@@ -876,7 +972,10 @@ def test_ingest_upload_streams_to_stage_before_starting_job(client, auth, monkey
 
     assert r.status_code == 200
     assert r.json()["job_id"] == "uploadjob"
-    assert called["options"] == {"kind": "auto", "section_label": None}
+    assert called["options"] == {
+        "kind": "auto",
+        "section_heading": None,
+    }
     assert called["target"].read_bytes() == b"hello"
 
 
@@ -932,7 +1031,22 @@ def test_ingest_options_validate_kind_and_section(client, auth, monkeypatch, tmp
     invalid = [
         {"url": "https://example.com", "options": {"kind": "bogus"}},
         {"url": "https://example.com", "options": {"kind": "auto", "section_label": ["bad"]}},
+        {"url": "https://example.com", "options": {"kind": "auto", "section_label": "ch1"}},
         {"url": "https://example.com", "options": {"kind": "lang", "section_label": "ch1"}},
+        {"url": "https://example.com", "options": {"kind": "lang", "section_heading": "ch1"}},
+        {"url": "https://example.com", "options": {"kind": "video", "section_heading": "ch1"}},
+        {"url": "https://example.com", "options": {"kind": "audio", "section_heading": "ch1"}},
+        {"url": "https://example.com", "options": {"kind": "image_note", "section_heading": "ch1"}},
+        {
+            "url": "https://example.com",
+            "options": {"kind": "wiki", "section_heading": "ch1", "section_label": "chapter one"},
+        },
+        {"url": "https://example.com", "options": {"kind": "wiki", "section_heading": "bad\nheading"}},
+        {"url": "https://example.com", "options": {"kind": "wiki", "section_heading": "x" * 201}},
+        {
+            "url": "https://example.com",
+            "options": {"kind": "wiki", "section_heading": "ch1", "section_label": "bad\u007flabel"},
+        },
     ]
     for payload in invalid:
         r = client.post("/ingest", json=payload, headers=auth)
@@ -946,6 +1060,72 @@ def test_ingest_options_validate_kind_and_section(client, auth, monkeypatch, tmp
     )
     assert upload.status_code == 400
     assert list(tmp_path.iterdir()) == []
+
+    label_only_upload = client.post(
+        "/ingest",
+        files={"file": ("book.epub", b"book", "application/epub+zip")},
+        data={"options": json.dumps({"kind": "auto", "section_label": "第二章"})},
+        headers=auth,
+    )
+    assert label_only_upload.status_code == 400
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ingest_section_heading_accepts_200_characters(client, auth, monkeypatch):
+    from app import ingest_runner as ir
+
+    called = {}
+    monkeypatch.setattr(
+        ir,
+        "start_job",
+        lambda target, options: called.update(target=target, options=options) or "sectionjob",
+    )
+    heading = "章" * 200
+
+    response = client.post(
+        "/ingest",
+        json={
+            "url": "https://example.com/book",
+            "options": {"kind": "wiki", "section_heading": heading},
+        },
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    assert called["options"]["section_heading"] == heading
+
+def test_ingest_section_heading_selects_and_labels_the_same_text(client, auth, monkeypatch):
+    from app import ingest_runner as ir
+
+    called = {}
+
+    def fake_start_job(target, options):
+        called["target"] = target
+        called["options"] = options
+        return "sectionjob"
+
+    monkeypatch.setattr(ir, "start_job", fake_start_job)
+    response = client.post(
+        "/ingest",
+        json={
+            "url": "https://example.com/book",
+            "options": {"kind": "auto", "section_heading": "第二章 (测试)"},
+        },
+        headers=auth,
+    )
+
+    assert response.status_code == 200
+    assert called["options"] == {
+        "kind": "auto",
+        "section_heading": "第二章 (测试)",
+    }
+    assert ir._build_argv(called["target"], called["options"])[-5:] == [
+        "--section",
+        r"^第二章\ \(测试\)$",
+        "--section-label",
+        "第二章 (测试)",
+        "https://example.com/book",
+    ]
 
 
 def test_ingest_media_alias_maps_to_video_kind(client, auth, monkeypatch):

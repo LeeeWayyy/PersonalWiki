@@ -104,6 +104,176 @@ class LlmClientTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True), patch("os.getcwd", return_value=str(cwd)):
                 self.assertEqual(llm_client.complete_command("prompt", timeout=5), "ok")
 
+    def test_execution_identity_captures_non_secret_provider_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_REASONING_EFFORT": "high",
+                "PW_CODEX_VERBOSITY": "medium",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                identity = llm_client.execution_identity("analyzer-model")
+            self.assertEqual(identity["provider"], "codex")
+            self.assertEqual(identity["model"], "analyzer-model")
+            self.assertEqual(identity["reasoning"], "high")
+            self.assertEqual(identity["verbosity"], "medium")
+            self.assertRegex(identity["codex_binary_fingerprint"], r"^[0-9a-f]{64}$")
+            self.assertIsNone(identity["command_fingerprint"])
+
+    def test_codex_config_default_is_explicit_runtime_and_cache_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            codex_home = root / "codex-home"
+            bin_dir.mkdir()
+            codex_home.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            (codex_home / "config.toml").write_text(
+                'model = "gpt-config-default"\n'
+                'model_reasoning_effort = "high"\n'
+                'model_verbosity = "medium"\n'
+                'api_key = "must-not-leak"\n',
+                encoding="utf-8",
+            )
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "CODEX_HOME": str(codex_home),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                identity = llm_client.execution_identity()
+                out = llm_client.complete_command("hello", timeout=5)
+
+            self.assertEqual(identity["model"], "gpt-config-default")
+            self.assertEqual(identity["reasoning"], "high")
+            self.assertEqual(identity["verbosity"], "medium")
+            self.assertRegex(identity["codex_config_fingerprint"], r"^[0-9a-f]{64}$")
+            self.assertNotIn("must-not-leak", json.dumps(identity))
+            self.assertIn("-m gpt-config-default", out)
+            self.assertIn('model_reasoning_effort="high"', out)
+            self.assertIn('model_verbosity="medium"', out)
+
+    def test_codex_config_fingerprint_ignores_secrets_and_honors_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            codex_home = root / "codex-home"
+            bin_dir.mkdir()
+            codex_home.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            config = codex_home / "config.toml"
+            config.write_text(
+                'model = "config-model"\napi_key = "secret-one"\n',
+                encoding="utf-8",
+            )
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_LLM_MODEL": "env-model",
+                "PW_CODEX_REASONING_EFFORT": "low",
+                "PW_CODEX_VERBOSITY": "low",
+                "CODEX_HOME": str(codex_home),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                first = llm_client.execution_identity()
+                config.write_text(
+                    'model = "changed-config-model"\napi_key = "secret-two"\n',
+                    encoding="utf-8",
+                )
+                second = llm_client.execution_identity()
+
+            self.assertEqual(first["model"], "env-model")
+            self.assertEqual(second["model"], "env-model")
+            self.assertIsNone(first["codex_config_fingerprint"])
+            self.assertEqual(first, second)
+            self.assertNotIn("secret", json.dumps(first))
+
+    def test_codex_config_falls_back_to_dot_codex_under_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            config_dir = root / ".codex"
+            bin_dir.mkdir()
+            config_dir.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            (config_dir / "config.toml").write_text(
+                'model = "home-config-model"\n', encoding="utf-8"
+            )
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(llm_client.Path, "home", return_value=root),
+            ):
+                identity = llm_client.execution_identity()
+
+            self.assertEqual(identity["model"], "home-config-model")
+            self.assertRegex(identity["codex_config_fingerprint"], r"^[0-9a-f]{64}$")
+
+    def test_blank_codex_env_settings_fall_back_to_config_and_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            codex_home = root / "codex-home"
+            bin_dir.mkdir()
+            codex_home.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            (codex_home / "config.toml").write_text(
+                'model = "config-model"\n'
+                'model_reasoning_effort = "high"\n',
+                encoding="utf-8",
+            )
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_LLM_MODEL": "  ",
+                "PW_CODEX_REASONING_EFFORT": " ",
+                "PW_CODEX_VERBOSITY": "",
+                "CODEX_HOME": str(codex_home),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                identity = llm_client.execution_identity()
+                out = llm_client.complete_command("hello", timeout=5)
+
+            self.assertEqual(identity["model"], "config-model")
+            self.assertEqual(identity["reasoning"], "high")
+            self.assertEqual(identity["verbosity"], "low")
+            self.assertRegex(identity["codex_config_fingerprint"], r"^[0-9a-f]{64}$")
+            self.assertIn("-m config-model", out)
+            self.assertIn('model_reasoning_effort="high"', out)
+            self.assertIn('model_verbosity="low"', out)
+
+    def test_api_identity_redacts_credentials_and_query(self):
+        env = {
+            "PW_LLM_PROVIDER": "api",
+            "PW_LLM_API_KEY": "secret",
+            "PW_LLM_BASE_URL": "https://user:pass@example.test:8443/v1?token=secret",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            identity = llm_client.execution_identity("api-analyzer")
+        self.assertEqual(identity["api_base_url"], "https://example.test:8443/v1")
+        self.assertNotIn("secret", json.dumps(identity))
+
+    def test_command_identity_changes_when_command_file_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "stub.sh"
+            write_executable(script, "#!/usr/bin/env bash\nprintf one\n")
+            env = {"LLM_CMD": str(script), "PATH": os.environ.get("PATH", "")}
+            with patch.dict(os.environ, env, clear=True):
+                first = llm_client.execution_identity("model")
+                time.sleep(0.002)
+                write_executable(script, "#!/usr/bin/env bash\nprintf changed\n")
+                second = llm_client.execution_identity("model")
+            self.assertNotEqual(
+                first["command_fingerprint"], second["command_fingerprint"]
+            )
+
     def test_derived_lib_call_llm_honors_base_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "cmd"
@@ -141,6 +311,7 @@ class LlmClientTests(unittest.TestCase):
             write_executable(bin_dir / "codex", _fake_codex())
             env = {
                 "PW_LLM_PROVIDER": "codex",
+                "CODEX_HOME": str(Path(tmp) / "empty-codex-home"),
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             }
             with patch.dict(os.environ, env, clear=True):
@@ -150,6 +321,7 @@ class LlmClientTests(unittest.TestCase):
             self.assertIn("--ignore-rules", out)
             self.assertIn('model_reasoning_effort="medium"', out)
             self.assertIn('model_verbosity="low"', out)
+            self.assertNotIn(" -m ", out)
             self.assertIn("-o ", out)
             self.assertIn(" -", out)
             self.assertIn("STDIN=hello", out)
@@ -228,7 +400,7 @@ class LlmClientTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 out = llm_client.complete_command("hello", timeout=5)
             self.assertIn(f"-C {seeded}", out)
-            cwd = [l for l in out.splitlines() if l.startswith("CWD=")][0][4:]
+            cwd = [line for line in out.splitlines() if line.startswith("CWD=")][0][4:]
             self.assertEqual(os.path.realpath(cwd), os.path.realpath(seeded))  # ran in seeded dir
             self.assertTrue(seeded.is_dir())       # NOT deleted by llm_client
 

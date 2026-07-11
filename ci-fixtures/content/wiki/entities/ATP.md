@@ -16,7 +16,7 @@ See [[Energy metabolism]] for the broader picture.
 
 ### From src:S1FIXTURE000000000000000000
 
-The claim above is drawn from fixture sources [src:S1FIXTURE000000000000000000#第一章,src:S1MDFIXTURE000000000000000#第二章].
+The claim above is drawn from fixture sources [src:S1FIXTURE000000000000000000#sec=A%2C%20B%5D%20%23100%25%20%C2%B7%20%E7%AC%AC%E4%B8%80%E7%AB%A0,src:S1MDFIXTURE000000000000000#第二章].
 
 <!-- /llm-zone -->
 

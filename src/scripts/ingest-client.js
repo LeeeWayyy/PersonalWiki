@@ -16,15 +16,32 @@ function appendTo(log, text, showLog) {
   log.scrollTop = log.scrollHeight;
 }
 
+export function ingestOptions(kind, sectionHeading) {
+  const supportsSection = kind === 'auto' || kind === 'wiki';
+  return {
+    kind,
+    section_heading: supportsSection ? sectionHeading.trim() || null : null,
+  };
+}
+
 export function mount(config) {
   const urlInput = el(config.urlId);
   const tokenInput = el(config.tokenId);
   const status = el(config.statusId);
   const log = el(config.logId);
   const cancelBtn = el(config.cancelId);
+  const kindInput = el(config.kindId);
+  const sectionHeadingInput = el(config.sectionHeadingId);
   let activeJob = null;
   let activeHeaders = {};
   let mode = 'url';
+
+  function syncSectionSupport() {
+    sectionHeadingInput.disabled = kindInput.value !== 'auto' && kindInput.value !== 'wiki';
+  }
+
+  kindInput.addEventListener('change', syncSectionSupport);
+  syncSectionSupport();
 
   function baseUrl() {
     return localStorage.getItem('backendUrl') || urlInput.value;
@@ -100,10 +117,10 @@ export function mount(config) {
   el(config.runId).onclick = async () => {
     const url = baseUrl();
     const H = authHeaders();
-    const opts = {
-      kind: el(config.kindId).value,
-      section_label: el(config.sectionId).value || null,
-    };
+    const opts = ingestOptions(
+      kindInput.value,
+      sectionHeadingInput.value,
+    );
     log.textContent = '';
     try {
       let res;

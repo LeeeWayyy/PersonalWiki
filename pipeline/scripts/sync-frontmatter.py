@@ -32,6 +32,7 @@ from datetime import date as _date
 from pathlib import Path
 
 from _util import default_vault_root, split_frontmatter
+from source_citations import SOURCE_ID_RX, iter_source_citations
 
 TOOLING_ROOT = Path(__file__).resolve().parent.parent  # tooling repo (scripts/, schema.md)
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
@@ -41,8 +42,6 @@ WIKI_DIR = VAULT_ROOT / "wiki"
 # then pull `src:<ULID>` out of each. Tolerates interior whitespace (e.g.
 # `[src:a, src:b]`) and any anchor form, while ignoring `src:…` mentions
 # outside brackets (e.g. headings like `### From src:01K…`).
-BRACKETED_CITATION_RX = re.compile(r"\[([^\[\]]*src:[^\[\]]*)\]")
-SRC_ID_RX = re.compile(r"src:([A-Z0-9]{26})")
 # Strip fenced code blocks before citation scanning so example citations
 # inside ``` … ``` blocks don't pollute `sources:`. Mirrors lint.py so
 # both tools agree on what counts as a citation; otherwise sync writes a
@@ -51,9 +50,9 @@ _FENCED_CODE_RX = re.compile(r"```.*?```", re.DOTALL)
 def citations_in(body: str) -> list[str]:
     seen: dict[str, None] = {}
     body = _FENCED_CODE_RX.sub("", body)
-    for bm in BRACKETED_CITATION_RX.finditer(body):
-        for m in SRC_ID_RX.finditer(bm.group(1)):
-            seen.setdefault(m.group(1), None)
+    for citation in iter_source_citations(body):
+        if SOURCE_ID_RX.fullmatch(citation.source_id):
+            seen.setdefault(citation.source_id, None)
     return list(seen.keys())
 
 

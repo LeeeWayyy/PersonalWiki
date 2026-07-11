@@ -18,6 +18,7 @@ import os
 import re
 import json
 import shlex
+import shutil
 import signal
 import sys
 import uuid
@@ -199,6 +200,16 @@ def _log_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _idle_sleep_guarded_argv(argv: list[str]) -> list[str]:
+    """Wrap a macOS ingest command in an idle-sleep power assertion."""
+    if sys.platform != "darwin":
+        return argv
+    caffeinate = shutil.which("caffeinate")
+    if not caffeinate:
+        return argv
+    return [caffeinate, "-i", *argv]
+
+
 def reap_jobs(now: float | None = None) -> None:
     now = time.time() if now is None else now
     for job_id, job in list(JOBS.items()):
@@ -312,9 +323,14 @@ def _build_argv(target: str, options: dict) -> list[str]:
         argv += ["--profile", "lang"]
     elif kind in {"video", "audio", "image_note"}:
         argv += ["--kind", kind]
-    section = (options or {}).get("section_label")
-    if section:
-        argv += ["--section-label", section]
+    section_heading = (options or {}).get("section_heading")
+    if section_heading:
+        argv += [
+            "--section",
+            rf"^{re.escape(section_heading)}$",
+            "--section-label",
+            section_heading,
+        ]
     argv.append(target)
     return argv
 
@@ -337,28 +353,65 @@ async def _stream_until_exit(proc: asyncio.subprocess.Process, job: Job) -> int:
         raise
 
 
-async def _kill_process_group(proc: asyncio.subprocess.Process, job: Job, label: str) -> None:
+def _process_group_exists(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_process_group_exit(pgid: int, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while _process_group_exists(pgid):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.05, remaining))
+    return True
+
+
+async def _reap_process(proc: asyncio.subprocess.Process, job: Job, label: str) -> None:
     if proc.returncode is not None:
         return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except Exception:  # noqa
-        proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=PROCESS_TERMINATE_GRACE_S)
-        return
-    except asyncio.TimeoutError:
-        job.emit(f"warn: {label} did not exit after SIGTERM; escalating to SIGKILL")
-    if proc.returncode is not None:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:  # noqa
-        proc.kill()
     try:
         await asyncio.wait_for(proc.wait(), timeout=PROCESS_CLEANUP_TIMEOUT_S)
     except asyncio.TimeoutError:
-        job.emit(f"warn: {label} did not exit after kill")
+        job.emit(f"warn: {label} top-level process was not reaped after process-group cleanup")
+
+
+async def _kill_process_group(proc: asyncio.subprocess.Process, job: Job, label: str) -> None:
+    # All controlled children are launched with start_new_session=True, so the
+    # initial PID remains the process-group ID after the group leader exits.
+    # Capturing it this way lets us terminate descendants even when SIGTERM
+    # makes the top-level process exit before an ignoring child does.
+    pgid = proc.pid
+    if proc.returncode is not None and not _process_group_exists(pgid):
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        await _reap_process(proc, job, label)
+        return
+    except OSError:
+        if proc.returncode is None:
+            proc.terminate()
+    if await _wait_for_process_group_exit(pgid, PROCESS_TERMINATE_GRACE_S):
+        await _reap_process(proc, job, label)
+        return
+    job.emit(f"warn: {label} process group still active after SIGTERM; escalating to SIGKILL")
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        if proc.returncode is None:
+            proc.kill()
+    if not await _wait_for_process_group_exit(pgid, PROCESS_CLEANUP_TIMEOUT_S):
+        job.emit(f"warn: {label} process group still active after SIGKILL")
+    await _reap_process(proc, job, label)
 
 
 async def cancel_job(job_id: str) -> Job | None:
@@ -495,6 +548,9 @@ async def run_job(job: Job, target: str, options: dict):
 
             argv = _build_argv(target, options)
             job.emit("$ " + " ".join(shlex.quote(a) for a in argv))
+            launch_argv = _idle_sleep_guarded_argv(argv)
+            if launch_argv is not argv:
+                job.emit("power: preventing idle system sleep via caffeinate")
             proc_env = {
                 **os.environ,
                 "PW_CONTENT_DIR": str(CONTENT_DIR),
@@ -504,7 +560,7 @@ async def run_job(job: Job, target: str, options: dict):
             }
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    *argv, cwd=str(CONTENT_DIR),  # pipeline runs with cwd = the local wiki repo
+                    *launch_argv, cwd=str(CONTENT_DIR),  # pipeline runs with cwd = the local wiki repo
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                     env=proc_env,
                     start_new_session=True,

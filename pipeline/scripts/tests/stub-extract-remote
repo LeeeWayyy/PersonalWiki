@@ -81,15 +81,17 @@ if kind == "video":
 if kind == "image_note":
     import hashlib
     n = int(os.environ.get("STUB_IMAGE_CARDS", "2"))
+    variant = os.environ.get("STUB_TEXT_VARIANT", "").strip()
+    variant_suffix = f" {variant}" if variant else ""
     os.makedirs(os.path.join(job_dir, "assets"), exist_ok=True)
     cards, assets = [], []
     for i in range(n):
         key = f"assets/card-{i:05d}.jpg"
-        body = f"fake-image-bytes-{i}".encode()
+        body = f"fake-image-bytes-{i}{variant_suffix}".encode()
         with open(os.path.join(job_dir, key), "wb") as f:
             f.write(body)
         isha = hashlib.sha256(body).hexdigest()
-        cards.append({"index": i, "ocr_text": f"OCR text of card {i+1}: e2e entity, mitochondria.",
+        cards.append({"index": i, "ocr_text": f"OCR text of card {i+1}: e2e entity, mitochondria.{variant_suffix}",
                       "image_ref": key, "source_filename": f"card-{i:05d}.jpg",
                       "image_sha256": isha, "width": 800, "height": 600, "confidence": 0.97})
         assets.append({"key": key, "sha256": isha, "size": len(body), "media_type": "image/jpeg"})

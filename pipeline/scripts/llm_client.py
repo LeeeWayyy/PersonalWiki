@@ -10,6 +10,7 @@ files stop depending on shell.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import queue
 import re
@@ -21,13 +22,14 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 TRUTHY = {"1", "true", "yes", "on"}
 DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_API_MODEL = "gpt-4o-mini"
-DEFAULT_CODEX_MODEL = "codex"
 CODEX_ARGS = ("exec", "--skip-git-repo-check", "--color", "never")
 API_PROVIDERS = {"api", "openai"}
 CODEX_PROVIDERS = {"codex"}
@@ -75,6 +77,33 @@ def command() -> str:
 
 def _codex_bin() -> str:
     return _env("PW_CODEX_BIN", "codex")
+
+
+def _codex_config_path() -> Path:
+    home = _env("CODEX_HOME")
+    root = Path(home).expanduser() if home else Path.home() / ".codex"
+    return root / "config.toml"
+
+
+def _codex_config() -> dict[str, object]:
+    try:
+        with _codex_config_path().open("rb") as handle:
+            value = tomllib.load(handle)
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return {}
+    return value if type(value) is dict else {}
+
+
+def _codex_config_string(name: str) -> str | None:
+    value = _codex_config().get(name)
+    return value.strip() if type(value) is str and value.strip() else None
+
+
+def _effective_codex_setting(env_name: str, config_name: str, default: str) -> str:
+    env_value = _env(env_name)
+    if env_value:
+        return env_value
+    return _codex_config_string(config_name) or default
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -144,7 +173,10 @@ def model() -> str | None:
             return "local-command"
         return Path(argv[0]).name if argv else "local-command"
     if codex_configured():
-        return DEFAULT_CODEX_MODEL
+        # The CLI's compiled default is not discoverable without running a
+        # completion. A configured default can be made explicit; otherwise
+        # leave it unset and bind the cache to the Codex binary fingerprint.
+        return _codex_config_string("model")
     if _api_enabled() and _api_key():
         return DEFAULT_API_MODEL
     return None
@@ -152,6 +184,134 @@ def model() -> str | None:
 
 def identity() -> dict[str, str | None]:
     return {"provider": provider(), "model": model()}
+
+
+def _effective_model(model_override: str | None = None) -> str | None:
+    override = (model_override or "").strip()
+    return override or model()
+
+
+def _resolved_file(token: str, *, cwd: str | None = None) -> Path | None:
+    candidate = Path(token).expanduser()
+    if not candidate.is_absolute() and cwd:
+        candidate = Path(cwd) / candidate
+    if candidate.is_file():
+        return candidate.resolve()
+    resolved = shutil.which(token)
+    return Path(resolved).resolve() if resolved else None
+
+
+def _file_fingerprint(path: Path) -> dict[str, int | str]:
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _command_fingerprint() -> str | None:
+    """Hash the effective custom command without persisting command secrets."""
+    cmd = command()
+    if not cmd:
+        return None
+    cwd = _command_cwd()
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        argv = [cmd]
+    files: list[dict[str, int | str]] = []
+    for index, token in enumerate(argv):
+        # The executable and explicit script/file arguments affect behavior.
+        # Flags and inline values are already covered by the command hash.
+        if index > 0 and token.startswith("-"):
+            continue
+        path = _resolved_file(token, cwd=cwd)
+        if path is not None:
+            files.append(_file_fingerprint(path))
+    payload = json.dumps(
+        {"cmd": cmd, "cwd": cwd or "", "files": files},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _codex_binary_fingerprint() -> str | None:
+    path = _resolved_file(_codex_bin())
+    if path is None:
+        return None
+    payload = json.dumps(
+        _file_fingerprint(path), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _codex_config_fingerprint(model_override: str | None = None) -> str | None:
+    """Hash only effective, non-secret Codex config values used by this client."""
+    relevant: dict[str, str] = {}
+    if not (model_override or "").strip() and not _env("PW_LLM_MODEL"):
+        configured_model = _codex_config_string("model")
+        if configured_model:
+            relevant["model"] = configured_model
+    for env_name, config_name in (
+        ("PW_CODEX_REASONING_EFFORT", "model_reasoning_effort"),
+        ("PW_CODEX_VERBOSITY", "model_verbosity"),
+    ):
+        if not _env(env_name):
+            value = _codex_config_string(config_name)
+            if value:
+                relevant[config_name] = value
+    if not relevant:
+        return None
+    payload = json.dumps(relevant, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _public_api_base_url() -> str | None:
+    if provider() != "api":
+        return None
+    raw = _env("PW_LLM_BASE_URL", DEFAULT_API_BASE_URL).rstrip("/")
+    parsed = urllib.parse.urlsplit(raw)
+    host = parsed.hostname or ""
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    return urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+
+
+def execution_identity(model_override: str | None = None) -> dict[str, str | None]:
+    """Return non-secret settings that can change a completion's output."""
+    selected_provider = provider()
+    return {
+        "provider": selected_provider,
+        "model": _effective_model(model_override),
+        "reasoning": (
+            _effective_codex_setting(
+                "PW_CODEX_REASONING_EFFORT", "model_reasoning_effort", "medium"
+            )
+            if selected_provider == "codex"
+            else None
+        ),
+        "verbosity": (
+            _effective_codex_setting(
+                "PW_CODEX_VERBOSITY", "model_verbosity", "low"
+            )
+            if selected_provider == "codex"
+            else None
+        ),
+        "api_base_url": _public_api_base_url(),
+        "command_fingerprint": (
+            _command_fingerprint() if selected_provider == "command" else None
+        ),
+        "codex_binary_fingerprint": (
+            _codex_binary_fingerprint() if selected_provider == "codex" else None
+        ),
+        "codex_config_fingerprint": (
+            _codex_config_fingerprint(model_override)
+            if selected_provider == "codex"
+            else None
+        ),
+    }
 
 
 def _command_cwd() -> str | None:
@@ -222,7 +382,8 @@ def _codex_progress_line(event: dict, state: dict) -> str | None:
     """Turn one codex event into a one-line heartbeat, or None to skip."""
     p = event.get("payload", event)
     t = p.get("type")
-    fmt = lambda *parts: " · ".join(["codex", *[s for s in parts if s]])  # drop empty segments
+    def fmt(*parts: str) -> str:
+        return " · ".join(["codex", *[part for part in parts if part]])
     if t == "task_started":
         state["window"] = p.get("model_context_window")
         return None
@@ -419,17 +580,21 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
             argv.append("--ephemeral")
         if _env_bool("PW_CODEX_DISABLE_SHELL", False):
             argv += ["--disable", "shell_tool"]
-        reasoning = _env("PW_CODEX_REASONING_EFFORT", "medium")
+        reasoning = _effective_codex_setting(
+            "PW_CODEX_REASONING_EFFORT", "model_reasoning_effort", "medium"
+        )
         if reasoning:
             argv += ["-c", f"model_reasoning_effort={json.dumps(reasoning)}"]
-        verbosity = _env("PW_CODEX_VERBOSITY", "low")
+        verbosity = _effective_codex_setting(
+            "PW_CODEX_VERBOSITY", "model_verbosity", "low"
+        )
         if verbosity:
             argv += ["-c", f"model_verbosity={json.dumps(verbosity)}"]
         service_tier = _env("PW_CODEX_SERVICE_TIER")
         if service_tier:
             argv += ["-c", f"service_tier={json.dumps(service_tier)}"]
         argv += ["-C", workdir, "--sandbox", "workspace-write"]
-        model_name = (model or "").strip() or _env("PW_LLM_MODEL")
+        model_name = _effective_model(model)
         if model_name:
             argv += ["-m", model_name]
         try:

@@ -52,9 +52,9 @@ shaA="$(grep -m1 '^sha256:' "$CROOT/$scA" | awk '{print $2}')"
 grep -qF "[src:${sidA}]" "$CROOT/wiki/entities/note1.md" && ok "note1 cites A" || bad "note1 missing A citation"
 
 # ── run 2: --frames → supersede A with B (carries A's transcript byte-exact + frames) ──
-echo "  run 2: ingest $URL --frames …"
-run_ingest note2 --frames > "$TMP/out2" 2>&1 || { echo "  ✗ run2 (--frames) failed:"; sed 's/^/    | /' "$TMP/out2" | tail -30; exit 1; }
-sidB="$(git -C "$CROOT" log -1 --format=%s | sed -nE 's/^ingest: ([0-9A-Z]{26}).*/\1/p')"
+echo "  run 2: ingest $URL --frames (unchanged transcript → NO_CHANGES) …"
+STUB_NO_CHANGES=1 run_ingest note1 --frames > "$TMP/out2" 2>&1 || { echo "  ✗ run2 (--frames) failed:"; sed 's/^/    | /' "$TMP/out2" | tail -30; exit 1; }
+sidB="$(git -C "$CROOT" log -1 --format=%s | sed -nE 's/^ingest \(no-changes\): ([0-9A-Z]{26}).*/\1/p')"
 [[ -n "$sidB" && "$sidB" != "$sidA" ]] && ok "run2 minted a NEW source B=$sidB" || bad "run2 did not mint a new source"
 
 scB="$(git -C "$CROOT" diff-tree --no-commit-id --name-only -r HEAD | grep -E '\.transcript\.md\.md$' | head -1)"
@@ -80,7 +80,6 @@ grep -qF "Frame e2e" "$CROOT/$mdB" && bad "B leaked the frame-run transcript (no
 # citation migration A→B + A immutable
 grep -qF "[src:${sidB}]" "$CROOT/wiki/entities/note1.md" && ok "note1 citation migrated A→B" || bad "note1 not migrated"
 ! grep -qF "$sidA" "$CROOT/wiki/entities/note1.md" && ok "no stale A citation remains in note1" || bad "stale A citation remains"
-grep -qF "[src:${sidB}]" "$CROOT/wiki/entities/note2.md" && ok "note2 cites B" || bad "note2 missing B citation"
 [[ "$(git -C "$CROOT" ls-files -- 'sources/*.transcript.md.md' | wc -l | tr -d ' ')" == "2" ]] && ok "both A and B sidecars present (A immutable)" || bad "expected 2 transcript sidecars"
 git -C "$CROOT" grep -qF "source_id: $sidA" -- 'sources/*.transcript.md.md' && ok "A's source artifact still committed" || bad "A's sidecar vanished"
 tail -3 "$CROOT/.wiki/log.md" | grep -qF "supersedes ${sidA}" && ok "log records the supersede" || bad "log missing supersede note"

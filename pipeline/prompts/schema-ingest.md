@@ -11,11 +11,17 @@ follow the stricter rule.
   mechanisms, hypotheses, processes, named organisms, named
   enzymes/proteins, named people, named books, and recurring technical
   concepts.
-- Do not treat `SOURCE_KEY_TERMS` as a quota. It is a recall checklist.
-  If `SOURCE_TEXT` contains additional important concepts not listed
-  there, still create or update pages for them.
+- Do not treat `SOURCE_INTELLIGENCE` as a quota or as evidence. It is a
+  source-grounded recall and planning artifact. If `SOURCE_TEXT` contains
+  additional important concepts not represented there, still create or update
+  pages for them. If the artifact conflicts with `SOURCE_TEXT`, follow the
+  source text.
 - There is no per-chapter entity cap. Coverage is bounded by conceptual
   importance and reusability, not by a fixed count.
+- Every importance-4/5 claim in `SOURCE_INTELLIGENCE` should be represented on
+  an appropriate entity/topic page unless it is already fully covered by an
+  existing candidate. Page-candidate suggestions are editorial hints, not a
+  command to create one page per extracted noun.
 - Prefer a dedicated `Entity` page for a singular reusable node: a
   biological structure, molecule, enzyme, species/group, mechanism,
   named theory, named person, named method, or named dataset.
@@ -83,7 +89,7 @@ tags: [...]
 <!-- llm-zone -->
 > [!AI] LLM Synthesis
 >
-> One idea, developed in prose, with a citation [src:<id>#<label>].
+> One idea, developed in prose, with a citation [src:<id>#sec=<encoded-label>].
 <!-- /llm-zone -->
 ```
 
@@ -92,8 +98,9 @@ tags: [...]
 - Every substantive paragraph in `llm-zone` must end with one or more
   `[src:<id>]` citations. If a paragraph mixes claims from different
   sources, cite each sentence or clause where the source changes.
-- If `SECTION_LABEL` is present, every citation to this run's source
-  must include it as an anchor: `[src:<id>#<SECTION_LABEL>]`.
+- Every citation to this run's source must copy `SECTION_CITATION` exactly.
+  Section labels are emitted as `#sec=<percent-encoded UTF-8>` so punctuation
+  cannot be mistaken for citation-list syntax.
 - Multiple citations are allowed: `[src:a,src:b]`.
 - Never cite a wiki page as a source. `[src:...]` resolves only to
   source sidecar ids listed in `ALL_SOURCE_IDS` or this run's
@@ -125,15 +132,15 @@ Forbidden on `type: Entity` pages:
 Bad entity prose:
 
 ```markdown
-> 本章把线粒体获得定义为复杂生命出现的前提 [src:x#第一章].
-> 书中指出线粒体自由基泄漏决定衰老速度 [src:x#第七章].
+> 本章把线粒体获得定义为复杂生命出现的前提 [src:x#sec=%E7%AC%AC%E4%B8%80%E7%AB%A0].
+> 书中指出线粒体自由基泄漏决定衰老速度 [src:x#sec=%E7%AC%AC%E4%B8%83%E7%AB%A0].
 ```
 
 Good entity prose:
 
 ```markdown
-> 线粒体获得可能是复杂生命出现的前提 [src:x#第一章].
-> 线粒体自由基泄漏比例可能影响衰老速度 [src:x#第七章].
+> 线粒体获得可能是复杂生命出现的前提 [src:x#sec=%E7%AC%AC%E4%B8%80%E7%AB%A0].
+> 线粒体自由基泄漏比例可能影响衰老速度 [src:x#sec=%E7%AC%AC%E4%B8%83%E7%AB%A0].
 ```
 
 Topic pages discuss how sources frame a subject, but source-narrating
@@ -231,8 +238,9 @@ prose is reserved for real attribution or comparison.
   cites earlier chapters, extend or compact the prose so earlier anchors
   remain visible and cited. Do not delete the earlier chapter's
   paragraphs just because the new chapter has a stronger synthesis.
-- Citations inside synthesis paragraphs may combine sources:
-  `[src:a#§1,src:b#第二章]`.
+- Citations inside synthesis paragraphs may combine sources. Newly emitted
+  section anchors remain canonical:
+  `[src:a#sec=%C2%A71,src:b#sec=%E7%AC%AC%E4%BA%8C%E7%AB%A0]`.
 
 ## Candidate Updates And Conflicts
 

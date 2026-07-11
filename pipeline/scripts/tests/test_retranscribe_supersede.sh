@@ -47,7 +47,7 @@ grep -qF "[src:${sidA}]" "$CROOT/wiki/entities/note1.md" && ok "note1 cites A" |
 
 # ── run 2: --retranscribe → supersede A with B ──
 echo "  run 2: ingest $URL --retranscribe …"
-run_ingest note2 --retranscribe > "$TMP/out2" 2>&1 || { echo "  ✗ run2 (--retranscribe) failed:"; sed 's/^/    | /' "$TMP/out2" | tail -30; exit 1; }
+STUB_TEXT_VARIANT=retranscribed run_ingest note2 --retranscribe > "$TMP/out2" 2>&1 || { echo "  ✗ run2 (--retranscribe) failed:"; sed 's/^/    | /' "$TMP/out2" | tail -30; exit 1; }
 sidB="$(git -C "$CROOT" log -1 --format=%s | sed -nE 's/^ingest: ([0-9A-Z]{26}).*/\1/p')"
 [[ -n "$sidB" && "$sidB" != "$sidA" ]] && ok "run2 minted a NEW source B=$sidB" || bad "run2 did not mint a new source"
 

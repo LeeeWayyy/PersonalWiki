@@ -84,7 +84,7 @@ describe('vault frontend contracts', () => {
 
     assert.equal(citations.length, 1);
     assert.equal(citations[0].wiki_href, '/wiki/entities/ATP');
-    assert.equal(citations[0].anchor, '\u7b2c\u4e00\u7ae0');
+    assert.equal(citations[0].anchor, 'A, B] #100% · \u7b2c\u4e00\u7ae0');
     assert.match(citations[0].excerpt, /claim above is drawn/);
   });
 

@@ -22,6 +22,7 @@ wiki/.alias-index.json
 
 # LLM-derived caches (regenerable)
 .wiki/mindmap-cache/
+.wiki/chapter-intelligence-cache/
 lang/.wiki/lang-cache/
 
 # Downloaded/derived media blobs (large; re-fetchable from sources)

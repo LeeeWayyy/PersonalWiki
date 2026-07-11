@@ -32,4 +32,17 @@ describe('remark-inline citation rendering', () => {
     assert.equal(links[1].children[0].value, '第二章');
     assert.equal(links[1].url.includes('src:'), false);
   });
+
+  it('decodes a delimiter-safe section label after splitting the group', () => {
+    const encoded = 'A%2C%20B%5D%20%23100%25%20%C2%B7%20%E7%AC%AC%E4%B8%80%E7%AB%A0';
+    const nodes = renderTextNode(
+      `[src:${SOURCE_ID}#sec=${encoded},src:${MD_SOURCE_ID}#legacy]`,
+    );
+    const links = nodes.filter((node) => node.type === 'link');
+
+    assert.equal(links.length, 2);
+    assert.equal(links[0].children[0].value, 'A, B] #100% · 第一章');
+    assert.match(links[0].url, /#sec=A%2C%20B%5D%20%23100%25%20%C2%B7/);
+    assert.equal(links[1].children[0].value, 'legacy');
+  });
 });

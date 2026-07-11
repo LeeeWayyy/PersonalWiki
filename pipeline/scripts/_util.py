@@ -16,6 +16,7 @@ import secrets
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,12 @@ _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # field; requiring that delimiter keeps labels like "Front pages: a history"
 # intact while still allowing spaces inside chapter labels.
 LOG_LINE_RX = re.compile(r"^\S+\s+([0-9A-Z]{26})(?:#(.*))?\s{2,}pages:")
+
+
+def normalize_name(value: str) -> str:
+    """Cross-tier page identity normalization: NFKC + casefold + whitespace."""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _log_prefix() -> str:
