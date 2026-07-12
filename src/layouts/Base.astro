@@ -11,7 +11,7 @@ const { pages, sources, backlinks, forward } = loadVault();
 const entities = pages.filter((p) => p.kind === 'entity');
 const topics = pages.filter((p) => p.kind === 'topic');
 const maps = pages.filter((p) => p.kind === 'map');
-const mapHref = maps[0]?.href ?? '/wiki/index';
+const mapHref = maps[0]?.href;
 
 // Command-search index (entities + topics + sources), serialized for the ⌘K palette.
 const kindByHref = new Map(pages.map((p) => [p.href, p.kind]));
@@ -35,7 +35,7 @@ const cls = (k: string) => (navActive === k ? 'active' : '');
 const browse = [
   { icon: '◈', label: 'Entities & Topics', href: '/entities', count: entities.length + topics.length, key: 'entities-topics' },
   { icon: '▤', label: 'Sources', href: '/sources', count: sources.length, key: 'sources' },
-  { icon: '⬡', label: 'Argument map', href: mapHref, count: '', key: 'map' },
+  ...(mapHref ? [{ icon: '⬡', label: 'Argument map', href: mapHref, count: '', key: 'map' }] : []),
 ];
 const study = [
   { icon: '文', label: 'Language reader', href: '/reader', key: 'reader' },
