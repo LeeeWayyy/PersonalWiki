@@ -464,6 +464,7 @@ def llm(prompt_text: str, *, soft: bool, model: str | None = None) -> str:
     soft=True tolerates failure and returns an empty string. Main ingest calls
     use soft=False so a missing or failed completion aborts before mutation.
     """
+    os.environ.setdefault("PW_CODEX_DISABLE_SHELL", "1")
     timeout = int(os.environ.get("PW_LLM_TIMEOUT_S", "1800"))
     try:
         out = llm_client.complete(prompt_text, timeout=timeout, model=model)

@@ -46,6 +46,8 @@ count.
 For candidate consolidation, compare `claim_ids` explicitly. Prefer assigning
 each important claim to an emitted candidate, but treat candidate destinations
 as editorial recommendations: a coherent synthesis may omit or regroup them.
+Optimize for the fewest coherent pages; never create one page per candidate.
+A chapter diff touching dozens of pages is a failure to consolidate.
 The post-apply report makes omitted high-importance recommendations visible for
 review and still rejects a response with no substantive page changes when an
 importance-5 recommendation remains uncovered.
@@ -80,6 +82,8 @@ Never edit `sources/`, `.wiki/`, `schema.md`, `wiki/_index/`,
 ## Output Format
 
 Exactly one of the following forms. No prose before or after.
+Do not edit files, reconstruct baselines, or validate patches with tools; the
+caller already owns those steps. Return the selected output form directly.
 
 **1. Unified diff** — normal case.
 

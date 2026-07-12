@@ -141,6 +141,7 @@ class LlmClientTests(unittest.TestCase):
             )
             env = {
                 "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_IGNORE_USER_CONFIG": "0",
                 "CODEX_HOME": str(codex_home),
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             }
@@ -156,6 +157,35 @@ class LlmClientTests(unittest.TestCase):
             self.assertIn("-m gpt-config-default", out)
             self.assertIn('model_reasoning_effort="high"', out)
             self.assertIn('model_verbosity="medium"', out)
+
+    def test_ignored_user_config_cannot_leak_model_or_xhigh_reasoning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            codex_home = root / "codex-home"
+            bin_dir.mkdir()
+            codex_home.mkdir()
+            write_executable(bin_dir / "codex", _fake_codex())
+            (codex_home / "config.toml").write_text(
+                'model = "personal-model"\n'
+                'model_reasoning_effort = "xhigh"\n',
+                encoding="utf-8",
+            )
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "CODEX_HOME": str(codex_home),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                identity = llm_client.execution_identity()
+                out = llm_client.complete_command("hello", timeout=5)
+
+            self.assertIsNone(identity["model"])
+            self.assertEqual(identity["reasoning"], "medium")
+            self.assertIsNone(identity["codex_config_fingerprint"])
+            self.assertNotIn("personal-model", out)
+            self.assertNotIn("xhigh", out)
+            self.assertIn('model_reasoning_effort="medium"', out)
 
     def test_codex_config_fingerprint_ignores_secrets_and_honors_overrides(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,6 +235,7 @@ class LlmClientTests(unittest.TestCase):
             )
             env = {
                 "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_IGNORE_USER_CONFIG": "0",
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             }
             with (
@@ -231,6 +262,7 @@ class LlmClientTests(unittest.TestCase):
             )
             env = {
                 "PW_LLM_PROVIDER": "codex",
+                "PW_CODEX_IGNORE_USER_CONFIG": "0",
                 "PW_LLM_MODEL": "  ",
                 "PW_CODEX_REASONING_EFFORT": " ",
                 "PW_CODEX_VERBOSITY": "",
@@ -431,6 +463,23 @@ class LlmClientTests(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=True), patch("os.getcwd", return_value=str(cwd)):
                 self.assertEqual(ingest_mod.llm("prompt", soft=False), "ok")
+
+    def test_ingest_renderer_disables_codex_shell_unless_overridden(self):
+        for configured, expected in ((None, "1"), ("0", "0")):
+            env = {"PW_LLM_PROVIDER": "codex"}
+            if configured is not None:
+                env["PW_CODEX_DISABLE_SHELL"] = configured
+            seen = []
+
+            def complete(*_args, **_kwargs):
+                seen.append(os.environ.get("PW_CODEX_DISABLE_SHELL"))
+                return "ok"
+
+            with patch.dict(os.environ, env, clear=True), patch.object(
+                ingest_mod.llm_client, "complete", side_effect=complete
+            ):
+                self.assertEqual(ingest_mod.llm("prompt", soft=False), "ok")
+            self.assertEqual(seen, [expected])
 
     def test_codex_provider_uses_direct_argv_without_shell_bridge(self):
         with tempfile.TemporaryDirectory() as tmp:

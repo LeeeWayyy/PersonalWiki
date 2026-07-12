@@ -103,7 +103,9 @@ def _effective_codex_setting(env_name: str, config_name: str, default: str) -> s
     env_value = _env(env_name)
     if env_value:
         return env_value
-    return _codex_config_string(config_name) or default
+    if not _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True):
+        return _codex_config_string(config_name) or default
+    return default
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -176,7 +178,11 @@ def model() -> str | None:
         # The CLI's compiled default is not discoverable without running a
         # completion. A configured default can be made explicit; otherwise
         # leave it unset and bind the cache to the Codex binary fingerprint.
-        return _codex_config_string("model")
+        return (
+            _codex_config_string("model")
+            if not _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True)
+            else None
+        )
     if _api_enabled() and _api_key():
         return DEFAULT_API_MODEL
     return None
@@ -256,6 +262,8 @@ def _codex_binary_fingerprint() -> str | None:
 
 def _codex_config_fingerprint(model_override: str | None = None) -> str | None:
     """Hash only effective, non-secret Codex config values used by this client."""
+    if _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True):
+        return None
     relevant: dict[str, str] = {}
     if not (model_override or "").strip() and not _env("PW_LLM_MODEL"):
         configured_model = _codex_config_string("model")
