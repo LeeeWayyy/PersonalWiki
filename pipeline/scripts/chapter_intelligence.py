@@ -641,6 +641,8 @@ def materialize_source_spans(artifact: object, text: str) -> dict:
     ``start``/``end`` values. A unique exact quote occurrence wins regardless of
     approximate bounds. Valid exact bounds can select a repeated occurrence;
     otherwise the first identical occurrence is chosen deterministically.
+    Exact short quotes are expanded with adjacent source text to the schema
+    minimum instead of spending another model call on a clerical length error.
     """
     _string(text, "text", max_length=max(len(text), 1), allow_empty=True)
     if type(artifact) is not dict:
@@ -669,11 +671,6 @@ def materialize_source_spans(artifact: object, text: str) -> dict:
                 f"{span_path}.quote",
                 max_length=SOURCE_QUOTE_MAX_CHARS,
             )
-            if len(quote) < SOURCE_QUOTE_MIN_CHARS:
-                _fail(
-                    f"{span_path}.quote",
-                    f"must contain at least {SOURCE_QUOTE_MIN_CHARS} characters",
-                )
             supplied_bounds = "start" in span
             if supplied_bounds:
                 supplied_start = _integer(span["start"], f"{span_path}.start")
@@ -704,7 +701,17 @@ def materialize_source_spans(artifact: object, text: str) -> dict:
                 start, end = supplied_start, supplied_end
             else:
                 start, end = occurrences[0]
+            if end - start < SOURCE_QUOTE_MIN_CHARS:
+                missing = SOURCE_QUOTE_MIN_CHARS - (end - start)
+                start = max(0, start - missing // 2)
+                end = min(len(text), start + SOURCE_QUOTE_MIN_CHARS)
+                start = max(0, end - SOURCE_QUOTE_MIN_CHARS)
             canonical_quote = text[start:end]
+            if len(canonical_quote) < SOURCE_QUOTE_MIN_CHARS:
+                _fail(
+                    f"{span_path}.quote",
+                    f"must contain at least {SOURCE_QUOTE_MIN_CHARS} characters",
+                )
             key = (start, end)
             if key in seen_offsets:
                 _fail(span_path, "duplicates an earlier canonical source span")

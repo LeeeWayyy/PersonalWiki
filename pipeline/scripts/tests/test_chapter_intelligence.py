@@ -449,6 +449,15 @@ class QuoteMaterializationTests(unittest.TestCase):
         with self.assertRaisesRegex(ci.ArtifactValidationError, "at most 240"):
             ci.materialize_source_spans(raw, long_quote)
 
+    def test_short_exact_quote_is_expanded_with_adjacent_source_text(self):
+        text = "Prefix context before ATP and useful context after it."
+        raw = artifact_for(count=1, quote_first=True)
+        raw["claims"][0]["source_spans"] = [{"quote": "ATP"}]
+        span = ci.materialize_source_spans(raw, text)["claims"][0]["source_spans"][0]
+        self.assertEqual(len(span["quote"]), ci.SOURCE_QUOTE_MIN_CHARS)
+        self.assertEqual(span["quote"], text[span["start"]:span["end"]])
+        self.assertIn("ATP", span["quote"])
+
     def test_unmatched_fails_and_approximate_repeated_bounds_use_first(self):
         raw = artifact_for(count=1, quote_first=True)
         raw["claims"][0]["source_spans"] = [{"quote": "missing evidence phrase"}]
