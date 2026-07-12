@@ -492,6 +492,7 @@ class LogProgressTests(unittest.TestCase):
 class RunChapteredTests(unittest.TestCase):
     def _run(self, vault, input_path, titles, run_returns):
         calls = []
+        source_id_for_sha = ingest._source_id_for_sha
 
         def fake_run_one(args, section, label, *, skip_assets=False, **_kwargs):
             calls.append((label, skip_assets))
@@ -501,9 +502,46 @@ class RunChapteredTests(unittest.TestCase):
         sections = [t if isinstance(t, tuple) else (t, 10_000) for t in titles]
         with patch.object(ingest, "VAULT_ROOT", vault), \
              patch.object(ingest, "_enumerate_sections", return_value=sections), \
-             patch.object(ingest, "_run_one_chapter", side_effect=fake_run_one):
+             patch.object(ingest, "_run_one_chapter", side_effect=fake_run_one), \
+             patch.object(
+                 ingest,
+                 "_source_id_for_sha",
+                 side_effect=lambda sources, sha: (
+                     source_id_for_sha(sources, sha) or "01BOOKAAAAAAAAAAAAAAAAAAAA"
+                 ),
+             ), \
+             patch.object(ingest, "finish_argument_map", return_value=0):
             rc = ingest.run_chaptered(_args(input_path))
         return rc, calls
+
+    def test_argument_map_generator_commits_a_new_map(self):
+        git_calls = []
+
+        def fake_git_run(*args, **_kwargs):
+            git_calls.append(args)
+            return 0
+
+        with patch.dict(
+            os.environ,
+            {"PW_INGEST_NO_AUTOCHAPTER": "0", "PW_INGEST_SKIP_ARGUMENT_MAP": "0"},
+        ), patch.object(ingest, "run_stream", return_value=0) as run_stream, \
+             patch.object(ingest, "git_run", side_effect=fake_git_run), \
+             patch.object(
+                 ingest.subprocess,
+                 "run",
+                 return_value=types.SimpleNamespace(returncode=1),
+             ):
+            self.assertEqual(
+                ingest.generate_argument_map("01BOOKAAAAAAAAAAAAAAAAAAAA"), 0
+            )
+
+        command = run_stream.call_args.args[0]
+        self.assertEqual(
+            command[-2:], ["--source-id", "01BOOKAAAAAAAAAAAAAAAAAAAA"]
+        )
+        self.assertEqual(run_stream.call_args.kwargs["env"]["PW_CODEX_DISABLE_SHELL"], "1")
+        self.assertIn(("add", "--", "wiki/_maps/"), git_calls)
+        self.assertIn(("commit", "-m", "mindmap: 01BOOKAAAAAAAAAAAAAAAAAAAA"), git_calls)
 
     def test_fresh_run_ingests_all(self):
         with tempfile.TemporaryDirectory() as d:
@@ -592,7 +630,13 @@ class RunChapteredTests(unittest.TestCase):
                  patch.object(ingest, "_enumerate_sections", return_value=[
                      ("Interlude", 9000), ("Body", 9000), ("Interlude", 9000),
                  ]), \
-                 patch.object(ingest, "_run_one_chapter", side_effect=fake_run):
+                 patch.object(ingest, "_run_one_chapter", side_effect=fake_run), \
+                 patch.object(
+                     ingest,
+                     "_source_id_for_sha",
+                     return_value="01BOOKAAAAAAAAAAAAAAAAAAAA",
+                 ), \
+                 patch.object(ingest, "finish_argument_map", return_value=0):
                 self.assertEqual(ingest.run_chaptered(_args(book)), 0)
 
             self.assertEqual(
@@ -675,6 +719,7 @@ class ChapteredSmokeTests(unittest.TestCase):
                 "LLM_CMD": str(ROOT / "scripts" / "tests" / "stub-llm.py"),
                 "STUB_ENTITY_FROM_SECTION": "1",
                 "STUB_ENTITY_PREFIX": "chaptered-",
+                "PW_INGEST_SKIP_ARGUMENT_MAP": "1",
             })
             env.pop("PW_INGEST_NO_AUTOCHAPTER", None)
 

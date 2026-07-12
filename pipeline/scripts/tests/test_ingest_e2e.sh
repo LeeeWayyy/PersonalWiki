@@ -73,7 +73,7 @@ echo "  running $ENTRY (stub LLM)…"
 # env -u VAULT_CONTENT_DIR is a SAFETY GUARD: if the caller's environment had
 # VAULT_CONTENT_DIR set (e.g. exported by a real ingest), it would point the
 # entrypoint at the *real* vault. Force the default ($CLONE/content).
-if ( cd "$CLONE" && env -u VAULT_CONTENT_DIR LLM_CMD="$STUB" "./$ENTRY_PATH" "$SRC" ) > "$TMP/out" 2>&1; then
+if ( cd "$CLONE" && env -u VAULT_CONTENT_DIR LLM_CMD="$STUB" PW_INGEST_SKIP_ARGUMENT_MAP=1 "./$ENTRY_PATH" "$SRC" ) > "$TMP/out" 2>&1; then
   :
 else
   echo "  ✗ $ENTRY exited non-zero:"; sed 's/^/    | /' "$TMP/out" | tail -30; exit 1

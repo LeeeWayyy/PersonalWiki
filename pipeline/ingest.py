@@ -87,7 +87,10 @@ NONCONTENT_HEADING_RX = _compile_env_rx(
     r"^(?:版权(?:信息)?|目录|封面|后记|致谢|词汇表|参考文献|索引|译后记)$",
 )
 
-WIKI_PATHSPEC = ["wiki/entities/", "wiki/topics/", "wiki/_index/", "wiki/_taxonomy.md"]
+WIKI_PATHSPEC = [
+    "wiki/entities/", "wiki/topics/", "wiki/_index/", "wiki/_maps/",
+    "wiki/_taxonomy.md",
+]
 WIKI_PAGE_RX = re.compile(r"^wiki/(entities|topics)/.+\.md$")
 TAXONOMY_PLACEHOLDER = """# Taxonomy
 
@@ -647,7 +650,7 @@ def preflight(profile: str = "wiki", allowed_untracked: list[str] | None = None)
         )
         if tracked or untracked:
             eout("refusing to run with local changes under wiki/.")
-            eout("  Scope: wiki/entities/, wiki/topics/, wiki/_index/, wiki/_taxonomy.md")
+            eout("  Scope: wiki/entities/, wiki/topics/, wiki/_index/, wiki/_maps/, wiki/_taxonomy.md")
             if tracked:
                 eout("  Modified (tracked):")
                 for ln in tracked.splitlines():
@@ -1695,6 +1698,44 @@ def _run_one_chapter(args, section: str | None, label: str | None, *,
     return subprocess.run(argv, env=env).returncode
 
 
+def generate_argument_map(source_id: str) -> int:
+    """Generate and commit the source's derived argument map, if needed."""
+    if (
+        os.environ.get("PW_INGEST_NO_AUTOCHAPTER") == "1"
+        or os.environ.get("PW_INGEST_SKIP_ARGUMENT_MAP") == "1"
+    ):
+        return 0
+    out(f"generating argument map for {source_id}...")
+    env = os.environ.copy()
+    env.setdefault("PW_CODEX_DISABLE_SHELL", "1")
+    rc = run_stream(
+        [f"{SCRIPTS}/generate-mindmap.py", "--source-id", source_id],
+        env=env,
+        check=False,
+    )
+    if rc != 0:
+        eout("argument-map generation failed; source ingestion is committed. "
+             "Re-run the same ingest command to retry only the missing map.")
+        return rc
+    git_run("add", "--", "wiki/_maps/")
+    if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0:
+        out("argument map unchanged")
+        return 0
+    git_run("commit", "-m", f"mindmap: {source_id}")
+    out(f"committed argument map for {source_id}")
+    return 0
+
+
+def finish_argument_map(source_id: str) -> int:
+    """Generate a book map after chapter children release their individual locks."""
+    acquire_content_ingest_lock()
+    try:
+        preflight("wiki")
+        return generate_argument_map(source_id)
+    finally:
+        release_content_ingest_lock()
+
+
 def run_chaptered(args) -> int:
     """Ingest a whole book chapter-by-chapter.
 
@@ -1742,7 +1783,14 @@ def run_chaptered(args) -> int:
         chapter_ranges = [None] * len(chapters)
     if not chapters:
         out("no ingestable chapters detected — ingesting as a single unit")
-        return _run_one_chapter(args, section=None, label=None)
+        rc = _run_one_chapter(args, section=None, label=None)
+        if rc != 0:
+            return rc
+        source_id = _source_id_for_sha(VAULT_ROOT / "sources", sha256_of(input_path))
+        if not source_id:
+            eout("single-unit ingest completed but its source_id could not be resolved")
+            return 1
+        return finish_argument_map(source_id)
 
     chapter_instances = _stable_chapter_instances(chapters)
 
@@ -1764,7 +1812,7 @@ def run_chaptered(args) -> int:
     total = len(chapter_instances)
     if whole_done:
         out(f"chaptered ingest: {total} chapter(s), source already logged as a single unit, 0 to do")
-        return 0
+        return finish_argument_map(source_id)
 
     resolved_done = _resolved_done_labels(
         [label for label, _section, _title, _occurrence in chapter_instances],
@@ -1801,7 +1849,11 @@ def run_chaptered(args) -> int:
         new += 1
         asset_pass_done = True
     out(f"chaptered ingest complete: {new} new chapter(s), {total - remaining} skipped.")
-    return 0
+    source_id = source_id or _source_id_for_sha(VAULT_ROOT / "sources", src_sha)
+    if not source_id:
+        eout("chaptered ingest completed but its source_id could not be resolved")
+        return 1
+    return finish_argument_map(source_id)
 
 
 def main() -> int:
@@ -2011,8 +2063,8 @@ def main() -> int:
         and not args.images_only
         and whole_source_already_logged(SRC["SOURCE_ID"])
     ):
-        out(f"whole-source ingest already logged for {SRC['SOURCE_ID']}; nothing to do")
-        return 0
+        out(f"whole-source ingest already logged for {SRC['SOURCE_ID']}; checking argument map")
+        return generate_argument_map(SRC["SOURCE_ID"])
     if (
         args.profile == "wiki"
         and section_label
@@ -2420,6 +2472,10 @@ def main() -> int:
             f"ingest: {SRC['SOURCE_ID']}{section_tag} ({SRC['DEST_BASENAME']}{commit_suffix}){sup_note}")
     _ROLLBACK_ON_FAILURE = False
     out(f"committed {SRC['SOURCE_ID']}{section_tag}")
+    if args.profile == "wiki" and not section_label:
+        map_rc = generate_argument_map(SRC["SOURCE_ID"])
+        if map_rc != 0:
+            return map_rc
     out("done.")
     return 0
 
