@@ -116,6 +116,7 @@ class Zone:
 class Paragraph:
     text: str
     line: int
+    end_line: int
 
     @property
     def signature(self) -> str:
@@ -360,14 +361,17 @@ def callout_paragraphs(
 
         block: list[str] = []
         block_line = zone.start_line
+        block_end_line = zone.start_line
         fence: str | None = None
 
         def flush() -> None:
-            nonlocal block, block_line
+            nonlocal block, block_line, block_end_line
             if block:
                 text = "\n".join(block).strip()
                 if _substantive(text):
-                    paragraphs.append(Paragraph(text=text, line=block_line))
+                    paragraphs.append(Paragraph(
+                        text=text, line=block_line, end_line=block_end_line
+                    ))
             block = []
 
         for line_number, value in content:
@@ -397,10 +401,12 @@ def callout_paragraphs(
             if _LIST_ITEM_RX.match(stripped):
                 flush()
                 block_line = line_number
+                block_end_line = line_number
                 block.append(value)
                 continue
             if not block:
                 block_line = line_number
+            block_end_line = line_number
             block.append(value)
         flush()
     return tuple(paragraphs), tuple(issues)

@@ -66,6 +66,34 @@ Evidence line [src:01KX582AX79FD9BQG2VNMG41NY#第一章].
         self.assertFalse(changed)
         self.assertEqual(out, text)
 
+    def test_adds_current_citation_only_to_changed_uncited_paragraph(self):
+        source_id = "01KX582AX79FD9BQG2VNMG41NY"
+        section = "第七章 生命的时钟"
+        old = f"""---
+type: Entity
+aliases: []
+---
+# X
+
+<!-- llm-zone -->
+> [!AI] LLM Synthesis
+>
+> Historical paragraph [src:{source_id}#old].
+<!-- /llm-zone -->
+"""
+        current = old.replace(
+            "<!-- /llm-zone -->",
+            ">\n> Newly synthesized paragraph without provenance.\n<!-- /llm-zone -->",
+        )
+        out, changed = fmt.add_current_citations(
+            current, old, "wiki/entities/X.md", source_id, section
+        )
+        expected = fmt.expected_citation(source_id, section)
+        self.assertTrue(changed)
+        self.assertEqual(out.count(expected), 1)
+        self.assertIn(f"> Newly synthesized paragraph without provenance. [{expected}]", out)
+        self.assertIn(f"> Historical paragraph [src:{source_id}#old].", out)
+
 
 if __name__ == "__main__":
     unittest.main()

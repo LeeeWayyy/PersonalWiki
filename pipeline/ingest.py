@@ -2331,7 +2331,12 @@ def main() -> int:
                 if WIKI_PAGE_RX.match(ln)]
     if modified:
         out("normalizing llm-zone formatting...")
-        run_stream([f"{SCRIPTS}/format-llm-zone.py", *modified])
+        run_stream([
+            f"{SCRIPTS}/format-llm-zone.py",
+            f"--source-id={SRC['SOURCE_ID']}",
+            f"--section-label={section_label}",
+            *modified,
+        ])
 
         out("validating chapter-intelligence coverage and prose quality...")
         quality_rc, quality_receipt = _run_quality_gate(

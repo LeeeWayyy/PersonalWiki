@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _util import default_vault_root  # noqa: E402
+from ingest_quality import (  # noqa: E402
+    PageInput,
+    expected_citation,
+    has_exact_citation,
+    modified_paragraphs,
+    parse_page,
+)
 
 
 TOOLING_ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +117,43 @@ def normalize_text(text: str) -> tuple[str, bool]:
     return ZONE_RX.sub(repl, text), changed
 
 
+def add_current_citations(
+    text: str,
+    baseline_text: str | None,
+    path: str,
+    source_id: str,
+    section_label: str,
+) -> tuple[str, bool]:
+    """Append current provenance to changed callout paragraphs that omitted it."""
+    current = parse_page(PageInput(path=path, text=text))
+    baseline = (
+        parse_page(PageInput(path=path, text=baseline_text)).paragraphs
+        if baseline_text is not None
+        else ()
+    )
+    changed = modified_paragraphs(current.paragraphs, baseline)
+    missing = [
+        paragraph for paragraph in changed
+        if not has_exact_citation(paragraph.text, source_id, section_label)
+    ]
+    if not missing:
+        return text, False
+    lines = text.splitlines()
+    citation = f" [{expected_citation(source_id, section_label)}]"
+    for paragraph in missing:
+        lines[paragraph.end_line - 1] = lines[paragraph.end_line - 1].rstrip() + citation
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else ""), True
+
+
+def _baseline_text(path: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "show", f"HEAD:{path.as_posix()}"],
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
 def _page_paths(args: argparse.Namespace) -> list[Path]:
     if args.all:
         roots = [VAULT_ROOT / "wiki" / "entities", VAULT_ROOT / "wiki" / "topics"]
@@ -120,6 +165,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--all", action="store_true", help="format all wiki entity/topic pages")
     ap.add_argument("--check", action="store_true", help="report pages that would change")
+    ap.add_argument("--source-id", default="", help="append this run's missing citations")
+    ap.add_argument("--section-label", default="")
     ap.add_argument("pages", nargs="*")
     args = ap.parse_args()
     if not args.all and not args.pages:
@@ -131,6 +178,15 @@ def main() -> int:
             continue
         text = path.read_text(encoding="utf-8")
         new_text, did_change = normalize_text(text)
+        if args.source_id:
+            new_text, cited = add_current_citations(
+                new_text,
+                _baseline_text(path),
+                path.as_posix(),
+                args.source_id,
+                args.section_label,
+            )
+            did_change = did_change or cited
         if not did_change:
             continue
         changed.append(path)
