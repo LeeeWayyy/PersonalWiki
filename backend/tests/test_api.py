@@ -335,6 +335,7 @@ def test_build_argv_leaves_document_chaptering_to_ingest():
     # Document-vs-URL chaptering is decided by ingest.py, which can inspect the
     # local file and shares the pipeline's format policy.
     default_epub = argv("/stage/book.epub")
+    assert default_epub[-3:] == ["--limit", "0", "/stage/book.epub"]
     assert "--chapters" not in default_epub
     assert "--section" not in default_epub
     assert "--section-label" not in default_epub
@@ -343,18 +344,21 @@ def test_build_argv_leaves_document_chaptering_to_ingest():
     assert "--chapters" not in argv("/stage/paper.pdf")
     assert "--chapters" not in argv("https://example.com/book.epub")
     selected = argv("/stage/book.epub", section_heading="第二章 (测试)")
-    assert selected[-5:] == [
+    assert selected[-4:] == [
         "--section",
         r"^第二章\ \(测试\)$",
-        "--section-label",
-        "第二章 (测试)",
+        "--section-label=第二章 (测试)",
         "/stage/book.epub",
     ]
+    assert "--section-label=--- Prologue ---" in argv(
+        "/stage/book.epub", section_heading="--- Prologue ---"
+    )
     assert argv("/stage/book.epub", kind="wiki")[-1] == "/stage/book.epub"
 
 
 def test_preflight_is_profile_aware_for_lang(client, auth, content_dir):
     dirty = content_dir / "lang" / "scratch.tmp"
+    reading = content_dir / "lang" / "_reading" / "partial.md"
     dirty.parent.mkdir(parents=True, exist_ok=True)
     dirty.write_text("partial", encoding="utf-8")
     try:
@@ -364,11 +368,16 @@ def test_preflight_is_profile_aware_for_lang(client, auth, content_dir):
 
         lang = client.get("/preflight?kind=lang", headers=auth)
         assert lang.status_code == 200
-        body = lang.json()
-        assert body["ok"] is False
-        assert "lang/scratch.tmp" in body["offending"]
+        assert lang.json()["ok"] is True
+
+        reading.parent.mkdir(parents=True)
+        reading.write_text("partial", encoding="utf-8")
+        blocked = client.get("/preflight?kind=lang", headers=auth).json()
+        assert blocked["ok"] is False
+        assert "lang/_reading/partial.md" in blocked["offending"]
     finally:
         dirty.unlink(missing_ok=True)
+        reading.unlink(missing_ok=True)
 
 
 def test_preflight_allows_untracked_taxonomy_scaffold(client, auth, content_dir):
@@ -391,6 +400,34 @@ def test_preflight_allows_untracked_taxonomy_scaffold(client, auth, content_dir)
     finally:
         taxonomy.unlink(missing_ok=True)
         page.unlink(missing_ok=True)
+
+
+def test_preflight_allows_retryable_untracked_source_sidecar(client, auth, content_dir):
+    sidecar = content_dir / "sources" / "failed-run.epub.md"
+    sidecar.parent.mkdir()
+    sidecar.write_text("retryable\n", encoding="utf-8")
+    try:
+        body = client.get("/preflight", headers=auth).json()
+        assert body["ok"] is True, body
+    finally:
+        sidecar.unlink(missing_ok=True)
+
+
+def test_preflight_reports_repo_wide_staged_index(client, auth, content_dir):
+    staged = content_dir / "outside-watched-scope.txt"
+    staged.write_text("staged\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(content_dir), "add", staged.name], check=True)
+    try:
+        body = client.get("/preflight", headers=auth).json()
+        assert body["ok"] is False
+        assert staged.name in body["offending"]
+    finally:
+        subprocess.run(
+            ["git", "-C", str(content_dir), "reset", "--", staged.name],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        staged.unlink(missing_ok=True)
 
 
 def test_preflight_reports_cjk_leftover_artifact(client, auth, content_dir):
@@ -1119,11 +1156,10 @@ def test_ingest_section_heading_selects_and_labels_the_same_text(client, auth, m
         "kind": "auto",
         "section_heading": "第二章 (测试)",
     }
-    assert ir._build_argv(called["target"], called["options"])[-5:] == [
+    assert ir._build_argv(called["target"], called["options"])[-4:] == [
         "--section",
         r"^第二章\ \(测试\)$",
-        "--section-label",
-        "第二章 (测试)",
+        "--section-label=第二章 (测试)",
         "https://example.com/book",
     ]
 

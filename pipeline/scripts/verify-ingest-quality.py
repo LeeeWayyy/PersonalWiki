@@ -23,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-id", required=True)
     parser.add_argument("--section-label", required=True)
     parser.add_argument(
+        "--allow-no-changes",
+        action="store_true",
+        help="Treat explicit NO_CHANGES candidate omissions as warnings.",
+    )
+    parser.add_argument(
         "--modified",
         action="extend",
         nargs="+",
@@ -130,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
             source_id=args.source_id,
             section_label=args.section_label,
             pages=pages,
+            allow_no_changes=args.allow_no_changes,
             initial_errors=(*intelligence_errors, *page_errors),
             initial_warnings=warnings,
         )

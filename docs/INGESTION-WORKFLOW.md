@@ -62,12 +62,14 @@ via SSE (`/jobs/{id}/events`), with `/jobs/{id}/cancel` available.
 `backend/app/ingest_runner.py` is the control plane: a single `asyncio.Lock`
 serializes all jobs, `ensure_content_git` auto-initializes a git repo in the
 wiki folder if needed (blocked by `PW_INGEST_NO_AUTO_GIT=1`), and its own
-preflight mirrors ingest.py's dirty-tree scopes (`wiki/`, `sources/`,
-`.wiki/log.md`; `lang/` for lang jobs) so a doomed run is reported as `blocked`
+preflight mirrors ingest.py's dirty-tree scopes (tool-owned wiki pages,
+tracked provenance, staged files, and stale assets; `lang/_reading/` for lang
+jobs) so a doomed run is reported as `blocked`
 up front. It builds the argv (`--profile lang`, `--kind <k>`, or
-`--section '^<escaped heading>$' --section-label <heading>`), runs
-`pipeline/ingest.py` in its own process group with an idle timeout (1800s of
-silence), then optionally `REBUILD_CMD`. `PW_INGEST_STUB=1` exercises the job
+`--section '^<escaped heading>$' --section-label=<heading>`; document jobs use
+`--limit 0`), runs `pipeline/ingest.py` in its own process group with an idle
+timeout (2100s of silence), then optionally `REBUILD_CMD`.
+`PW_INGEST_STUB=1` exercises the job
 flow without the real pipeline. `backend/app/serve.py` enforces exactly one
 Uvicorn worker — jobs, locks, and staged uploads are process-local.
 
@@ -117,7 +119,8 @@ file in the wiki profile with no section/kind flags. One full extraction
 (`PW_CHAPTER_HEADING_RX`, CJK `第…章` + English defaults) and excludes
 front/back matter (`PW_NONCONTENT_HEADING_RX`). With no chapter markers, each
 section ≥ `PW_CHAPTER_MIN_CHARS` (default 200) becomes its own unit. Repeated
-headings get stable `[occurrence i/N]` labels.
+headings get stable `[occurrence i/N]` labels. Generated labels replace control
+characters and truncate to 200 characters without changing extraction headings.
 
 Each chapter is then a **child process** running the normal single-section
 ingest (`PW_INGEST_NO_AUTOCHAPTER=1` prevents re-entry), with its own
@@ -151,12 +154,13 @@ Owner: `pipeline/scripts/analyze-chapter.py` (CLI) →
 [design doc](CHAPTER-INTELLIGENCE-DESIGN.md) covers the artifact contract;
 operationally:
 
-- One structured completion (`llm_client.complete`) produces a
+- One structured completion plus at most one validation-repair completion
+  (`llm_client.complete`) produces a
   `chapter-intelligence/1` artifact: claims with exact source quotes,
   entities, topics, relations, `page_candidates`, `builds_on`. Model from
   `--analyze-model`/`PW_ANALYZE_MODEL` (independent of the diff model),
   reasoning effort from `PW_ANALYZE_REASONING_EFFORT` (default `low`), timeout
-  from `PW_ANALYZE_TIMEOUT_S` (default 900s).
+  from `PW_ANALYZE_TIMEOUT_S` (default 1800s).
 - Quotes are materialized to canonical `start`/`end` offsets against the
   extracted text; unmatched quotes fail validation (`validate_artifact`).
 - The validated artifact is cached at
@@ -165,8 +169,8 @@ operationally:
   label, prompt version, model identity, schema-rules digest, ordered
   sections, prior-chapter spines, and the prompt-template hash — any drift
   misses. `read_cache_entry` verifies manifest shape, key, and artifact digest
-  before reuse. Invalid LLM responses are preserved for debugging, then fail
-  the run.
+  before reuse. Invalid output gets one repair attempt; a second invalid
+  response is preserved for debugging and fails the run.
 - For chaptered books, `discover_prior_spines` feeds compact spines
   (label/central_question/chapter_claim) of already-cached chapters into the
   next chapter's analysis.
@@ -200,12 +204,14 @@ via `page-digest.py`, full content for expanded paths), and the images table.
 The LLM (via `llm_client`, model from `--model`/`PW_LLM_MODEL`, timeout
 `PW_LLM_TIMEOUT_S` default 1800s) must emit a unified diff, a one-shot
 `{"action":"expand", ...}` request (answered with a second `expand`-operation
-prompt), or a `NO_CHANGES:` line. Codex runs in an isolated temp workdir
+prompt), or a `NO_CHANGES:` line. Provider failures or empty output get one
+retry; an enabled API is the fallback after local failure. Codex runs in an
+isolated temp workdir
 seeded with copies of exactly the candidate pages (`_seed_workset`); the real
 tree is only ever mutated by applying the emitted diff. `NO_CHANGES` is not a
 free pass: `handle_no_changes_or_continue` runs the same quality gate with an
-empty modified set — coverage must be satisfiable by already-existing pages —
-then logs and commits the no-change run. The one exception is a supersede
+empty modified set, reports candidate omissions as warnings, then logs and
+commits the no-change run. A supersede
 whose text artifact is byte-identical to a predecessor already cited by
 committed pages (`_supersede_coverage_proven`).
 
@@ -233,8 +239,8 @@ modified pages plus unchanged candidates, prints a JSON
 non-zero on failure; any internal exception fails closed with a
 `gate.internal` receipt. It deterministically reports candidate coverage;
 omitted importance-4/5 recommendations are warnings after any substantive page
-change, while `NO_CHANGES` remains fail-closed when an importance-5 candidate
-is uncovered. Modified substantive llm-zone paragraphs must carry the exact
+change or an explicit `NO_CHANGES`. Modified substantive llm-zone paragraphs
+must carry the exact
 canonical citation `[src:<id>#sec=<encoded label>]`; central pages have
 substantive prose; entities avoid forbidden attribution phrasing. Then, in order:
 `format-llm-zone.py`, `add-page-id.py`, `sync-frontmatter.py`,
@@ -266,7 +272,8 @@ restores all wiki/provenance paths, deletes rolled-back added pages, and
 verifies the tree is clean; only then is the new source removed. If rollback
 itself fails, source provenance is deliberately **kept** so staged citations
 can never point at a deleted source. SIGTERM/SIGINT (backend cancel, idle
-timeout) run this same cleanup.
+timeout) run this same cleanup; the backend allows 30 seconds before escalating
+so child termination and Git rollback can finish.
 
 ## Downstream Consumers
 

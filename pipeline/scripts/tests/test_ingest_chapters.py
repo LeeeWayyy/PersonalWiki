@@ -123,6 +123,15 @@ class GroupChaptersTests(unittest.TestCase):
         )
         self.assertEqual([instance[3] for instance in instances], [1, None, 2])
 
+    def test_generated_labels_are_log_safe_and_bounded(self):
+        long = "A" * (ingest.SECTION_LABEL_MAX_CHARS + 20)
+        instances = ingest._stable_chapter_instances(
+            ingest._group_chapters(["-1-", "Tabbed\theading", long])
+        )
+        self.assertEqual(instances[0][0], "-1-")
+        self.assertEqual(instances[1][0], "Tabbed heading")
+        self.assertEqual(len(instances[2][0]), ingest.SECTION_LABEL_MAX_CHARS)
+
     def test_normalized_duplicate_labels_select_their_own_exact_heading(self):
         instances = ingest._stable_chapter_instances(
             ingest._group_chapters(["ATP", "ＡＴＰ"])
@@ -236,6 +245,27 @@ class ScaffoldTests(unittest.TestCase):
                 check=True,
             ).stdout
             self.assertEqual(status, "")
+
+    def test_lang_lock_is_ignored_from_nested_profile_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            vault = Path(d)
+            lang = vault / "lang"
+            lang.mkdir()
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(lang)
+                ingest.ensure_wiki_scaffold("lang")
+                lock = lang / ".wiki" / "ingest.lock"
+                lock.parent.mkdir()
+                lock.touch()
+            finally:
+                os.chdir(old_cwd)
+            status = subprocess.run(
+                ["git", "-C", str(vault), "status", "--short", "--", "lang/.wiki/ingest.lock"],
+                text=True, capture_output=True, check=True,
+            )
+            self.assertEqual(status.stdout, "")
 
 
 class AutoChapterTests(unittest.TestCase):
@@ -1005,6 +1035,10 @@ class PipelineRecoveryTests(unittest.TestCase):
             ingest.validate_section_label("bad\tlabel")
         with self.assertRaises(SystemExit):
             ingest.validate_section_label("x" * (ingest.SECTION_LABEL_MAX_CHARS + 1))
+
+    def test_malformed_identity_assignment_has_a_clean_error(self):
+        with self.assertRaisesRegex(RuntimeError, "malformed source identity output"):
+            ingest.parse_shell_assignments("ORIGIN_REF='line one\n")
 
     def test_whole_source_already_logged_only_matches_unsectioned_marker(self):
         old_cwd = os.getcwd()

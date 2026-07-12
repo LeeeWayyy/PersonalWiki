@@ -697,6 +697,20 @@ def _complete_api(prompt: str, timeout: int, *, model: str | None) -> str | None
         raise RuntimeError("unexpected LLM API response shape") from exc
 
 
+def _twice(call):
+    """Retry one provider failure/empty response once."""
+    for attempt in range(2):
+        try:
+            result = call()
+        except Exception as exc:
+            if attempt or "timed out" in str(exc).lower():
+                raise
+            continue
+        if result is not None or attempt:
+            return result
+    return None
+
+
 def complete(prompt: str, timeout: int = 60, *, model: str | None = None) -> str | None:
     """Run one completion.
 
@@ -710,11 +724,19 @@ def complete(prompt: str, timeout: int = 60, *, model: str | None = None) -> str
     if err:
         raise RuntimeError(err)
     if _api_requested():
-        return _complete_api(prompt, timeout, model=model)
+        return _twice(lambda: _complete_api(prompt, timeout, model=model))
     if command_configured():
-        return complete_command(prompt, timeout=timeout, model=model)
+        try:
+            result = _twice(lambda: complete_command(prompt, timeout=timeout, model=model))
+        except Exception:
+            if _api_enabled() and _api_key():
+                return _twice(lambda: _complete_api(prompt, timeout, model=model))
+            raise
+        if result is not None or not (_api_enabled() and _api_key()):
+            return result
+        return _twice(lambda: _complete_api(prompt, timeout, model=model))
     if _api_enabled() and _api_key():
-        return _complete_api(prompt, timeout, model=model)
+        return _twice(lambda: _complete_api(prompt, timeout, model=model))
     return None
 
 

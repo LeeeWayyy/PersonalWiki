@@ -597,6 +597,7 @@ def evaluate_quality(
     source_id: str,
     section_label: str,
     pages: Sequence[PageInput],
+    allow_no_changes: bool = False,
     initial_errors: Sequence[Issue] = (),
     initial_warnings: Sequence[Issue] = (),
 ) -> dict[str, object]:
@@ -735,7 +736,7 @@ def evaluate_quality(
             represented_claim_ids.update(candidate.claim_ids)
 
     for candidate, resolved_type, modified_matches, covered_existing in candidate_matches:
-        matches = [*modified_matches, *covered_existing]
+        matches = list({page.path: page for page in [*covered_existing, *modified_matches]}.values())
         matched_paths = sorted(page.path for page in matches)
         consolidated = bool(
             not matches
@@ -786,7 +787,7 @@ def evaluate_quality(
                     )
                 )
                 continue
-            if has_modified_candidate:
+            if has_modified_candidate or allow_no_changes:
                 warnings.append(
                     Issue(
                         "coverage.required_candidate_omitted",

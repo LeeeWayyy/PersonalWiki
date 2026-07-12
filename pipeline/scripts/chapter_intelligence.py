@@ -22,7 +22,7 @@ import llm_client
 SCHEMA_VERSION = "chapter-intelligence/1"
 CACHE_MANIFEST_SCHEMA = "chapter-intelligence-cache-entry/1"
 PROMPT_VERSION = "v3"
-DEFAULT_TIMEOUT_S = 900
+DEFAULT_TIMEOUT_S = 1800
 SOURCE_QUOTE_MIN_CHARS = 20
 SOURCE_QUOTE_MAX_CHARS = 240
 DEFAULT_SCHEMA_INGEST_PATH = (
@@ -2031,35 +2031,51 @@ def analyze_chapter(
         prior_chapters=prior_chapters,
     )
     completion = complete or llm_client.complete
-    raw = completion(prompt, timeout=timeout_s, model=selected_model)
-    if raw is None:
-        raise RuntimeError("chapter analyzer failed: no LLM provider is configured")
-    try:
-        artifact = materialize_response(raw, text)
-        validated = validate_artifact(
-            artifact,
-            text=text,
-            source_id=source_id,
-            source_sha256=source_sha256,
-            section_label=section_label,
-            prompt_version=prompt_version,
-            ordered_sections=ordered_sections,
+    raw = ""
+    validation_error = ""
+    for attempt in range(2):
+        request = prompt if attempt == 0 else (
+            f"{prompt}\n\nYour previous response was rejected by the validator: "
+            f"{validation_error}\nReturn a corrected complete JSON object only."
         )
-    except (ArtifactValidationError, ValueError) as exc:
-        if invalid_destination is not None:
-            atomic_write_json(
-                invalid_destination,
-                {
-                    "schema": "chapter-intelligence-invalid/1",
-                    "source_id": source_id,
-                    "source_sha256": source_sha256,
-                    "section_label": section_label,
-                    "prompt_version": prompt_version,
-                    "error": str(exc),
-                    "raw_response": raw,
-                },
+        raw = completion(request, timeout=timeout_s, model=selected_model)
+        if raw is None:
+            detail = (
+                "configured provider returned empty output"
+                if llm_client.configured()
+                else "no LLM provider is configured"
             )
-        raise
+            raise RuntimeError(f"chapter analyzer failed: {detail}")
+        try:
+            artifact = materialize_response(raw, text)
+            validated = validate_artifact(
+                artifact,
+                text=text,
+                source_id=source_id,
+                source_sha256=source_sha256,
+                section_label=section_label,
+                prompt_version=prompt_version,
+                ordered_sections=ordered_sections,
+            )
+            break
+        except (ArtifactValidationError, ValueError) as exc:
+            validation_error = str(exc)
+            if attempt == 0:
+                continue
+            if invalid_destination is not None:
+                atomic_write_json(
+                    invalid_destination,
+                    {
+                        "schema": "chapter-intelligence-invalid/1",
+                        "source_id": source_id,
+                        "source_sha256": source_sha256,
+                        "section_label": section_label,
+                        "prompt_version": prompt_version,
+                        "error": validation_error,
+                        "raw_response": raw,
+                    },
+                )
+            raise
 
     if destination is not None:
         write_cache_entry(destination, validated, inputs)

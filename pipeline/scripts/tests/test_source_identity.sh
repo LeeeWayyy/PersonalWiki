@@ -111,7 +111,7 @@ while [[ $# -gt 0 ]]; do
   if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
   shift
 done
-printf 'url body\n' > "$out"
+printf '%s\n' "${CURL_BODY:-url body}" > "$out"
 SH
   chmod +x "$TMP/bin/curl"
   if TMP="$TMP" PATH="$TMP/bin:$PATH" "$SI" "https://example.com/a/b?q=1" >/dev/null 2>"$TMP/url.err" \
@@ -123,7 +123,17 @@ SH
     fail "url fetch bounds missing: args=$(cat "$TMP/curl.args" 2>/dev/null) err=$(cat "$TMP/url.err" 2>/dev/null)"
   fi
 
-  # B5: transactional mode reports every future path before publication and
+  # B5: different same-day URLs can sanitize to the same slug; the second uses
+  # a content-hash suffix instead of permanently wedging on the first path.
+  out1="$(TMP="$TMP" PATH="$TMP/bin:$PATH" CURL_BODY=first "$SI" "https://example.com/collision?a=1" 2>/dev/null)"; eval "$out1"; dest1="$DEST"
+  out2="$(TMP="$TMP" PATH="$TMP/bin:$PATH" CURL_BODY=second "$SI" "https://example.com/collision/a=1" 2>/dev/null)"; eval "$out2"; dest2="$DEST"
+  if [[ "$dest1" != "$dest2" && -f "$dest1" && -f "$dest2" && "$dest2" == *-????????????.html ]]; then
+    pass "URL slug collision: distinct content gets a deterministic hash suffix"
+  else
+    fail "URL slug collision handling (first=$dest1 second=$dest2)"
+  fi
+
+  # B6: transactional mode reports every future path before publication and
   # waits for the parent acknowledgement. Killing it before PUBLISH must leave
   # the vault untouched.
   printf 'handshake cancellation source\n' > /tmp/si_handshake_cancel.txt
@@ -152,7 +162,7 @@ PY
   then pass "reservation handshake: cancel before PUBLISH leaves no vault artifacts"
   else fail "reservation handshake cancellation safety"; fi
 
-  # B6: after the parent has read and registered the paths, PUBLISH creates the
+  # B7: after the parent has read and registered the paths, PUBLISH creates the
   # asset and sidecar and exits with the same machine-readable contract.
   printf 'handshake publication source\n' > /tmp/si_handshake_publish.txt
   if SI="$SI" python3 - /tmp/si_handshake_publish.txt <<'PY'
@@ -180,7 +190,7 @@ PY
   then pass "reservation handshake: publication starts only after parent acknowledgement"
   else fail "reservation handshake publication"; fi
 
-  # B7: the sidecar path is independently protected. Previously a user-created
+  # B8: the sidecar path is independently protected. Previously a user-created
   # untracked sidecar was overwritten whenever the sibling asset was absent.
   printf 'collision source\n' > /tmp/si_sidecar_collision.txt
   COLLISION_SC="sources/$(date -u +%F)-si_sidecar_collision.txt.md"

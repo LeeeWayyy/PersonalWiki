@@ -255,6 +255,9 @@ def main() -> int:
             if origin_type == "url":
                 dest_basename = f"{today()}-{url_slug(inp)}.html"
                 dest = f"sources/{dest_basename}"
+                if Path(dest).exists() or Path(f"{dest}.md").exists():
+                    dest_basename = f"{dest_basename[:-5]}-{sha256[:12]}.html"
+                    dest = f"sources/{dest_basename}"
             else:
                 dest_basename = f"{today()}-{safe_name(os.path.basename(inp))}"
                 dest = f"sources/{dest_basename}"

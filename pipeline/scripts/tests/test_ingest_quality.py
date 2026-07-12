@@ -480,6 +480,40 @@ class PageQualityTests(unittest.TestCase):
         self.assertTrue(receipt["ok"], receipt["errors"])
         self.assertEqual(receipt["candidates"][0]["disposition"], "already-covered")
 
+    def test_modified_page_and_its_historical_baseline_count_once(self):
+        artifact = production_intelligence()
+        prose = "ATP couples energy-releasing reactions to work."
+        old = page_text("ATP", prose)
+        current = page_text(
+            "ATP",
+            prose,
+            f"ATP also buffers cellular demand {current_citation()}.",
+        )
+        receipt = quality.evaluate_quality(
+            artifact,
+            source_id=SOURCE_ID,
+            section_label=SECTION,
+            pages=[quality.PageInput(
+                "wiki/entities/ATP.md", current, old, disposition="modified"
+            )],
+        )
+        self.assertTrue(receipt["ok"], receipt["errors"])
+        self.assertEqual(
+            receipt["candidates"][0]["matched_paths"],
+            ["wiki/entities/ATP.md"],
+        )
+
+    def test_explicit_no_changes_can_finish_with_uncovered_candidate(self):
+        receipt = quality.evaluate_quality(
+            production_intelligence(),
+            source_id=SOURCE_ID,
+            section_label=SECTION,
+            pages=[],
+            allow_no_changes=True,
+        )
+        self.assertTrue(receipt["ok"], receipt["errors"])
+        self.assertIn("coverage.required_candidate_omitted", codes(receipt, "warnings"))
+
     def test_existing_global_identity_reconciles_historical_page_type(self):
         artifact = production_intelligence()
         text = page_text(

@@ -793,6 +793,28 @@ class CacheAndPromptTests(unittest.TestCase):
             self.assertIn("does not occur", diagnostic["error"])
             self.assertIn("invented evidence quote", diagnostic["raw_response"])
 
+    def test_invalid_completion_gets_one_repair_attempt(self):
+        invalid = artifact_for(quote_first=True)
+        invalid["claims"][0]["source_spans"] = [{"quote": "invented evidence quote"}]
+        responses = [json.dumps(invalid), json.dumps(artifact_for(quote_first=True))]
+        prompts = []
+
+        def complete(prompt, **_kwargs):
+            prompts.append(prompt)
+            return responses.pop(0)
+
+        result = ci.analyze_chapter(
+            TEXT,
+            source_id=SOURCE_ID,
+            source_sha256=SOURCE_SHA,
+            section_label="Chapter 2",
+            model_identity=MODEL_IDENTITY,
+            complete=complete,
+        )
+        self.assertEqual(result["schema"], ci.SCHEMA_VERSION)
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("previous response was rejected", prompts[1])
+
     def test_revalidates_preserved_response_before_calling_llm(self):
         text = "Alpha **reliably powers** beta."
         with tempfile.TemporaryDirectory() as temporary:

@@ -48,9 +48,9 @@ CONTENT_DIR = app_config.content_dir(REPO).expanduser().resolve(strict=False)   
 DEFAULT_INGEST_SCRIPT = REPO / "pipeline" / "ingest.py"
 INGEST_CMD = os.environ.get("INGEST_CMD", f"python3 {shlex.quote(str(DEFAULT_INGEST_SCRIPT))}")
 REBUILD_CMD = os.environ.get("REBUILD_CMD", "")  # e.g. "npm --prefix /path/to/personal_wiki run build"
-JOB_TIMEOUT_S = 1800
+JOB_TIMEOUT_S = int(os.environ.get("PW_INGEST_IDLE_TIMEOUT_S", "2100"))
 PROCESS_CLEANUP_TIMEOUT_S = 10
-PROCESS_TERMINATE_GRACE_S = 5
+PROCESS_TERMINATE_GRACE_S = 30
 JOB_LOG_LIMIT = 2000
 JOB_TTL_S = 86400
 DATA_DIR = app_config.abs_path(REPO, os.environ.get("PW_DATA_DIR") or str(REPO / "backend" / "data")).resolve(strict=False)
@@ -65,8 +65,7 @@ LOGGER = logging.getLogger(__name__)
 
 # Keep these backend preflight constants next to the guard while ingest.py lacks
 # a stable --preflight CLI. They intentionally mirror ingest.py's dirty scopes.
-_WATCHED = ("wiki/", "sources/", ".wiki/log.md")
-_LANG_WATCHED = ("lang/",)
+_WIKI_WATCHED = ("wiki/entities/", "wiki/topics/", "wiki/_index/", "wiki/_taxonomy.md")
 _LEFTOVER = re.compile(r"\.(rejected|failed(\.\d+)?|apply-err(\.\d+)?)$")
 # ingest.py's ensure_wiki_scaffold creates wiki/_taxonomy.md and commits it in
 # the same run; its own preflight allows the placeholder as untracked. A run
@@ -289,7 +288,10 @@ def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
         return False, f"wiki folder is not a git repo ({content}) — ingest needs git so it can commit changes", []
     try:
         result = subprocess.run(
-            ["git", "-C", str(content), "-c", "core.quotepath=false", "status", "--porcelain"],
+            [
+                "git", "-C", str(content), "-c", "core.quotepath=false",
+                "status", "--porcelain", "--untracked-files=all",
+            ],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
     except Exception as e:  # noqa
@@ -299,15 +301,34 @@ def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
         detail = detail.splitlines()[-1] if detail else f"exit code {result.returncode}"
         return False, f"git status failed: {detail}", []
     out = result.stdout
-    watched = _LANG_WATCHED if (options or {}).get("kind") == "lang" else _WATCHED
+    lang = (options or {}).get("kind") == "lang"
+    prefix = "lang/" if lang else ""
     offending, leftover = [], []
     for line in out.splitlines():
+        status = line[:2]
         for path in _porcelain_paths(line):
-            if any(path.startswith(w) or path == w.rstrip("/") for w in watched):
+            staged = status[0] not in {" ", "?"}
+            untracked = status == "??"
+            wiki_dirty = not lang and any(
+                path.startswith(w) or path == w.rstrip("/") for w in _WIKI_WATCHED
+            )
+            generated_dirty = lang and (
+                path.startswith("lang/_reading/") or path == "lang/_reading"
+            )
+            provenance_dirty = not untracked and (
+                path == f"{prefix}.wiki/log.md" or path.startswith(f"{prefix}sources/")
+            )
+            stale_asset = untracked and path.startswith(f"{prefix}sources/") and ".assets/" in path
+            ignored_runtime = untracked and path == f"{prefix}.wiki/ingest.lock"
+            scaffold = untracked and path in _SCAFFOLD_UNTRACKED
+            if not (ignored_runtime or scaffold) and (
+                staged or wiki_dirty or generated_dirty or provenance_dirty or stale_asset
+            ):
                 offending.extend(_expand_status_path(content, path))
             if _LEFTOVER.search(path):
                 leftover.append(path)
-    offending = [p for p in offending if p not in _SCAFFOLD_UNTRACKED]
+    offending = list(dict.fromkeys(offending))
+    leftover = list(dict.fromkeys(leftover))
     if offending or leftover:
         msg = "Vault tree is not clean — ingest preflight would refuse."
         if leftover:
@@ -321,15 +342,16 @@ def _build_argv(target: str, options: dict) -> list[str]:
     kind = (options or {}).get("kind", "auto")
     if kind == "lang":
         argv += ["--profile", "lang"]
-    elif kind in {"video", "audio", "image_note"}:
-        argv += ["--kind", kind]
+    else:
+        argv += ["--limit", "0"]
+        if kind in {"video", "audio", "image_note"}:
+            argv += ["--kind", kind]
     section_heading = (options or {}).get("section_heading")
     if section_heading:
         argv += [
             "--section",
             rf"^{re.escape(section_heading)}$",
-            "--section-label",
-            section_heading,
+            f"--section-label={section_heading}",
         ]
     argv.append(target)
     return argv

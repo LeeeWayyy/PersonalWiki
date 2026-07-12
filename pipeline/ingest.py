@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -471,7 +472,12 @@ def llm(prompt_text: str, *, soft: bool, model: str | None = None) -> str:
             return ""
         die(f"LLM call failed: {exc}")
     if out is None and not soft:
-        die("LLM call failed: no local or API LLM provider is configured")
+        detail = (
+            "configured provider returned empty output"
+            if llm_client.configured()
+            else "no local or API LLM provider is configured"
+        )
+        die(f"LLM call failed: {detail}")
     return out or ""
 
 
@@ -482,7 +488,10 @@ def parse_shell_assignments(text: str) -> dict[str, str]:
         if not line or "=" not in line:
             continue
         k, _, v = line.partition("=")
-        parts = shlex.split(v)
+        try:
+            parts = shlex.split(v)
+        except ValueError as exc:
+            raise RuntimeError(f"malformed source identity output for {k!r}: {exc}") from exc
         out_[k] = parts[0] if parts else ""
     return out_
 
@@ -575,8 +584,14 @@ def ensure_local_cache_ignore() -> None:
     exclude.parent.mkdir(parents=True, exist_ok=True)
     current = exclude.read_text(encoding="utf-8", errors="replace") if exclude.exists() else ""
     rules = {line.strip() for line in current.splitlines()}
+    repo_root = Path(git_capture("rev-parse", "--show-toplevel").strip())
+    prefix = Path.cwd().resolve().relative_to(repo_root.resolve())
+    local = "" if prefix == Path(".") else f"{prefix.as_posix()}/"
     missing = [
-        rule for rule in (CHAPTER_INTELLIGENCE_CACHE_IGNORE, INGEST_LOCK_IGNORE)
+        rule for rule in (
+            f"{local}{CHAPTER_INTELLIGENCE_CACHE_IGNORE}",
+            f"{local}{INGEST_LOCK_IGNORE}",
+        )
         if rule not in rules
     ]
     if not missing:
@@ -588,9 +603,9 @@ def ensure_local_cache_ignore() -> None:
 
 def ensure_wiki_scaffold(profile: str = "wiki") -> list[str]:
     """Create the minimal wiki structure ingest needs in an empty content repo."""
+    ensure_local_cache_ignore()
     if profile != "wiki":
         return []
-    ensure_local_cache_ignore()
     for rel in ("wiki/entities", "wiki/topics", "wiki/_index", "sources", ".wiki"):
         Path(rel).mkdir(parents=True, exist_ok=True)
     taxonomy = Path("wiki/_taxonomy.md")
@@ -700,7 +715,13 @@ def acquire_content_ingest_lock() -> None:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     _INGEST_LOCK_FH = open(lock_path, "a+", encoding="utf-8")
     out(f"waiting for ingest lock: {lock_path}")
-    fcntl.flock(_INGEST_LOCK_FH.fileno(), fcntl.LOCK_EX)
+    while True:
+        try:
+            fcntl.flock(_INGEST_LOCK_FH.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(30)
+            out(f"still waiting for ingest lock: {lock_path}")
 
 
 def release_content_ingest_lock() -> None:
@@ -945,7 +966,7 @@ def build_prompt(expand_file: str, out_file: str, all_source_ids: str,
              "--source-id", SRC["SOURCE_ID"], "--sha256", SRC["SHA256"],
              "--added", SRC["ADDED"], "--origin-type", SRC["ORIGIN_TYPE"],
              "--origin-ref", SRC["ORIGIN_REF"], "--basename", SRC["DEST_BASENAME"],
-             "--section-label", section_label, "--all-source-ids", all_source_ids,
+             f"--section-label={section_label}", "--all-source-ids", all_source_ids,
              "--source-intelligence-file", source_intelligence_file,
              "--text-file", text_file, "--candidates-file", candidates_file,
              "--expand-file", expand_file, "--dest", SRC["DEST"],
@@ -991,16 +1012,19 @@ def _candidate_paths(candidates_file: str) -> list[str]:
 
 
 def _run_quality_gate(intelligence_file: str, candidates_file: str,
-                      section_label: str, modified: list[str]) -> tuple[int, dict]:
+                      section_label: str, modified: list[str], *,
+                      allow_no_changes: bool = False) -> tuple[int, dict]:
     """Run the same deterministic coverage policy for diffs and NO_CHANGES."""
     command = [
         f"{SCRIPTS}/verify-ingest-quality.py",
         "--intelligence", intelligence_file,
         "--source-id", SRC["SOURCE_ID"],
-        "--section-label", section_label,
+        f"--section-label={section_label}",
     ]
     if modified:
         command += ["--modified", *modified]
+    if allow_no_changes:
+        command.append("--allow-no-changes")
     modified_set = set(modified)
     existing = [path for path in _candidate_paths(candidates_file)
                 if path not in modified_set]
@@ -1120,7 +1144,8 @@ def handle_no_changes_or_continue(raw_file: str, section_label: str,
     identical_supersede = bool(superseded and _supersede_coverage_proven(superseded))
     if not identical_supersede:
         quality_rc, quality_receipt = _run_quality_gate(
-            intelligence_file, candidates_file, section_label, []
+            intelligence_file, candidates_file, section_label, [],
+            allow_no_changes=True,
         )
         _report_quality_receipt(quality_receipt)
         if quality_rc != 0 or not quality_receipt.get("ok"):
@@ -1374,12 +1399,10 @@ def _stable_chapter_instances(
         seen[key] += 1
         source_seen[label] += 1
         total = totals[key]
-        if total == 1:
-            result.append((label, section, label, None))
-            continue
-        suffix = f" [occurrence {seen[key]}/{total}]"
-        stable = f"{label[:SECTION_LABEL_MAX_CHARS - len(suffix)]}{suffix}"
-        result.append((stable, section, label, source_seen[label]))
+        suffix = f" [occurrence {seen[key]}/{total}]" if total > 1 else ""
+        clean = re.sub(r"[\x00-\x1f\x7f]", " ", label).strip() or "Untitled chapter"
+        stable = f"{clean[:SECTION_LABEL_MAX_CHARS - len(suffix)]}{suffix}"
+        result.append((stable, section, label, source_seen[label] if total > 1 else None))
     return result
 
 
@@ -1648,7 +1671,7 @@ def _run_one_chapter(args, section: str | None, label: str | None, *,
     if section is not None and section_range is None:
         argv += ["--section", section]
     if label is not None:
-        argv += ["--section-label", label]
+        argv += [f"--section-label={label}"]
     if args.model:
         argv += ["--model", args.model]
     if getattr(args, "analyze_model", ""):
@@ -1782,6 +1805,7 @@ def run_chaptered(args) -> int:
 
 def main() -> int:
     global _ROLLBACK_ON_FAILURE
+    os.environ.setdefault("PW_LLM_PROVIDER", "codex")
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--section", default="")
     ap.add_argument("--section-label", default="")
@@ -1964,7 +1988,10 @@ def main() -> int:
         src_input = args.input
         if not _is_http_url(src_input) and not os.path.isabs(src_input):
             src_input = str(INVOCATION_CWD / src_input)
-        r = run_source_identity(src_input)
+        try:
+            r = run_source_identity(src_input)
+        except RuntimeError as exc:
+            die(f"source identity failed: {exc}")
     sys.stderr.write(r.stderr)
     if r.returncode != 0:
         die("media identity failed" if args.kind else "source identity failed")
@@ -2110,7 +2137,7 @@ def main() -> int:
         "--text-file", text_file,
         "--source-id", SRC["SOURCE_ID"],
         "--source-sha256", SRC["SHA256"],
-        "--section-label", section_label,
+        f"--section-label={section_label}",
         "--cache-dir", str(cache_dir),
         "--output", source_intelligence_file,
     ]

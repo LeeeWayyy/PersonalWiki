@@ -683,6 +683,28 @@ class LlmClientTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "requires PW_LLM_API_KEY"):
                 llm_client.complete("hello")
 
+    def test_provider_failure_is_retried_once(self):
+        with patch.dict(os.environ, {"LLM_CMD": "stub"}, clear=True), patch.object(
+            llm_client, "complete_command", side_effect=[RuntimeError("transient"), "ok"]
+        ) as complete:
+            self.assertEqual(llm_client.complete("hello"), "ok")
+        self.assertEqual(complete.call_count, 2)
+
+    def test_failed_local_provider_falls_back_to_enabled_api(self):
+        env = {
+            "LLM_CMD": "stub",
+            "PW_LLM_API_ENABLED": "1",
+            "PW_LLM_API_KEY": "key",
+        }
+        with patch.dict(os.environ, env, clear=True), patch.object(
+            llm_client, "complete_command", side_effect=RuntimeError("down")
+        ) as local, patch.object(
+            llm_client, "_complete_api", return_value="api answer"
+        ) as api:
+            self.assertEqual(llm_client.complete("hello"), "api answer")
+        self.assertEqual(local.call_count, 2)
+        api.assert_called_once()
+
     def test_unknown_provider_errors(self):
         with patch.dict(os.environ, {"PW_LLM_PROVIDER": "banana"}, clear=True):
             self.assertFalse(llm_client.configured())
