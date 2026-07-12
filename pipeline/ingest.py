@@ -1019,7 +1019,7 @@ def _report_quality_receipt(receipt: dict) -> None:
     out(
         "quality coverage: "
         f"{summary.get('represented_candidates', 0)}/"
-        f"{summary.get('required_candidates', 0)} required page candidate(s), "
+        f"{summary.get('required_candidates', 0)} planned page candidate(s), "
         f"{summary.get('already_covered_candidates', 0)} already covered, "
         f"{summary.get('modified_substantive_paragraphs', 0)} changed paragraph(s)"
     )

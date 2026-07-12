@@ -43,11 +43,12 @@ the source text or existing vault structure warrants a better grouping, but do
 not silently drop the underlying claims. There is no fixed entity or topic
 count.
 
-For candidate consolidation, compare `claim_ids` explicitly. You may omit a
-required candidate only when every one of its claim IDs is assigned to another
-candidate that the diff creates or updates. If a candidate owns any claim ID
-not represented by another emitted candidate, that candidate must be created or
-updated. This is enforced after apply.
+For candidate consolidation, compare `claim_ids` explicitly. Prefer assigning
+each important claim to an emitted candidate, but treat candidate destinations
+as editorial recommendations: a coherent synthesis may omit or regroup them.
+The post-apply report makes omitted high-importance recommendations visible for
+review and still rejects a response with no substantive page changes when an
+importance-5 recommendation remains uncovered.
 
 Treat page filenames/H1s and every frontmatter alias as one global identity
 namespace across both Entities and Topics. Assign each normalized surface form

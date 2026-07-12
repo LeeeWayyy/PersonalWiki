@@ -399,6 +399,15 @@ class ValidationTests(unittest.TestCase):
 
 
 class QuoteMaterializationTests(unittest.TestCase):
+    def test_relation_verbs_in_claim_kind_are_canonicalized(self):
+        for raw_kind, expected in ci.CLAIM_KIND_ALIASES.items():
+            with self.subTest(kind=raw_kind):
+                raw = artifact_for(count=1, quote_first=True)
+                raw["claims"][0]["kind"] = raw_kind
+                artifact = ci.materialize_response(json.dumps(raw), TEXT)
+                self.assertEqual(artifact["claims"][0]["kind"], expected)
+                validate(artifact)
+
     def test_unique_quote_materializes_canonical_offsets(self):
         raw = artifact_for(quote_first=True)
         raw["claims"][0]["source_spans"][0].update({"start": 999, "end": 1000})

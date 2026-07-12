@@ -399,6 +399,38 @@ class PageQualityTests(unittest.TestCase):
         self.assertFalse(receipt["ok"])
         self.assertIn("coverage.candidate_ambiguous", codes(receipt))
 
+    def test_exact_candidate_name_wins_over_analyzer_alias(self):
+        artifact = intelligence(
+            {"name": "Respiration", "page_type": "entity", "importance": 5},
+            entities=[{"name": "Respiration", "aliases": ["Aerobic respiration"]}],
+        )
+        pages = [
+            quality.PageInput(
+                "wiki/entities/Respiration.md",
+                page_text(
+                    "Respiration",
+                    f"Respiration transfers energy {current_citation()}.",
+                    f"Its pathways regenerate carriers {current_citation()}.",
+                ),
+            ),
+            quality.PageInput(
+                "wiki/entities/Aerobic respiration.md",
+                page_text(
+                    "Aerobic respiration",
+                    f"Aerobic respiration uses oxygen {current_citation()}.",
+                    f"It is one form of respiration {current_citation()}.",
+                ),
+            ),
+        ]
+        receipt = quality.evaluate_quality(
+            artifact, source_id=SOURCE_ID, section_label=SECTION, pages=pages
+        )
+        self.assertTrue(receipt["ok"], receipt["errors"])
+        self.assertEqual(
+            receipt["candidates"][0]["matched_paths"],
+            ["wiki/entities/Respiration.md"],
+        )
+
     def test_existing_identity_without_claim_text_does_not_waive_required_coverage(self):
         artifact = production_intelligence()
         text = page_text("ATP", "ATP is a molecule with several cellular roles.")
@@ -500,7 +532,7 @@ class PageQualityTests(unittest.TestCase):
         self.assertTrue(receipt["ok"], receipt["errors"])
         self.assertEqual(receipt["summary"]["represented_candidates"], 1)
 
-    def test_missing_or_wrong_type_page_does_not_cover_candidate(self):
+    def test_wrong_candidate_type_is_reported_after_partial_synthesis(self):
         artifact = intelligence(
             {"name": "Energy metabolism", "page_type": "topic", "importance": 5}
         )
@@ -515,7 +547,10 @@ class PageQualityTests(unittest.TestCase):
             section_label=SECTION,
             pages=[quality.PageInput("wiki/entities/Energy metabolism.md", text)],
         )
-        self.assertIn("coverage.required_candidate_missing", codes(receipt))
+        self.assertTrue(receipt["ok"], receipt["errors"])
+        self.assertIn(
+            "coverage.required_candidate_omitted", codes(receipt, "warnings")
+        )
 
     def test_omitted_candidate_may_consolidate_when_all_claims_are_covered(self):
         artifact = intelligence(
@@ -547,7 +582,7 @@ class PageQualityTests(unittest.TestCase):
         self.assertIn("coverage.candidate_consolidated", codes(receipt, "warnings"))
         self.assertEqual(receipt["summary"]["represented_candidates"], 1)
 
-    def test_omitted_candidate_with_unique_claim_still_fails(self):
+    def test_omitted_high_importance_candidate_is_visible_after_partial_synthesis(self):
         artifact = intelligence(
             {
                 "name": "ATP",
@@ -573,7 +608,30 @@ class PageQualityTests(unittest.TestCase):
             section_label=SECTION,
             pages=[quality.PageInput("wiki/entities/ATP.md", text)],
         )
-        self.assertIn("coverage.required_candidate_missing", codes(receipt))
+        self.assertTrue(receipt["ok"], receipt["errors"])
+        self.assertIn(
+            "coverage.required_candidate_omitted",
+            codes(receipt, "warnings"),
+        )
+
+    def test_regrouped_page_counts_as_partial_synthesis(self):
+        artifact = production_intelligence()
+        text = page_text(
+            "Cellular energy",
+            f"Energy release can be grouped by mechanism {current_citation()}.",
+            f"Cellular work depends on reusable coupling {current_citation()}.",
+            page_type="Topic",
+        )
+        receipt = quality.evaluate_quality(
+            artifact,
+            source_id=SOURCE_ID,
+            section_label=SECTION,
+            pages=[quality.PageInput("wiki/topics/Cellular energy.md", text)],
+        )
+        self.assertTrue(receipt["ok"], receipt["errors"])
+        self.assertIn(
+            "coverage.required_candidate_omitted", codes(receipt, "warnings")
+        )
 
     def test_omitted_importance_four_unique_claim_is_visible_warning(self):
         artifact = intelligence(

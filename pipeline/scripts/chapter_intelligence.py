@@ -55,6 +55,16 @@ RELATION_KINDS = {
     "contrasts",
     "refines",
 }
+CLAIM_KIND_ALIASES = {
+    "answers": "claim",
+    "supports": "evidence",
+    "explains": "mechanism",
+    "causes": "mechanism",
+    "leads-to": "consequence",
+    "competes-with": "contrast",
+    "contrasts": "contrast",
+    "refines": "claim",
+}
 PAGE_TYPES = {"entity", "topic"}
 ENTITY_PAGE_HINTS = {"entity", "none"}
 
@@ -993,6 +1003,12 @@ def materialize_response(
     artifact = extract_json_object(raw)
     if source_id_override is not None:
         artifact["source_id"] = source_id_override
+    claims = artifact.get("claims")
+    if type(claims) is list:
+        for claim in claims:
+            if type(claim) is dict:
+                kind = claim.get("kind")
+                claim["kind"] = CLAIM_KIND_ALIASES.get(kind, kind)
     return materialize_claim_coverage(
         materialize_page_hints(
             materialize_unique_aliases(

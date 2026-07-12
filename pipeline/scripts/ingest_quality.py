@@ -675,10 +675,16 @@ def evaluate_quality(
         tuple[Candidate, str, list[ParsedPage], list[ParsedPage]]
     ] = []
     represented_claim_ids: set[str] = set()
+    has_modified_candidate = bool(substantive_changed_paths)
     claim_texts = _claim_text_by_id(artifact)
     for candidate in required_candidates:
         accepted = {normalize_name(name) for name in candidate.accepted_names}
-        identity_matches = [page for page in parsed if bool(page.names & accepted)]
+        exact_matches = [
+            page for page in parsed if normalize_name(candidate.name) in page.names
+        ]
+        identity_matches = exact_matches or [
+            page for page in parsed if bool(page.names & accepted)
+        ]
         existing_identity_matches = [
             page for page in identity_matches
             if disposition_by_path.get(page.path) == "existing"
@@ -776,6 +782,17 @@ def evaluate_quality(
                         "importance-4 candidate was neither modified nor "
                         "deterministically already covered and owns an "
                         "unconsolidated claim; review is recommended",
+                        candidate=f"{candidate.page_type}:{candidate.name}",
+                    )
+                )
+                continue
+            if has_modified_candidate:
+                warnings.append(
+                    Issue(
+                        "coverage.required_candidate_omitted",
+                        "high-importance candidate was not represented in the "
+                        "renderer synthesis and owns an unconsolidated claim; "
+                        "review is recommended",
                         candidate=f"{candidate.page_type}:{candidate.name}",
                     )
                 )
