@@ -175,6 +175,28 @@ class GroupChaptersTests(unittest.TestCase):
         self.assertEqual(chs[0][1], r"^Ch\.\ 1\ \(a\)$")
 
 
+class TaxonomyEvolutionTests(unittest.TestCase):
+    def test_accepts_only_unique_bullet_additions(self):
+        before = (
+            "# Taxonomy\n\n## Domain\n- `general/knowledge`\n\n"
+            "## Form\n- `concept`\n\n## Reserved\n- `taxonomy-gap`\n"
+        )
+        after = before.replace(
+            "- `general/knowledge`\n",
+            "- `general/knowledge`\n- `science/testing`\n",
+        )
+        self.assertEqual(ingest._taxonomy_additions(before, after), ["science/testing"])
+
+        for invalid in (
+            before.replace("- `general/knowledge`\n", ""),
+            before.replace("## Form", "changed prose\n## Form"),
+            before.replace("## Form", "- `general/knowledge`\n\n## Form"),
+            before + "- `reserved-addition`\n",
+        ):
+            with self.assertRaises(ValueError):
+                ingest._taxonomy_additions(before, invalid)
+
+
 class CitationAnchorTests(unittest.TestCase):
     def test_citation_keys_use_shared_encoded_multi_source_contract(self):
         first = "01KX582AX79FD9BQG2VNMG41NY"
@@ -696,6 +718,57 @@ class RunChapteredTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("uv"), "uv is required for ingest helper scripts")
 class ChapteredSmokeTests(unittest.TestCase):
+    def test_fresh_scaffold_accepts_taxonomy_addition_in_first_ingest(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            vault = root / "content"
+            (vault / ".wiki").mkdir(parents=True)
+            (vault / ".wiki" / ".keep").write_text("", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=vault, check=True)
+            subprocess.run(["git", "config", "user.email", "t@t"], cwd=vault, check=True)
+            subprocess.run(["git", "config", "user.name", "t"], cwd=vault, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=vault, check=True)
+            subprocess.run(["git", "commit", "-qm", "baseline"], cwd=vault, check=True)
+
+            source = root / "source.md"
+            source.write_text(
+                "Fresh taxonomy evidence is long enough for deterministic analysis.\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update({
+                "PW_CONTENT_DIR": str(vault),
+                "VAULT_CONTENT_DIR": str(vault),
+                "LLM_CMD": str(ROOT / "scripts" / "tests" / "stub-llm.py"),
+                "STUB_ENTITY": "fresh-taxonomy-entity",
+                "STUB_TAXONOMY_TAG": "science/testing",
+                "STUB_INVALID_TAXONOMY_ONCE": "1",
+                "PW_INGEST_SKIP_ARGUMENT_MAP": "1",
+                "PW_INGEST_SKIP_ASSETS": "1",
+            })
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "ingest.py"), str(source)],
+                cwd=root, env=env, text=True, capture_output=True, timeout=120,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f"stdout:\n{result.stdout[-4000:]}\nstderr:\n{result.stderr[-4000:]}",
+            )
+            self.assertIn("taxonomy: added science/testing", result.stdout)
+            self.assertIn("patch failed; auto-retry", result.stderr)
+            self.assertIn(
+                "- `science/testing`",
+                (vault / "wiki" / "_taxonomy.md").read_text(encoding="utf-8"),
+            )
+            self.assertTrue((vault / "wiki" / "_index" / "science__testing.md").is_file())
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "status", "--porcelain"], cwd=vault,
+                    text=True, capture_output=True, check=True,
+                ).stdout,
+                "?? wiki/.alias-index.json\n",
+            )
+
     def test_two_chapter_ingest_runs_children_without_parent_lock_deadlock(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -719,6 +792,7 @@ class ChapteredSmokeTests(unittest.TestCase):
                 "LLM_CMD": str(ROOT / "scripts" / "tests" / "stub-llm.py"),
                 "STUB_ENTITY_FROM_SECTION": "1",
                 "STUB_ENTITY_PREFIX": "chaptered-",
+                "STUB_TAXONOMY_TAG": "science/testing",
                 "PW_INGEST_SKIP_ARGUMENT_MAP": "1",
             })
             env.pop("PW_INGEST_NO_AUTOCHAPTER", None)
@@ -734,6 +808,11 @@ class ChapteredSmokeTests(unittest.TestCase):
             self.assertIn("chaptered ingest complete: 2 new chapter(s)", res.stdout)
             self.assertTrue((vault / "wiki" / "entities" / "chaptered-chapter-1.md").is_file())
             self.assertTrue((vault / "wiki" / "entities" / "chaptered-chapter-2.md").is_file())
+            self.assertIn(
+                "- `science/testing`",
+                (vault / "wiki" / "_taxonomy.md").read_text(encoding="utf-8"),
+            )
+            self.assertTrue((vault / "wiki" / "_index" / "science__testing.md").is_file())
             log = (vault / ".wiki" / "log.md").read_text(encoding="utf-8")
             self.assertRegex(log, r"\s[0-9A-Z]{26}#Chapter 1\s+pages:")
             self.assertRegex(log, r"\s[0-9A-Z]{26}#Chapter 2\s+pages:")

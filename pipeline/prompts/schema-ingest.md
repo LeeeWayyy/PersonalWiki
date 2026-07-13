@@ -58,17 +58,29 @@ tags: [...]
 - Tooling owns `page_id`, `sources`, and `last_ingested`. Do not emit
   `page_id`; it is injected after apply. `sources` and `last_ingested`
   are overwritten from citations.
-- `aliases:` must include every important surface form seen in the
-  source plus cross-language names when known. Do not invent unknown
-  translations.
-- `tags:` must use only tags present in `TAXONOMY`.
+- `aliases:` must include every important surface form seen in the source.
+  Also supply the established English and Chinese names even when only one
+  language appears in the source. Omit only when no established translation
+  exists; never transliterate or invent one.
+- `tags:` must use tags already present in `TAXONOMY` or tag bullets appended
+  to `wiki/_taxonomy.md` in the same diff.
 
 ## Tags
 
 - Every entity/topic page carries 2-4 tags drawn only from `TAXONOMY`.
-- Emit `tags:` in single-line flow style: `tags: [concept,
-  biology/cell]`.
+- Emit `tags:` in single-line flow style with the primary Domain first:
+  `tags: [biology/bioenergetics, mechanism]`.
 - Pick exactly one Form tag and at least one Domain tag.
+- Pick the most specific accurate Domain and Form available; do not fall back
+  to `general/knowledge` or `concept` when the taxonomy names the actual
+  subject or form.
+- When no existing tag is accurate, append the minimum missing tag under the
+  correct `## Domain` or `## Form` section of `wiki/_taxonomy.md`. Prefer a
+  two-level Domain such as `physics/thermodynamics`; Form tags are singular
+  nouns such as `person`, `mechanism`, or `theory`.
+- Taxonomy evolution is append-only. Never delete, rename, reorder, or rewrite
+  an existing taxonomy line, and never change taxonomy without also changing a
+  content page that uses the addition.
 - Optional secondary tags may be Domain or Reserved tags.
 - Preserve existing page tags unless the new source meaningfully
   changes the page's form or primary domain.
@@ -165,6 +177,9 @@ prose is reserved for real attribution or comparison.
 - Chinese filenames are the bare Chinese term with no spaces.
   English filenames are kebab-case ASCII.
 - Page `# H1` matches the filename stem.
+- Every reusable entity's `aliases` includes both its established English and
+  Chinese name, regardless of the current source language. Omit a side only
+  when no established translation exists; never invent one.
 - Wikilinks use the target page's native title. Use `[[stem|alias]]`
   when the surface form differs from the target title.
 - First mention may include a parenthetical other-language form only

@@ -166,7 +166,9 @@ Required fields:
 - Grammar item: `pattern`, `explanation`, `example_jp`, and `s`, where `s` is
   the 1-based sentence number within the chapter or `0` for a general note.
 
-Split into finer taxonomy only if it starts to hurt.
+An empty vault starts with neutral `general/knowledge` and `concept` fallbacks.
+Ingestion extends Domain/Form only when a real page cannot be classified
+accurately with the current taxonomy.
 
 ## 2. Frontmatter contract (content pages only)
 
@@ -504,6 +506,7 @@ origin_type: file               # file | url | video | audio | image_note
 origin_ref: "https://..."       # filename or URL
 supersedes: null                # or [[<prior_source_id>]] wikilink
 title: "Short human title"
+author: "Author Name"            # optional; read from document metadata
 ---
 ```
 
@@ -779,7 +782,8 @@ language wins at page creation, then stays).
   supersession instead).
 - Adding a new `metadata.json` / `manifest.json` / `state.json`
   without updating this schema first.
-- LLM inventing a tag not in `wiki/_taxonomy.md` (see §13).
+- LLM using a tag that is neither already in `wiki/_taxonomy.md` nor appended
+  there in the same diff (see §13).
 
 ## 13. Tags
 
@@ -791,9 +795,10 @@ generated from the union of these tags.
 tags: [biology/cell, mechanism]
 ```
 
-**Source of truth**: `wiki/_taxonomy.md`. The LLM may **not**
-invent tags; it picks from the taxonomy. Adding a category is a
-human-only edit to that file.
+**Source of truth**: `wiki/_taxonomy.md`. Ingestion reuses existing tags when
+they fit and may append the minimum missing Domain/Form tags in the same diff
+as pages that use them. Existing taxonomy lines are immutable: ingestion may
+not delete, rename, reorder, or rewrite them.
 
 **Tag syntax** (regex, lint-enforced):
 

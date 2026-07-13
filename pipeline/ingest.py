@@ -92,10 +92,11 @@ WIKI_PATHSPEC = [
     "wiki/_taxonomy.md",
 ]
 WIKI_PAGE_RX = re.compile(r"^wiki/(entities|topics)/.+\.md$")
+TAXONOMY_PATH = "wiki/_taxonomy.md"
 TAXONOMY_PLACEHOLDER = """# Taxonomy
 
 ## Domain
-- `biology/cell`
+- `general/knowledge`
 
 ## Form
 - `concept`
@@ -144,7 +145,7 @@ def _seed_workset(workdir: str, candidates_file: str, expand_file: str) -> None:
     copies; ingest applies the emitted diff). Idempotent: mirrors the CURRENT
     candidate+expand set (both grow across the expand/retry loop). Paths are
     cwd-relative (cwd == the content repo)."""
-    wanted: set[str] = set()
+    wanted: set[str] = {TAXONOMY_PATH}
     for f in (candidates_file, expand_file):
         if Path(f).is_file():
             wanted.update(ln.strip() for ln in read(f).splitlines() if ln.strip())
@@ -155,6 +156,38 @@ def _seed_workset(workdir: str, candidates_file: str, expand_file: str) -> None:
         dst = Path(workdir) / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
+
+
+_TAXONOMY_ADDITION_RX = re.compile(
+    r"^- `([a-z0-9]+(?:[-/][a-z0-9]+)*)`$"
+)
+
+
+def _taxonomy_additions(before: str, after: str) -> list[str]:
+    """Return added tags; reject taxonomy deletions, rewrites, and prose edits."""
+    old = before.splitlines()
+    old_index = 0
+    section = ""
+    additions: list[str] = []
+    seen = set(old)
+    for line in after.splitlines():
+        if line.startswith("## "):
+            section = line[3:]
+        if old_index < len(old) and line == old[old_index]:
+            old_index += 1
+            continue
+        match = _TAXONOMY_ADDITION_RX.fullmatch(line)
+        if not match:
+            raise ValueError(f"only taxonomy bullet additions are allowed, got {line!r}")
+        if section not in {"Domain", "Form"}:
+            raise ValueError("taxonomy bullets may be added only under Domain or Form")
+        if line in seen:
+            raise ValueError(f"duplicate taxonomy bullet: {line}")
+        seen.add(line)
+        additions.append(match.group(1))
+    if old_index != len(old):
+        raise ValueError("existing taxonomy lines may not be deleted, rewritten, or reordered")
+    return additions
 
 
 def _cleanup() -> None:
@@ -1298,6 +1331,10 @@ def _scope_error_retryable(stdout: str, stderr: str) -> bool:
     return "no `diff --git` headers" in (stdout + stderr)
 
 
+def _ingest_diff_path(path: str) -> bool:
+    return path == TAXONOMY_PATH or bool(WIKI_PAGE_RX.match(path))
+
+
 def _diff_existing_modify_targets(diff_file: str) -> list[str]:
     dt = subprocess.run([f"{SCRIPTS}/diff-paths.py", diff_file, "--mode=modify-targets"],
                         text=True, capture_output=True)
@@ -1307,11 +1344,12 @@ def _diff_existing_modify_targets(diff_file: str) -> list[str]:
         return []
     return sorted({
         p for p in dt.stdout.splitlines()
-        if WIKI_PAGE_RX.match(p) and Path(p).is_file()
+        if _ingest_diff_path(p) and Path(p).is_file()
     })
 
 
 def _merge_retry_targets(candidates_file: str, expand_file: str, retry_set: list[str]) -> None:
+    retry_set = [path for path in retry_set if WIKI_PAGE_RX.match(path)]
     if not retry_set:
         return
     for fpath in (candidates_file, expand_file):
@@ -2296,6 +2334,11 @@ def main() -> int:
                                 stdout=scope_stdout, stderr=scope_stderr)
 
     # ── §8 apply + auto-retry ──
+    taxonomy_before = read(TAXONOMY_PATH)
+    # A fresh scaffold is untracked. Put the prompt-visible baseline in the
+    # index so `git apply --index` can modify it in the same diff as wiki pages.
+    if TAXONOMY_PATH in SCAFFOLD_PATHS:
+        git_run("add", "--", TAXONOMY_PATH)
     apply_err = mktemp()
     retry_count = 0
     max_retries = 1
@@ -2309,8 +2352,24 @@ def main() -> int:
                 env=apply_env, stderr=ef).returncode == 0
         if applied:
             _ROLLBACK_ON_FAILURE = True
-            _assert_existing_citation_anchors_preserved()
-            break
+            try:
+                taxonomy_added = _taxonomy_additions(
+                    taxonomy_before, read(TAXONOMY_PATH)
+                )
+            except ValueError as exc:
+                reversed_ok = subprocess.run(
+                    ["git", "-c", "core.quotepath=false", "apply", "--reverse",
+                     "--index", "--recount", "--whitespace=nowarn", diff_file],
+                    env=apply_env, stderr=subprocess.DEVNULL,
+                ).returncode == 0
+                if not reversed_ok:
+                    die(f"taxonomy update rejected and rollback failed: {exc}")
+                write(apply_err, f"error: patch failed: {TAXONOMY_PATH}: {exc}\n")
+            else:
+                if taxonomy_added:
+                    out("taxonomy: added " + ", ".join(taxonomy_added))
+                _assert_existing_citation_anchors_preserved()
+                break
 
         err_text = read(apply_err)
         if retry_count >= max_retries:
@@ -2335,7 +2394,7 @@ def main() -> int:
         for p in read(parsed_file).splitlines():
             if not p:
                 continue
-            if not WIKI_PAGE_RX.match(p):
+            if not _ingest_diff_path(p):
                 die(f"patch rejected: parsed path out-of-scope: {p}")
             if not Path(p).is_file():
                 if re.search(rf"^error: {re.escape(p)}: does not exist in index", err_text, re.MULTILINE):
@@ -2382,6 +2441,8 @@ def main() -> int:
     today_str = today()
     modified = [ln for ln in git_capture("diff", "--cached", "--name-only", "--relative").splitlines()
                 if WIKI_PAGE_RX.match(ln)]
+    if taxonomy_added and not modified:
+        die("taxonomy update rejected: the same diff must create or modify a content page")
     if modified:
         out("normalizing llm-zone formatting...")
         run_stream([

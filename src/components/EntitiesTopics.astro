@@ -2,7 +2,7 @@
 // One shared index for /entities + /topics. `initialTab` decides the default
 // dataset; the segmented control flips between them client-side (no navigation).
 import Base from '../layouts/Base.astro';
-import { loadVault, enOf } from '../lib/vault.mjs';
+import { loadVault, enOf, taxonomyTags } from '../lib/vault.mjs';
 
 interface Props { initialTab?: 'entity' | 'topic'; }
 const { initialTab = 'entity' } = Astro.props;
@@ -11,6 +11,7 @@ const { pages, backlinks, forward } = loadVault();
 const entities = pages.filter((p) => p.kind === 'entity');
 const topics = pages.filter((p) => p.kind === 'topic');
 const kindOf = new Map(pages.map((p) => [p.href, p.kind]));
+const domains = new Set(taxonomyTags(pages.find((p) => p.kind === 'taxonomy')?.body || '', 'Domain'));
 
 const fwdEntities = (href: string) => {
   const s = forward.get(href); if (!s) return 0;
@@ -33,7 +34,7 @@ function synthOf(body: string) {
 
 function build(list: any[], tab: 'entity' | 'topic') {
   const items = list.map((p) => {
-    const group = (p.tags && p.tags[0]) || '未分类';
+    const group = (p.tags || []).find((t: string) => domains.has(t)) || '未分类';
     const en = enOf(p);
     const person = tab === 'entity' && (p.tags || []).some((t: string) => /person|people|人物|人名/i.test(t));
     const glyph = tab === 'topic'

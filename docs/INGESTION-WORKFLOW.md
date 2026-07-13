@@ -58,6 +58,10 @@ body. Options are validated by `backend/app/validation.py::normalize_ingest_opti
 `video`), and `section_heading` is only allowed for `auto`/`wiki`. The route
 (`backend/app/routers/ingest.py`) starts a job and the client streams its log
 via SSE (`/jobs/{id}/events`), with `/jobs/{id}/cancel` available.
+`POST /ingest/sections` (same file-or-url body, no `options`) runs
+`extract.py --list-sections` — no LLM, no vault writes — so the UI's
+"List chapters" button can fill the section-heading picker instead of
+requiring the exact heading to be typed.
 
 `backend/app/ingest_runner.py` is the control plane: a single `asyncio.Lock`
 serializes all jobs, `ensure_content_git` auto-initializes a git repo in the
@@ -82,7 +86,7 @@ Owner: `pipeline/ingest.py` (`acquire_content_ingest_lock`,
 `ensure_wiki_scaffold`, `preflight`). An exclusive `fcntl` lock on
 `.wiki/ingest.lock` serializes CLI and backend runs. The scaffold creates
 `wiki/{entities,topics,_index}`, `sources/`, `.wiki/`, and a placeholder
-`wiki/_taxonomy.md` in an empty repo. Preflight refuses to run (exit 1,
+`wiki/_taxonomy.md` with only neutral fallback tags in an empty repo. Preflight refuses to run (exit 1,
 nothing mutated) when: the git index is non-empty; tracked or untracked
 changes exist under `wiki/`; tracked edits exist under `.wiki/log.md` or
 `sources/`; or untracked files sit under an existing `sources/*.assets/` dir
@@ -99,7 +103,9 @@ match reuses the existing `source_id` and asset (after re-hashing the stored
 asset and refusing on drift); otherwise it mints a ULID `source_id`, copies
 the asset to `sources/<date>-<name>`, and writes the `<dest>.md` sidecar
 (`source_id`, `sha256`, `added`, `origin_type`, `origin_ref`, `supersedes`,
-`title`). ingest.py drives this via a two-phase `--reserve-handshake`: the
+`title`, and EPUB `author` when present). The same helper's `--fetch-only`
+mode gives section listing the identical bounded HTTP-only fetch policy.
+ingest.py drives identity via a two-phase `--reserve-handshake`: the
 child emits `IDENTITY_READY=new` with all future paths *before* touching the
 vault, ingest registers them for cleanup, then replies `PUBLISH` — a
 cancellation can never strand a source file the orchestrator doesn't know
@@ -206,8 +212,8 @@ The LLM (via `llm_client`, model from `--model`/`PW_LLM_MODEL`, timeout
 `{"action":"expand", ...}` request (answered with a second `expand`-operation
 prompt), or a `NO_CHANGES:` line. Provider failures or empty output get one
 retry; an enabled API is the fallback after local failure. Codex runs in an
-isolated temp workdir
-seeded with copies of exactly the candidate pages (`_seed_workset`); the real
+isolated temp workdir seeded with the taxonomy and exactly the candidate pages
+(`_seed_workset`); the real
 tree is only ever mutated by applying the emitted diff. `NO_CHANGES` is not a
 free pass: `handle_no_changes_or_continue` runs the same quality gate with an
 empty modified set, reports candidate omissions as warnings, then logs and
@@ -219,7 +225,9 @@ committed pages (`_supersede_coverage_proven`).
 
 Owner: `pipeline/ingest.py` + `scripts/diff-paths.py` + `scripts/apply-diff.py`.
 The diff is fence-stripped, then scope-checked: it may only touch
-`wiki/entities/`, `wiki/topics/`, `wiki/_index/`, `wiki/_taxonomy.md`. A
+`wiki/entities/`, `wiki/topics/`, and `wiki/_taxonomy.md`. Taxonomy changes
+may add valid bullet lines only; deleting, rewriting, or reordering existing
+lines, or emitting a taxonomy-only diff, fails closed. A
 malformed diff (no `diff --git` headers) gets one auto-retry with a `retry`
 prompt; an out-of-scope diff is rejected outright, raw saved as
 `<tmp>.rejected`. `git apply --index --recount` applies it; on failure the

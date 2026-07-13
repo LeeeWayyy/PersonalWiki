@@ -4,6 +4,9 @@ import { describe, it } from 'node:test';
 import {
   blocksForSource,
   cleanTitle,
+  enOf,
+  sourceDisplay,
+  taxonomyTags,
   citationsForSource,
   loadLang,
   loadVault,
@@ -16,6 +19,17 @@ const SOURCE_ID = 'S1FIXTURE000000000000000000';
 const MD_SOURCE_ID = 'S1MDFIXTURE000000000000000';
 
 describe('vault frontend contracts', () => {
+  it('does not mistake mixed Chinese labels for English aliases', () => {
+    assert.equal(enOf({ title: 'ATP酶', aliases: ['ATP合成酶', 'ATP synthase'] }), 'ATP synthase');
+    assert.equal(enOf({ title: '线粒体DNA', aliases: ['ミトコンドリアDNA', 'Mitochondrial DNA'] }), 'Mitochondrial DNA');
+    assert.equal(enOf({ title: 'ATP酶', aliases: ['ATP酶 (synthase)'] }), 'synthase');
+    assert.equal(enOf({ title: 'β-氧化', aliases: ['β-oxidation'] }), 'β-oxidation');
+  });
+
+  it('reads Domain ownership from taxonomy rather than tag shape', () => {
+    assert.deepEqual(taxonomyTags('# T\n\n## Domain\n- `physics`\n- `biology/cell`\n\n## Form\n- `concept`\n', 'Domain'), ['physics', 'biology/cell']);
+  });
+
   it('indexes fixture pages, sources, aliases, and backlinks', () => {
     const vault = loadVault();
     assert.equal(vault.sources.some((source) => source.id === SOURCE_ID), true);
@@ -46,6 +60,17 @@ describe('vault frontend contracts', () => {
   it('cleans ebook source titles for display', () => {
     assert.equal(cleanTitle('2026-07-08-my-book.mobi'), 'my book');
     assert.equal(cleanTitle('reference-volume.azw3'), 'reference volume');
+    assert.deepEqual(
+      sourceDisplay({
+        title: '能量,性,自杀 线粒体与生命的意义',
+        author: '尼克·莱恩',
+        origin_ref: '/stage/20260712T010146692781Z-能量,性,自杀 线粒体与生命的意义 (尼克·莱恩).epub',
+      }),
+      { title: '能量,性,自杀 线粒体与生命的意义', author: '尼克·莱恩' },
+    );
+    assert.deepEqual(sourceDisplay({ title: 'Deep Work (2nd edition).epub' }), {
+      title: 'Deep Work (2nd edition)', author: '',
+    });
   });
 
   it('loads source reader block artifacts and repairs neighbor links', () => {

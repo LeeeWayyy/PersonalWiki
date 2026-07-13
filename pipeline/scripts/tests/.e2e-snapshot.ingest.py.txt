@@ -3,7 +3,7 @@
 type: Entity
 page_id: <PAGE_ID>
 aliases: [e2e-entity]
-tags: [concept, biology/cell]
+tags: [biology/cell, concept]
 sources: [<SOURCE_ID>]
 last_ingested: <DATE>
 ---

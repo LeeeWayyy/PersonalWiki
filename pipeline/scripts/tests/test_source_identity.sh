@@ -67,6 +67,33 @@ EOF
   pass() { echo "  ✓ $1"; }
   fail() { echo "  ✗ $1"; rc=1; }
 
+  # EPUB metadata is persisted instead of guessing author names from filenames.
+  if SI="$SI" EPUB="$TMP/meta.epub" python3 - <<'PY'
+import importlib.util, os, zipfile
+from pathlib import Path
+
+path = Path(os.environ["EPUB"])
+with zipfile.ZipFile(path, "w") as z:
+    z.writestr("META-INF/container.xml", """<?xml version="1.0"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles>
+</container>""")
+    z.writestr("OEBPS/content.opf", """<package xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata><dc:title>Real Title</dc:title><dc:creator>Real Author</dc:creator></metadata>
+</package>""")
+spec = importlib.util.spec_from_file_location("si", os.environ["SI"])
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+assert module.epub_metadata(path) == ("Real Title", "Real Author")
+
+junk = path.with_name("junk.epub")
+with zipfile.ZipFile(junk, "w") as z:
+    z.writestr("META-INF/container.xml", """<container><rootfile full-path="content.opf"/></container>""")
+    z.writestr("content.opf", """<package><metadata><title>Untitled</title><creator>Real Author</creator></metadata></package>""")
+assert module.epub_metadata(junk) == ("", "Real Author")
+PY
+  then pass "EPUB metadata: title and creator read without filename guessing"
+  else fail "EPUB metadata extraction"; fi
+
   # B1: reuse — input with identical bytes → same source_id, EXISTING_SIDECAR set, no new sidecar
   printf 'hello world\n' > /tmp/si_dup.txt
   before="$(ls sources | wc -l)"
@@ -82,7 +109,8 @@ EOF
   printf 'a totally different source\n' > /tmp/si_new.txt
   out="$("$SI" /tmp/si_new.txt 2>/dev/null)"; eval "$out"
   if [[ -z "$EXISTING_SIDECAR" && "$SOURCE_ID" != "01ORIGSOURCEID00000000000A" \
-        && -f "$DEST" && -f "$SIDECAR" && "$DEST" == sources/*-si_new.txt ]]; then
+        && -f "$DEST" && -f "$SIDECAR" && "$DEST" == sources/*-si_new.txt \
+        && "$(grep '^title:' "$SIDECAR")" == "title: 'si_new.txt'" ]]; then
     pass "new: novel sha → fresh source_id, asset+sidecar written"
   else
     fail "new path (EXISTING=$EXISTING_SIDECAR DEST=$DEST SIDECAR=$SIDECAR)"

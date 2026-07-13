@@ -36,8 +36,30 @@ function directMarkdownFiles(dir) {
 // Presentation helpers shared across pages (build-time).
 // cleanTitle: strip the vault's date-prefix/extension noise from source titles.
 export const cleanTitle = (t) => (t || '').replace(/^\d{4}-\d{2}-\d{2}-/, '').replace(/\.(epub|mobi|azw3?|pdf|md|txt)$/i, '').replace(/-/g, ' ').trim();
-// enOf: first Latin-script alias, used as an English subtitle.
-export const enOf = (p) => (p.aliases || []).find((a) => /[A-Za-z]/.test(a) && a !== p.title) || '';
+export const sourceDisplay = (source = {}) => {
+  const raw = source.title || (source.origin_ref || '').split(/[\\/]/).pop();
+  return { title: cleanTitle(raw), author: source.author || '' };
+};
+
+const hasLatin = (text) => /\p{Script=Latin}/u.test(text);
+const hasNonLatinLetter = (text) => /(?!\p{Script=Latin})\p{Letter}/u.test(text);
+
+// Prefer a fully Latin alias; fall back to an English parenthetical in a mixed alias.
+export const enOf = (p) => {
+  const aliases = (p.aliases || []).filter((a) => a !== p.title);
+  const latin = aliases.find((a) => hasLatin(a) && !hasNonLatinLetter(a));
+  if (latin) return latin;
+  for (const alias of aliases) {
+    const match = alias.match(/[（(]\s*([^()（）]*\p{Script=Latin}[^()（）]*)\s*[)）]/u);
+    if (match && !hasNonLatinLetter(match[1])) return match[1].trim();
+  }
+  return aliases.find(hasLatin) || '';
+};
+
+export const taxonomyTags = (body, section) => {
+  const block = (body || '').match(new RegExp(`^## ${section}\\s*\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, 'm'))?.[1] || '';
+  return [...block.matchAll(/^- `([^`]+)`$/gm)].map((match) => match[1]);
+};
 
 function splitWikilinkTarget(target) {
   const raw = String(target || '').trim();
@@ -141,6 +163,7 @@ export function loadVault() {
         title: data.title || data.source_id,
         origin_type: data.origin_type || 'file',
         origin_ref: data.origin_ref || null,
+        author: data.author || null,
         href: `/sources/${data.source_id}`,
         supersedes: data.supersedes || null,
       };

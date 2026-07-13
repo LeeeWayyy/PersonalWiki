@@ -30,7 +30,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Callable, TextIO
 from urllib.parse import urlparse
 
 from . import settings
@@ -371,7 +371,7 @@ async def _stream_until_exit(proc: asyncio.subprocess.Process, job: Job) -> int:
     try:
         return await asyncio.wait_for(proc.wait(), timeout=PROCESS_CLEANUP_TIMEOUT_S)
     except asyncio.TimeoutError:
-        await _kill_process_group(proc, job, "process with closed output")
+        await _kill_process_group(proc, job.emit, "process with closed output")
         raise
 
 
@@ -395,16 +395,16 @@ async def _wait_for_process_group_exit(pgid: int, timeout_s: float) -> bool:
     return True
 
 
-async def _reap_process(proc: asyncio.subprocess.Process, job: Job, label: str) -> None:
+async def _reap_process(proc: asyncio.subprocess.Process, emit: Callable[[str], None], label: str) -> None:
     if proc.returncode is not None:
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=PROCESS_CLEANUP_TIMEOUT_S)
     except asyncio.TimeoutError:
-        job.emit(f"warn: {label} top-level process was not reaped after process-group cleanup")
+        emit(f"warn: {label} top-level process was not reaped after process-group cleanup")
 
 
-async def _kill_process_group(proc: asyncio.subprocess.Process, job: Job, label: str) -> None:
+async def _kill_process_group(proc: asyncio.subprocess.Process, emit: Callable[[str], None], label: str) -> None:
     # All controlled children are launched with start_new_session=True, so the
     # initial PID remains the process-group ID after the group leader exits.
     # Capturing it this way lets us terminate descendants even when SIGTERM
@@ -415,15 +415,15 @@ async def _kill_process_group(proc: asyncio.subprocess.Process, job: Job, label:
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
-        await _reap_process(proc, job, label)
+        await _reap_process(proc, emit, label)
         return
     except OSError:
         if proc.returncode is None:
             proc.terminate()
     if await _wait_for_process_group_exit(pgid, PROCESS_TERMINATE_GRACE_S):
-        await _reap_process(proc, job, label)
+        await _reap_process(proc, emit, label)
         return
-    job.emit(f"warn: {label} process group still active after SIGTERM; escalating to SIGKILL")
+    emit(f"warn: {label} process group still active after SIGTERM; escalating to SIGKILL")
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
@@ -432,8 +432,8 @@ async def _kill_process_group(proc: asyncio.subprocess.Process, job: Job, label:
         if proc.returncode is None:
             proc.kill()
     if not await _wait_for_process_group_exit(pgid, PROCESS_CLEANUP_TIMEOUT_S):
-        job.emit(f"warn: {label} process group still active after SIGKILL")
-    await _reap_process(proc, job, label)
+        emit(f"warn: {label} process group still active after SIGKILL")
+    await _reap_process(proc, emit, label)
 
 
 async def cancel_job(job_id: str) -> Job | None:
@@ -445,7 +445,7 @@ async def cancel_job(job_id: str) -> Job | None:
     job.cancel_requested = True
     proc = job.process
     if proc and proc.returncode is None:
-        await _kill_process_group(proc, job, "cancel")
+        await _kill_process_group(proc, job.emit, "cancel")
     job.finish_canceled()
     return job
 
@@ -472,6 +472,8 @@ def _cleanup_staged_target(target: str, job_id: str) -> None:
     try:
         if target_path.is_file() or target_path.is_symlink():
             target_path.unlink(missing_ok=True)
+            if target_path.parent != settings.STAGE_DIR:
+                target_path.parent.rmdir()
     except Exception as e:  # noqa
         LOGGER.warning(
             "failed to remove staged ingest upload job_id=%s path=%s: %s",
@@ -492,7 +494,9 @@ def sweep_stage_dir() -> None:
         return
     for path in entries:
         try:
-            if path.is_file() or path.is_symlink():
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            elif path.is_file() or path.is_symlink():
                 path.unlink(missing_ok=True)
         except Exception as e:  # noqa
             LOGGER.warning("failed to remove stale staged ingest upload path=%s: %s", path, e)
@@ -506,7 +510,7 @@ async def shutdown_jobs() -> None:
         proc = job.process
         if proc and proc.returncode is None:
             job.emit("backend shutdown: terminating active process")
-            await _kill_process_group(proc, job, "shutdown")
+            await _kill_process_group(proc, job.emit, "shutdown")
         if job.task and not job.task.done():
             job.task.cancel()
     if active:
@@ -590,7 +594,7 @@ async def run_job(job: Job, target: str, options: dict):
                 )
                 job.process = proc
                 if job.cancel_requested:
-                    await _kill_process_group(proc, job, "cancel")
+                    await _kill_process_group(proc, job.emit, "cancel")
                     job.finish_canceled()
                     return
             except FileNotFoundError as e:
@@ -599,7 +603,7 @@ async def run_job(job: Job, target: str, options: dict):
             try:
                 rc = await _stream_until_exit(proc, job)
             except asyncio.TimeoutError:
-                await _kill_process_group(proc, job, "ingest")
+                await _kill_process_group(proc, job.emit, "ingest")
                 job.finish_terminal(
                     "error",
                     {"status": "error", "timeout": True},
@@ -627,13 +631,13 @@ async def run_job(job: Job, target: str, options: dict):
                     limit=2**20)
                 job.process = rp
                 if job.cancel_requested:
-                    await _kill_process_group(rp, job, "cancel")
+                    await _kill_process_group(rp, job.emit, "cancel")
                     job.finish_canceled()
                     return
                 try:
                     rebuild_rc = await _stream_until_exit(rp, job)
                 except asyncio.TimeoutError:
-                    await _kill_process_group(rp, job, "rebuild")
+                    await _kill_process_group(rp, job.emit, "rebuild")
                     job.finish_terminal(
                         "error",
                         {"status": "error", "rebuild_timeout": True},
@@ -659,7 +663,7 @@ async def run_job(job: Job, target: str, options: dict):
         LOGGER.info("ingest job cancelled job_id=%s", job.id)
         proc = job.process
         if proc and proc.returncode is None:
-            await _kill_process_group(proc, job, "cancel")
+            await _kill_process_group(proc, job.emit, "cancel")
         job.process = None
         if not job.ended:
             job.finish_terminal("canceled", {"status": "canceled", "shutdown": True}, ["canceled by backend shutdown"])
@@ -668,7 +672,7 @@ async def run_job(job: Job, target: str, options: dict):
         LOGGER.exception("ingest job failed job_id=%s", job.id)
         proc = job.process
         if proc and proc.returncode is None:
-            await _kill_process_group(proc, job, "ingest")
+            await _kill_process_group(proc, job.emit, "ingest")
         job.process = None
         job.finish_terminal("error", {"status": "error", "error": str(e)}, [f"error: {e}"])
     finally:

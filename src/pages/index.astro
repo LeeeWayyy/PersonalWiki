@@ -1,6 +1,6 @@
 ---
 import Base from '../layouts/Base.astro';
-import { loadVault, chaptersForSource, sourceReaderHref, cleanTitle as clean, enOf } from '../lib/vault.mjs';
+import { loadVault, chaptersForSource, sourceReaderHref, sourceDisplay, enOf } from '../lib/vault.mjs';
 
 const { pages, sources, backlinks } = loadVault();
 const entities = pages.filter((p) => p.kind === 'entity');
@@ -28,7 +28,7 @@ const topicsRail = topics.map((t) => ({ title: t.title, href: t.href, refs: (bac
   .sort((a, b) => b.refs - a.refs).slice(0, 8);
 
 const src = sources[0];
-const heroTitle = src ? clean(src.title) : '';
+const hero = src ? sourceDisplay(src) : { title: '', author: '' };
 const heroChapters = src ? chaptersForSource(src.id).length : 0;
 const heroReadHref = src ? sourceReaderHref(src.id) : '#';
 ---
@@ -40,13 +40,12 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
       <div style="position:absolute;inset:0;background:radial-gradient(520px 220px at 88% -20%,color-mix(in srgb,var(--terra) 22%,transparent),transparent 70%);pointer-events:none"></div>
       <div style="position:relative;display:flex;gap:26px;align-items:center;flex-wrap:wrap">
         <div style="flex:none;width:112px;height:158px;border-radius:8px 12px 12px 8px;background:linear-gradient(155deg,#3a2c1f,#241a12);border:1px solid var(--border-strong);box-shadow:-6px 8px 22px -8px rgba(0,0,0,.7),inset 6px 0 0 -3px rgba(0,0,0,.4);display:flex;flex-direction:column;justify-content:space-between;padding:14px 12px">
-          <div style="font-family:var(--serifcjk);font-size:15px;line-height:1.25;color:#f0e2cf;font-weight:600">{[...heroTitle].slice(0, 8).join('')}</div>
+          <div style="font-family:var(--serifcjk);font-size:15px;line-height:1.25;color:#f0e2cf;font-weight:600">{[...hero.title].slice(0, 8).join('')}</div>
           <div><div style="width:26px;height:2px;background:var(--terra);margin-bottom:7px"></div><div style="font-size:9.5px;color:var(--text-3);font-family:var(--mono);letter-spacing:.02em">{src.origin_type.toUpperCase()}</div></div>
         </div>
         <div style="min-width:230px;flex:1">
-          <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--terra);font-weight:600;margin-bottom:8px">Currently building from</div>
-          <h1 style="font-family:var(--serifcjk);font-size:30px;font-weight:600;line-height:1.15;margin:0 0 6px">{heroTitle}</h1>
-          <div style="color:var(--text-2);font-size:14px;margin-bottom:18px">{src.origin_type} · {content.length} pages synthesized</div>
+          <h1 style="font-family:var(--serifcjk);font-size:30px;font-weight:600;line-height:1.15;margin:0 0 7px">{hero.title}</h1>
+          {hero.author && <div style="color:var(--text-2);font-family:var(--serifcjk);font-size:15px;margin-bottom:20px">{hero.author}</div>}
           <div style="display:flex;gap:26px;flex-wrap:wrap;align-items:center">
             {[[entities.length, 'entities'], [topics.length, 'topics'], [heroChapters, 'chapters']].map(([n, l]) => (
               <div><div style="font-family:var(--serif);font-size:24px;font-weight:600;line-height:1">{n}</div><div style="font-size:12px;color:var(--text-3);margin-top:3px">{l}</div></div>
@@ -97,7 +96,7 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
       </div>
       <input id="ingest-url" class="field" style="flex:1;min-width:220px" placeholder="https://youtube.com/… or an article URL" />
       <label id="ingest-file-row" style="display:none;flex:1;min-width:220px;align-items:center;gap:10px;padding:9px 13px;background:var(--bg-2);border:1px dashed var(--border-strong);border-radius:9px;color:var(--text-3);font-size:13.5px;cursor:pointer">
-        <span style="color:var(--terra)">＋</span> Choose a file (PDF, md, epub/mobi, audio)<input id="ingest-file" type="file" style="display:none" />
+        <span style="color:var(--terra)">＋</span> <span id="ingest-file-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Choose a file (PDF, md, epub/mobi, audio)</span><input id="ingest-file" type="file" style="display:none" />
       </label>
       <button id="opt-toggle" class="btn-quiet" style="flex:none;padding:9px 13px">选项 <span id="opt-chevron">▾</span></button>
       <button id="ingest-run" class="btn-accent" style="flex:none;padding:9px 18px">Run ingest ↗</button>
@@ -108,7 +107,9 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
       <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)">Kind
         <select id="ingest-kind" class="field sm"><option value="auto">auto</option><option value="wiki">wiki</option><option value="video">video</option><option value="lang">lang (profile)</option></select></label>
       <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)">Exact section heading
-        <input id="ingest-section-heading" class="field sm" style="width:180px;font-family:var(--mono)" placeholder="第二章 生命力" /></label>
+        <input id="ingest-section-heading" list="ingest-section-list" class="field sm" style="width:180px;font-family:var(--mono)" placeholder="第二章 生命力" />
+        <datalist id="ingest-section-list"></datalist></label>
+      <button id="ingest-sections-load" class="btn-quiet" style="flex:none;padding:6px 12px;font-size:12px">List chapters ▾</button>
     </div>
     <pre id="ingest-log" style="display:none;margin:14px 0 0;background:#100d08;border:1px solid var(--border);border-radius:9px;padding:12px 14px;max-height:180px;overflow:auto;font-family:var(--mono);font-size:12px;color:var(--text-2);line-height:1.55;white-space:pre-wrap"></pre>
     <p style="margin:10px 0 0;font-size:11.5px;color:var(--text-3)">The pipeline commits to the local-only vault and can spend LLM/ASR budget · costly media steps confirm first.</p>
@@ -219,13 +220,14 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
 
     // ingest 选项 (Kind / Section) collapse
     const opts = document.getElementById('ingest-options'), chevron = document.getElementById('opt-chevron');
-    document.getElementById('opt-toggle')?.addEventListener('click', () => {
+    function showOpts(open: boolean) {
       if (!opts) return;
-      const open = opts.style.display === 'none' || !opts.style.display;
       opts.style.display = open ? 'flex' : 'none';
       if (chevron) chevron.textContent = open ? '▴' : '▾';
+    }
+    document.getElementById('opt-toggle')?.addEventListener('click', () => {
+      showOpts(!opts || opts.style.display === 'none' || !opts.style.display);
     });
-
     // 待复习 count from the study backend (best-effort; leaves '·' if offline)
     (async () => {
       try {
@@ -257,7 +259,9 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
       urlRowId: 'ingest-url', fileRowId: 'ingest-file-row',
       runId: 'ingest-run', cancelId: 'ingest-cancel', logId: 'ingest-log',
       kindId: 'ingest-kind', sectionHeadingId: 'ingest-section-heading', urlInputId: 'ingest-url',
-      fileInputId: 'ingest-file',
+      fileInputId: 'ingest-file', fileNameId: 'ingest-file-name',
+      sectionListId: 'ingest-section-list', sectionsLoadId: 'ingest-sections-load',
+      onSectionableFile: () => showOpts(true),
     });
   </script>
 </Base>

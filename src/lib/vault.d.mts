@@ -17,6 +17,7 @@ export interface SourceMeta {
   title: string;
   origin_type: string;
   origin_ref: string | null;
+  author?: string | null;
   href: string;
   supersedes: string | string[] | null;
 }
@@ -75,7 +76,9 @@ export interface LangEntry {
 }
 
 export const cleanTitle: (t: string | null | undefined) => string;
+export const sourceDisplay: (source?: Partial<SourceMeta>) => { title: string; author: string };
 export const enOf: (p: { aliases?: string[]; title?: string }) => string;
+export const taxonomyTags: (body: string, section: string) => string[];
 export function loadVault(): {
   pages: VaultPage[];
   sources: SourceMeta[];

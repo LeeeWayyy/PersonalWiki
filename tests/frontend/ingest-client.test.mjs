@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { ingestOptions } from '../../src/scripts/ingest-client.js';
+import { ingestOptions, isSectionableFile } from '../../src/scripts/ingest-client.js';
 
 test('ingest options leave auto-chaptering untouched without a section heading', () => {
   assert.deepEqual(ingestOptions('auto', '  '), {
@@ -24,4 +24,11 @@ test('ingest options omit section selectors for unsupported kinds', () => {
       section_heading: null,
     });
   }
+});
+
+test('sectionable file detection stays with the file-input handler', () => {
+  for (const name of ['book.epub', 'paper.PDF', 'notes.markdown', 'page.html']) {
+    assert.equal(isSectionableFile(name), true);
+  }
+  assert.equal(isSectionableFile('cover.png'), false);
 });

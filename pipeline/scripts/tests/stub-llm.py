@@ -19,6 +19,7 @@ so a test can ingest twice without colliding.
 """
 
 import json
+import difflib
 import os
 import re
 import sys
@@ -29,6 +30,7 @@ entity = os.environ.get("STUB_ENTITY", "e2e-entity")
 # media-spine test exercises the card/frame/timestamp gate NON-vacuously. Unset (default)
 # = a bare [src:<id>] citation, which is what the document-path e2e expects.
 anchor = os.environ.get("STUB_CARD_ANCHOR", "")
+requested_taxonomy_tag = os.environ.get("STUB_TAXONOMY_TAG", "")
 
 
 def _slug(value: str) -> str:
@@ -150,6 +152,20 @@ if not m:
     print("NO_CHANGES: stub could not find source_id in prompt", flush=True)
     sys.exit(0)
 sid = m.group(1)
+taxonomy_match = re.search(
+    r"^## TAXONOMY\n(.*?)(?=\n+---\n+## SOURCE_META$)",
+    prompt,
+    re.MULTILINE | re.DOTALL,
+)
+if not taxonomy_match:
+    raise SystemExit("stub-llm: prompt is missing the TAXONOMY block")
+taxonomy = taxonomy_match.group(1)
+domain_match = re.search(
+    r"^## Domain\n- `([^`]+)`",
+    taxonomy,
+    re.MULTILINE,
+)
+domain_tag = requested_taxonomy_tag or (domain_match.group(1) if domain_match else "general/knowledge")
 section_citation_match = re.search(
     r"^## SECTION_CITATION\n(\[src:[^\n]+\])$", prompt, re.MULTILINE
 )
@@ -164,7 +180,7 @@ body = [
     "---",
     "type: Entity",
     f"aliases: [{entity}]",
-    "tags: [concept, biology/cell]",
+    f"tags: [{domain_tag}, concept]",
     f"sources: [{sid}]",
     "last_ingested: 2026-01-01",
     "---",
@@ -184,11 +200,33 @@ body = [
 path = f"wiki/entities/{entity}.md"
 # Unified diff: new file. git apply --recount fixes the hunk counts, so the
 # +N count need only be ≥ the real line count.
-diff = [
+page_diff = [
     f"diff --git a/{path} b/{path}",
     "new file mode 100644",
     "--- /dev/null",
     f"+++ b/{path}",
     f"@@ -0,0 +1,{len(body)} @@",
 ] + [f"+{line}" for line in body]
-print("\n".join(diff))
+
+taxonomy_diff = []
+taxonomy_bullet = f"- `{requested_taxonomy_tag}`"
+if requested_taxonomy_tag and taxonomy_bullet not in taxonomy.splitlines():
+    old_lines = taxonomy.splitlines()
+    if "## Form" not in old_lines:
+        raise SystemExit("stub-llm: TAXONOMY block is missing ## Form")
+    if os.environ.get("STUB_INVALID_TAXONOMY_ONCE") and "## Patch Retry" not in prompt:
+        insert_at = len(old_lines)
+    else:
+        insert_at = old_lines.index("## Form")
+        while insert_at and not old_lines[insert_at - 1]:
+            insert_at -= 1
+    new_lines = [*old_lines[:insert_at], taxonomy_bullet, *old_lines[insert_at:]]
+    taxonomy_diff = ["diff --git a/wiki/_taxonomy.md b/wiki/_taxonomy.md", *difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile="a/wiki/_taxonomy.md",
+        tofile="b/wiki/_taxonomy.md",
+        lineterm="",
+    )]
+
+print("\n".join([*taxonomy_diff, *page_diff]))

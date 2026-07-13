@@ -528,6 +528,8 @@ class CacheAndPromptTests(unittest.TestCase):
         self.assertIn("There is no per-chapter entity cap", selected)
         self.assertIn("chapter titles", selected)
         self.assertIn("Source language wins", selected)
+        self.assertIn("established English and", selected)
+        self.assertIn("Chinese name", selected)
         self.assertEqual(
             ci.select_analyzer_schema_rules(
                 full_rules.replace(

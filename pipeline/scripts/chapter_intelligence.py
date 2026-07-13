@@ -1428,7 +1428,7 @@ def _artifact_shape(fixed: Mapping[str, object]) -> dict:
             {
                 "name": "reusable entity name",
                 "type": "semantic type",
-                "aliases": [],
+                "aliases": ["established English name", "标准中文名"],
                 "importance": 5,
                 "role": "role in this section's reasoning",
                 "page_hint": "entity",
@@ -1568,6 +1568,9 @@ Validation and coverage rules:
   a central theory/mechanism or carries indispensable evidence. This is a
   selectivity rule, not a numeric page cap.
 - Prefer the shortest canonical concept name and put source variants in aliases.
+  For reusable entities, include both the established English and Chinese name
+  in aliases even when only one language appears in the source. Do not invent a
+  translation when no established counterpart exists.
   Do not narrow a mature mechanism into a historical `hypothesis` page merely
   because the source discusses how it was proposed; retain the suffix only for
   genuinely named hypotheses such as a specific origin model.

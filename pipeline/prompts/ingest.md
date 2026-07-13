@@ -7,7 +7,8 @@ vault. Your job is to integrate a new source into the existing wiki.
 
 - `SCHEMA` — the selected rule pack for this operation. It is binding.
 - `ALL_SOURCE_IDS` — every valid source id currently in the vault.
-- `TAXONOMY` — allowed `tags:` values. Do not invent tags.
+- `TAXONOMY` — the current `tags:` vocabulary. Reuse it when accurate; append
+  missing categories under the rules below when the source does not fit.
 - `SOURCE_META` — this run's source metadata, including `source_id`.
 - `SOURCE_INTELLIGENCE` — a validated, source-grounded analysis of the
   section's claims, entities, topics, relationships, and possible page
@@ -25,11 +26,14 @@ vault. Your job is to integrate a new source into the existing wiki.
 
 Emit a unified diff that integrates the source into the wiki:
 
-1. Update relevant candidate pages.
-2. Create new `wiki/entities/<name>.md` pages for important reusable
+1. If no existing Domain or Form accurately classifies a page you will emit,
+   append the minimum necessary bullet(s) to `wiki/_taxonomy.md` in this same
+   diff. Never delete, rename, reorder, or rewrite existing taxonomy lines.
+2. Update relevant candidate pages.
+3. Create new `wiki/entities/<name>.md` pages for important reusable
    entities, mechanisms, hypotheses, organisms, enzymes/proteins,
    people, methods, or named theories that do not already have pages.
-3. Create or update `wiki/topics/<name>.md` pages when the source
+4. Create or update `wiki/topics/<name>.md` pages when the source
    warrants synthesis across multiple entities or mechanisms.
 
 Do not summarize the chapter as a chapter. Build graph nodes and
@@ -75,9 +79,10 @@ Only create or modify files under:
 
 - `wiki/entities/`
 - `wiki/topics/`
+- `wiki/_taxonomy.md` (append missing tag bullets only; never taxonomy-only)
 
-Never edit `sources/`, `.wiki/`, `schema.md`, `wiki/_index/`,
-`wiki/_maps/`, or arbitrary project files.
+Never edit `sources/`, `.wiki/`, `schema.md`, `wiki/_index/`, `wiki/_maps/`,
+or arbitrary project files. MOCs are regenerated after the diff passes.
 
 ## Output Format
 

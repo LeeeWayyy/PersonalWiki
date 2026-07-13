@@ -12,6 +12,7 @@ asset; otherwise assign a fresh ULID, copy the asset in, and write the
 sidecar. Run from the vault root (paths are cwd-relative, like the bash).
 
 Usage:  source-identity.py <path-or-url>
+        source-identity.py --fetch-only <http(s)-url> <destination>
 
 stdout: shell-safe `KEY=VALUE` assignments (shlex-quoted) for the caller
         to `eval`: SOURCE_ID SHA256 ADDED ORIGIN_TYPE ORIGIN_REF DEST
@@ -36,6 +37,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -127,6 +130,51 @@ def yaml_squote(v: str) -> str:
     return v.replace("'", "''")
 
 
+def hardened_fetch(url: str, dest: Path | str) -> bool:
+    """Fetch with the same bounded HTTP-only policy for every entry point."""
+    return subprocess.run([
+        "curl", "-fsSL",
+        "--proto", "=http,https",
+        "--proto-redir", "=http,https",
+        "--max-time", URL_FETCH_MAX_TIME_S,
+        "--max-filesize", URL_FETCH_MAX_BYTES,
+        url, "-o", str(dest),
+    ]).returncode == 0
+
+
+def epub_metadata(path: Path | str) -> tuple[str, str]:
+    """Read EPUB title/creator with stdlib only; malformed metadata is optional."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            container_info = archive.getinfo("META-INF/container.xml")
+            if container_info.file_size > 2 * 1024 * 1024:
+                return "", ""
+            container = ET.fromstring(archive.read(container_info))
+            rootfile = next(
+                node.attrib["full-path"] for node in container.iter()
+                if node.tag.rsplit("}", 1)[-1] == "rootfile"
+            )
+            info = archive.getinfo(rootfile)
+            if info.file_size > 2 * 1024 * 1024:
+                return "", ""
+            package = ET.fromstring(archive.read(rootfile))
+    except (KeyError, StopIteration, ET.ParseError, OSError, zipfile.BadZipFile):
+        return "", ""
+
+    def values(name: str) -> list[str]:
+        return [
+            " ".join((node.text or "").split())
+            for node in package.iter()
+            if node.tag.rsplit("}", 1)[-1] == name and (node.text or "").strip()
+        ]
+
+    titles, creators = values("title"), values("creator")
+    title = titles[0] if titles else ""
+    if title.casefold() in {"untitled", "unknown", "unknown title"}:
+        title = ""
+    return title, ", ".join(creators)
+
+
 def emit(**vars_: str) -> None:
     for k, v in vars_.items():
         sys.stdout.write(f"{k}={shlex.quote(v)}\n")
@@ -156,6 +204,15 @@ def _await_publish(values: dict[str, str], *, existing: bool) -> None:
 def main() -> int:
     reserve_handshake = False
     argv = sys.argv[1:]
+    if argv and argv[0] == "--fetch-only":
+        if len(argv) != 3 or not re.match(r"^https?://", argv[1]):
+            die("usage: source-identity.py --fetch-only <http(s)-url> <destination>")
+        signal.signal(signal.SIGTERM, _terminated)
+        signal.signal(signal.SIGINT, _terminated)
+        progress(f"fetching {argv[1]}")
+        if not hardened_fetch(argv[1], argv[2]):
+            die(f"fetch failed for {argv[1]}")
+        return 0
     if argv and argv[0] == "--reserve-handshake":
         reserve_handshake = True
         argv = argv[1:]
@@ -187,14 +244,7 @@ def main() -> int:
             fd, tmp_fetch = tempfile.mkstemp(prefix="ingest-")
             os.close(fd)
             progress(f"fetching {inp}")
-            # -f: non-zero on HTTP errors, so 404/500 bodies aren't stored.
-            if subprocess.run([
-                "curl", "-fsSL",
-                "--proto", "=http,https",
-                "--max-time", URL_FETCH_MAX_TIME_S,
-                "--max-filesize", URL_FETCH_MAX_BYTES,
-                inp, "-o", tmp_fetch,
-            ]).returncode != 0:
+            if not hardened_fetch(inp, tmp_fetch):
                 die(f"fetch failed for {inp}")
             sha256 = sha256_of(tmp_fetch)
             fetched = tmp_fetch
@@ -269,6 +319,9 @@ def main() -> int:
                     state = "tracked" if git_tracked(target) else "UNTRACKED"
                     die(f"destination exists and is {state}: {target} "
                         f"(refusing to overwrite pre-existing data)")
+            book_title, author = epub_metadata(fetched) if Path(inp).suffix.lower() == ".epub" else ("", "")
+            title = book_title or (dest_basename if origin_type == "url" else os.path.basename(inp))
+            author_line = f"author: '{yaml_squote(author)}'\n" if author else ""
             sidecar_text = (
                 "---\n"
                 f"source_id: {source_id}\n"
@@ -278,9 +331,10 @@ def main() -> int:
                 f"origin_type: {origin_type}\n"
                 f"origin_ref: '{yaml_squote(origin_ref)}'\n"
                 "supersedes: null\n"
-                f"title: '{yaml_squote(dest_basename)}'\n"
+                f"title: '{yaml_squote(title)}'\n"
+                f"{author_line}"
                 "---\n\n"
-                f"# {dest_basename}\n\n"
+                f"# {title}\n\n"
                 "Auto-generated sidecar. Do not hand-edit.\n"
             )
             values = {

@@ -42,6 +42,7 @@ import sys
 from pathlib import Path
 
 PATH_RX = re.compile(r"^wiki/(entities|topics)/[^/].*\.md$")
+TAXONOMY_PATH = "wiki/_taxonomy.md"
 QUOTED_HEADER_RX = re.compile(r'^diff --git "a/([^"]+)" "b/([^"]+)"$')
 
 
@@ -106,8 +107,8 @@ def extract_unified_path(line: str):
 
 
 def ok(p: str) -> bool:
-    """Path is in-scope (wiki/entities or wiki/topics), .md, no `..`."""
-    if not PATH_RX.match(p):
+    """Allow content pages and the exact taxonomy path, with no traversal."""
+    if p != TAXONOMY_PATH and not PATH_RX.match(p):
         return False
     if any(seg == ".." for seg in p.split("/")):
         return False

@@ -247,6 +247,7 @@ def test_private_routes_fail_closed_when_auth_token_unset(client, monkeypatch):
     cases = [
         ("GET", "/health/llm", {}),
         ("POST", "/ingest", {"json": {"url": "https://example.com"}}),
+        ("POST", "/ingest/sections", {"json": {"url": "https://example.com"}}),
         ("GET", "/jobs/missing", {}),
         ("GET", "/jobs/missing/events", {}),
         ("POST", "/jobs/missing/cancel", {}),
@@ -270,6 +271,7 @@ def test_private_routes_reject_missing_or_bad_token(client):
     cases = [
         ("GET", "/health/llm", {}),
         ("POST", "/ingest", {"json": {"url": "https://example.com"}}),
+        ("POST", "/ingest/sections", {"json": {"url": "https://example.com"}}),
         ("GET", "/jobs/missing", {}),
         ("GET", "/jobs/missing/events", {}),
         ("POST", "/jobs/missing/cancel", {}),
@@ -631,7 +633,9 @@ def test_run_job_passes_run_id_uses_threads_and_removes_stage_upload(tmp_path, m
     content.mkdir()
     stage = tmp_path / "stage"
     stage.mkdir()
-    upload = stage / "upload.txt"
+    slot = stage / "slot"
+    slot.mkdir()
+    upload = slot / "upload.txt"
     upload.write_text("uploaded", encoding="utf-8")
     script = tmp_path / "ingest_stub.py"
     script.write_text(
@@ -671,6 +675,7 @@ def test_run_job_passes_run_id_uses_threads_and_removes_stage_upload(tmp_path, m
     assert job.status == "done"
     assert job.result == {"status": "done"}
     assert not upload.exists()
+    assert not slot.exists()
     assert f"run-id={job.id}" in job.visible_lines()
     assert f"content-dir={content}" in job.visible_lines()
     assert seen["content"] == content
@@ -852,7 +857,7 @@ def test_timeout_cleanup_kills_and_awaits_process_group(monkeypatch):
             start_new_session=True,
         )
         job = ir.Job("killjob")
-        await ir._kill_process_group(proc, job, "test")
+        await ir._kill_process_group(proc, job.emit, "test")
         assert proc.returncode is not None
         assert "did not exit" not in "\n".join(job.visible_lines())
 
@@ -891,7 +896,7 @@ def test_timeout_cleanup_allows_sigterm_cleanup(monkeypatch, tmp_path):
             await asyncio.sleep(0.05)
         assert marker.exists()
         job = ir.Job("termcleanupjob")
-        await ir._kill_process_group(proc, job, "test")
+        await ir._kill_process_group(proc, job.emit, "test")
         assert proc.returncode == 0
         assert cleaned.read_text(encoding="utf-8") == "cleaned"
         assert "SIGKILL" not in "\n".join(job.visible_lines())
@@ -922,7 +927,7 @@ def test_timeout_cleanup_escalates_to_sigkill(monkeypatch, tmp_path):
             await asyncio.sleep(0.05)
         assert marker.exists()
         job = ir.Job("stubbornkilljob")
-        await ir._kill_process_group(proc, job, "test")
+        await ir._kill_process_group(proc, job.emit, "test")
         assert proc.returncode is not None
         assert "escalating to SIGKILL" in "\n".join(job.visible_lines())
 
@@ -968,7 +973,7 @@ def test_timeout_cleanup_kills_ignoring_descendant_after_leader_exits(monkeypatc
         child_pid = int(child_pid_file.read_text(encoding="utf-8"))
         job = ir.Job("descendantkilljob")
         try:
-            await ir._kill_process_group(proc, job, "test")
+            await ir._kill_process_group(proc, job.emit, "test")
             assert proc.returncode is not None
             assert "escalating to SIGKILL" in "\n".join(job.visible_lines())
             deadline = time.time() + 2
@@ -1013,7 +1018,111 @@ def test_ingest_upload_streams_to_stage_before_starting_job(client, auth, monkey
         "kind": "auto",
         "section_heading": None,
     }
+    assert called["target"].name == "note.txt"
+    assert called["target"].parent.parent == tmp_path
     assert called["target"].read_bytes() == b"hello"
+
+
+def test_ingest_sections_lists_headings_and_cleans_staged_upload(client, auth, monkeypatch, tmp_path):
+    from app import settings
+    from app.routers import ingest as ingest_routes
+
+    seen = {}
+
+    async def fake_list_sections(target):
+        seen["target"] = Path(target)
+        seen["bytes"] = Path(target).read_bytes()
+        return ["第一章 起点", "第二章 生命力"]
+
+    monkeypatch.setattr(settings, "STAGE_DIR", tmp_path)
+    monkeypatch.setattr(ingest_routes, "_list_sections", fake_list_sections)
+
+    r = client.post(
+        "/ingest/sections",
+        files={"file": ("book.epub", b"fake-epub", "application/epub+zip")},
+        headers=auth,
+    )
+
+    assert r.status_code == 200
+    assert r.json() == {"sections": ["第一章 起点", "第二章 生命力"]}
+    assert seen["bytes"] == b"fake-epub"
+    assert list(tmp_path.iterdir()) == []  # staged copy removed after listing
+
+
+def test_ingest_sections_url_mode_validates_scheme(client, auth, monkeypatch):
+    from app.routers import ingest as ingest_routes
+
+    async def fake_list_sections(target):
+        return ["Chapter 1"]
+
+    monkeypatch.setattr(ingest_routes, "_list_sections", fake_list_sections)
+
+    ok = client.post("/ingest/sections", json={"url": "https://example.com/a"}, headers=auth)
+    assert ok.status_code == 200
+    assert ok.json() == {"sections": ["Chapter 1"]}
+
+    bad = client.post("/ingest/sections", json={"url": "ftp://example.com/a"}, headers=auth)
+    assert bad.status_code == 400
+
+
+def test_list_sections_fetches_urls_with_source_identity_policy(monkeypatch, tmp_path):
+    from app import settings
+    from app.routers import ingest as ingest_routes
+
+    calls = []
+
+    async def fake_run(*argv):
+        calls.append(argv)
+        if "--fetch-only" in argv:
+            Path(argv[-1]).write_text("downloaded", encoding="utf-8")
+            return b""
+        return b"Chapter 1\n"
+
+    monkeypatch.setattr(settings, "STAGE_DIR", tmp_path)
+    monkeypatch.setattr(ingest_routes, "_run_sections_tool", fake_run)
+    sections = asyncio.run(ingest_routes._list_sections("https://example.com/book"))
+
+    assert sections == ["Chapter 1"]
+    assert calls[0][1:3] == ("--fetch-only", "https://example.com/book")
+    assert calls[1][0] == str(ingest_routes._EXTRACT_SCRIPT)
+    assert not list(tmp_path.iterdir())
+
+
+def test_sections_tool_kills_process_group_when_canceled(monkeypatch):
+    from app.routers import ingest as ingest_routes
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    killed = []
+
+    class Proc:
+        pid = 123
+        returncode = None
+
+        async def communicate(self):
+            started.set()
+            await release.wait()
+
+    async def fake_create(*_argv, **kwargs):
+        assert kwargs["start_new_session"] is True
+        return Proc()
+
+    async def fake_kill(proc, emit, label):
+        killed.append((proc.pid, emit, label))
+
+    monkeypatch.setattr(ingest_routes.asyncio, "create_subprocess_exec", fake_create)
+    monkeypatch.setattr(ingest_routes.ir, "_kill_process_group", fake_kill)
+
+    async def run():
+        task = asyncio.create_task(ingest_routes._run_sections_tool("tool"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert killed[0][0::2] == (123, "section listing")
+    assert callable(killed[0][1])
 
 
 def test_write_upload_offloads_disk_writes(monkeypatch, tmp_path):
