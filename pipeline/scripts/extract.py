@@ -72,6 +72,9 @@ from asset_manifest import ImageEntry, OriginRef, read_manifest, write_manifest 
 SHA_PREFIX_LEN = 12   # see plan/image-ingest-plan.md §3.2
 
 PDF_RASTER_DPI = 300
+# Outline flattening depth: top level + one nesting, so Part → Chapter books
+# split by chapter without exploding subsection-heavy outlines into noise.
+PDF_OUTLINE_MAX_DEPTH = 2
 # Max vertical gap (PDF points) between a figure and its caption line.
 PDF_CAPTION_MAX_GAP = 60.0
 WEB_IMAGE_CAP = 20            # max image downloads per page
@@ -526,7 +529,10 @@ def extract_pdf(path: Path, *, write_assets: bool = False,
                 source_id: str | None = None) -> str:
     """Extract markdown text from a PDF.
 
-    Text is extracted via pypdf (existing behavior). When `write_assets`
+    Text is extracted via pypdf. When the PDF has an outline (bookmarks),
+    sections are `## <bookmark title>` spanning that entry's page range —
+    content-based splitting, same shape as EPUB chapters. Without an
+    outline, sections fall back to `## Page N`. When `write_assets`
     is True, also enumerates figure bboxes per page (via pdfplumber) and
     rasterizes each bbox to PNG at 300 DPI; writes/merges _manifest.md.
 
@@ -548,15 +554,80 @@ def extract_pdf(path: Path, *, write_assets: bool = False,
             print(f"extract: PDF asset extraction failed for {path}: {e}; "
                   "continuing with text-only output", file=sys.stderr)
 
-    # Text extraction stays as it was — pypdf's text-only output.
     reader = PdfReader(str(path))
-    pages: list[str] = []
-    for i, page in enumerate(reader.pages, start=1):
-        txt = page.extract_text() or ""
-        txt = txt.strip()
-        if txt:
-            pages.append(f"\n\n## Page {i}\n\n{txt}\n")
+    page_texts = [(page.extract_text() or "").strip() for page in reader.pages]
+
+    # Content-based split: when the PDF carries an outline (bookmarks), emit
+    # one `## <bookmark title>` per entry spanning its page range — the same
+    # shape as EPUB output, so chaptered ingest groups PDF chapters for free.
+    sections = _pdf_sections_from_outline(page_texts,
+                                          _pdf_outline_sections(reader))
+    if sections:
+        return "\n".join(sections).strip() + "\n"
+
+    # No usable outline → per-page sections (existing behavior).
+    pages = [f"\n\n## Page {i}\n\n{txt}\n"
+             for i, txt in enumerate(page_texts, start=1) if txt]
     return "\n".join(pages).strip() + "\n"
+
+
+def _pdf_outline_sections(reader) -> list[tuple[str, int]]:
+    """Flatten the PDF outline/bookmarks to [(title, 0-based start page)].
+
+    Depth is capped at PDF_OUTLINE_MAX_DEPTH. Entries whose destination can't
+    be resolved are skipped; entries that jump backwards are dropped so the
+    [start, next_start) page ranges downstream stay monotonic.
+    """
+    flat: list[tuple[str, int]] = []
+
+    def walk(items, depth: int) -> None:
+        for it in items:
+            if isinstance(it, list):
+                if depth < PDF_OUTLINE_MAX_DEPTH:
+                    walk(it, depth + 1)
+                continue
+            try:
+                page_idx = reader.get_destination_page_number(it)
+            except Exception:
+                continue
+            title = " ".join((getattr(it, "title", None) or "").split())
+            if title and page_idx is not None:
+                flat.append((title, page_idx))
+
+    try:
+        walk(reader.outline or [], 1)
+    except Exception:
+        return []
+    out: list[tuple[str, int]] = []
+    for title, idx in flat:
+        if out and idx < out[-1][1]:
+            continue
+        out.append((title, idx))
+    return out
+
+
+def _pdf_sections_from_outline(page_texts: list[str],
+                               outline: list[tuple[str, int]]) -> list[str]:
+    """Render `## <title>` sections from outline entries and per-page texts.
+
+    Each entry spans pages [its start, next entry's start); the last runs to
+    the end. Pages before the first entry become `## Front matter`. Empty
+    ranges (e.g. two bookmarks on one page) are skipped — their text lands in
+    the neighboring section. Returns [] when the outline yields nothing.
+    """
+    if not outline:
+        return []
+    sections: list[str] = []
+    if outline[0][1] > 0:
+        head = "\n\n".join(t for t in page_texts[:outline[0][1]] if t)
+        if head:
+            sections.append(f"\n\n## Front matter\n\n{head}\n")
+    for n, (title, start) in enumerate(outline):
+        end = outline[n + 1][1] if n + 1 < len(outline) else len(page_texts)
+        body = "\n\n".join(t for t in page_texts[start:end] if t)
+        if body:
+            sections.append(f"\n\n## {title}\n\n{body}\n")
+    return sections
 
 
 def _bbox_iou(a: tuple[float, float, float, float],

@@ -45,9 +45,16 @@ export function mount(config) {
   let backendOnline = false;
 
   function syncSectionSupport() {
+    // The pipeline rejects --section for lang (its generator works through
+    // chapters itself) and video; explain the gray-out instead of just graying.
     const unsupported = kindInput.value !== 'auto' && kindInput.value !== 'wiki';
+    const why = unsupported ? t('ingest.sectionNA') : '';
     sectionHeadingInput.disabled = unsupported;
-    if (sectionsLoadBtn) sectionsLoadBtn.disabled = unsupported;
+    sectionHeadingInput.title = why;
+    if (sectionsLoadBtn) {
+      sectionsLoadBtn.disabled = unsupported;
+      sectionsLoadBtn.title = why;
+    }
   }
 
   kindInput.addEventListener('change', syncSectionSupport);

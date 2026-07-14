@@ -319,9 +319,15 @@ class AutoChapterTests(unittest.TestCase):
             args.section_label = "第1章"
             self.assertFalse(ingest._should_auto_chapter(args))
 
+            # PDFs auto-chapter too (outline-based sections; run_chaptered
+            # falls back to single-unit when extraction is `## Page N` only).
             pdf = Path(d) / "paper.pdf"
             pdf.write_bytes(b"pdf-bytes")
-            self.assertFalse(ingest._should_auto_chapter(_args(pdf)))
+            self.assertTrue(ingest._should_auto_chapter(_args(pdf)))
+
+            txt = Path(d) / "notes.txt"
+            txt.write_bytes(b"text")
+            self.assertFalse(ingest._should_auto_chapter(_args(txt)))
 
     def test_child_marker_prevents_reentry(self):
         # A no-section child (whole-unit fallback) must NOT re-auto-chapter, or a
@@ -574,6 +580,18 @@ class RunChapteredTests(unittest.TestCase):
             rc, calls = self._run(vault, book, ["A", "B", "C"], {})
             self.assertEqual(rc, 0)
             self.assertEqual(calls, [("A", False), ("B", True), ("C", True)])
+
+    def test_pdf_page_sections_fall_back_to_single_unit(self):
+        # Outline-less PDF → extraction is `## Page N` only; must not ingest
+        # per page (commit storm) but as one whole-source run.
+        with tempfile.TemporaryDirectory() as d:
+            vault = Path(d)
+            (vault / "sources").mkdir(parents=True)
+            pdf = vault / "paper.pdf"
+            pdf.write_bytes(b"pdf-bytes")
+            rc, calls = self._run(vault, pdf, ["Page 1", "Page 2", "Page 3"], {})
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls, [(None, False)])
 
     def test_resume_skips_done_chapters(self):
         with tempfile.TemporaryDirectory() as d:

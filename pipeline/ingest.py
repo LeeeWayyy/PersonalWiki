@@ -58,7 +58,9 @@ from source_citations import iter_source_citations  # noqa: E402
 
 VAULT_ROOT = default_vault_root(TOOLING_ROOT)
 SCRIPTS = str(SCRIPTS_PATH)
-CHAPTERED_EXTS = (".epub", ".mobi", ".azw", ".azw3")
+CHAPTERED_EXTS = (".epub", ".mobi", ".azw", ".azw3", ".pdf")
+# Outline-less PDFs extract as `## Page N` sections; those aren't chapters.
+PAGE_SECTION_RX = re.compile(r"^Page \d+$")
 # Fallback only (books with no chapter markers): a `## ` section with fewer body
 # chars than this is structural (cover/TOC/title page) and skipped.
 CHAPTER_MIN_CHARS = int(os.environ.get("PW_CHAPTER_MIN_CHARS", "200"))
@@ -1808,6 +1810,13 @@ def run_chaptered(args) -> int:
         out(f"detected {len(chapters)} chapter(s); {grouped} section(s) grouped "
             f"under them, {len(sections) - grouped} front/back-matter section(s) "
             f"excluded")
+    elif sections and all(PAGE_SECTION_RX.match(t) for t, _ in sections):
+        # Outline-less PDF: page-numbered sections aren't content chapters —
+        # per-page ingest would be a commit storm. Ingest as a single unit.
+        out("page-numbered sections only (PDF without an outline) — "
+            "ingesting as a single unit")
+        chapters = []
+        chapter_ranges = []
     else:
         # No chapter markers → one ingest per substantial section (structural
         # cover/TOC/title pages, which would produce empty chapter analysis, dropped).

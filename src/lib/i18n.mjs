@@ -82,6 +82,10 @@ const D = {
   'ingest.err.url': ['Enter a URL first.', '请先输入链接。'],
   'ingest.cancelReq': ['cancel requested', '已请求取消'],
   'ingest.cancelErr': ['cancel error: ', '取消失败：'],
+  'ingest.sectionNA': [
+    'Chapter selection is only for auto/wiki — lang and video always ingest the whole source (lang works through chapters automatically).',
+    '仅 auto/wiki 支持选择章节 — lang 和 video 会导入整个来源（lang 会自动逐章处理）。',
+  ],
   'ingest.sectionsErr': ['sections error: ', '获取章节失败：'],
   'ingest.sectionsLoaded': ['{n} section heading(s) loaded — pick one in the section field', '已读取 {n} 个章节标题 — 请在章节栏中选择'],
   'ingest.jobStarted': ['job {id} started', '任务 {id} 已开始'],
