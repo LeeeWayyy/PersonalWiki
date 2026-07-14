@@ -32,7 +32,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
     #rd-toolbar button { font-family: var(--sans); }
   </style>
 
-  <div style="max-width:880px;margin:0 auto">
+  <div style="max-width:1180px;margin:0 auto">
     <div style="margin-bottom:22px">
       <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
         <span style="font-size:10.5px;font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 42%,transparent);border-radius:5px;padding:2px 7px">JA · 日本語</span>
@@ -67,7 +67,16 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           <span style="font-size:11px;color:var(--text-3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.06em;margin-right:3px">品詞 · pos</span>
         </div>
 
-        <div id="rd"></div>
+        <div class="rd-layout">
+          <div id="rd"></div>
+          <aside class="rd-rail" id="rd-rail">
+            <div class="rd-tabs">
+              <button type="button" data-tab="word" class="on">単語 <span style="opacity:.65">Word</span></button>
+              <button type="button" data-tab="grammar">文法 <span style="opacity:.65">Grammar</span></button>
+            </div>
+            <div id="rd-rail-body"></div>
+          </aside>
+        </div>
         <div id="rd-sheet" style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg-2);border-top:1px solid var(--border-strong);box-shadow:0 -10px 34px rgba(0,0,0,.5);padding:18px 24px 26px;font-family:var(--sans);max-height:52vh;overflow:auto;transition:transform .22s ease;transform:translateY(115%)">
           <div style="max-width:640px;margin:0 auto;position:relative">
             <button id="sheet-x" style="position:absolute;right:0;top:-2px;background:none;border:none;color:var(--text-3);font-size:22px;cursor:pointer;line-height:1">×</button>
@@ -156,29 +165,13 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
                   jp.innerHTML = tokens.map(tokenHtml).join('');
                   el.appendChild(jp);
                   if (s.grammar && s.grammar.length) {
+                    // Superscript 文N chip at the end of the sentence line; opens the
+                    // study rail's Grammar tab (bottom sheet on ≤760px). No inline shove.
                     const chip = document.createElement('span');
-                    chip.style.cssText = 'display:inline-block;font-size:11.5px;color:var(--terra);background:color-mix(in srgb,var(--terra) 12%,var(--bg-2));border:1px solid color-mix(in srgb,var(--terra) 30%,var(--border));border-radius:20px;padding:2px 11px;margin-top:9px;cursor:pointer';
-                    chip.textContent = '文法 ' + s.grammar.length;
-                    chip.onclick = async (e) => { e.stopPropagation();
-                      let d = el.querySelector('.gdet'); if (d) { d.remove(); return; }
-                      const bank = await grammarBank();
-                      d = document.createElement('div'); d.className = 'gdet'; d.style.cssText = 'background:var(--bg-1);border:1px solid var(--border);border-radius:10px;padding:11px 14px;margin-top:10px';
-                      d.innerHTML = s.grammar.map((g) => {
-                        const bk = g.card && bank.get(g.card);
-                        const card = bk ? `<div style="margin:7px 0 3px;padding:8px 11px;border-left:2px solid var(--terra);background:var(--bg-2);border-radius:0 8px 8px 0"><div style="font-size:12px"><span style="font-family:var(--jp);font-weight:600;color:var(--text)">📖 ${esc(bk.lemma)}</span>${bk.pos ? `<span style="color:var(--text-3)"> · ${esc(bk.pos)}</span>` : ''}<button class="gadd" data-lemma="${att(bk.lemma)}" ${bk.status !== 'known' ? 'disabled' : ''} style="float:right;background:var(--bg-3);color:var(--text);border:1px solid var(--border-strong);border-radius:7px;padding:2px 9px;font-size:11px;cursor:pointer;font-family:var(--sans)">${bk.status !== 'known' ? (EN ? 'in review' : '复习中') : (EN ? '+ review' : '＋复习')}</button></div><div style="white-space:pre-line;font-size:12.5px;color:var(--text-2);margin-top:4px">${esc(bk.gloss || '')}</div>${bk.example ? `<div style="white-space:pre-line;font-family:var(--jp);font-size:12px;color:var(--text-3);margin-top:5px">${esc(bk.example)}</div>` : ''}</div>` : '';
-                        const expl = (!EN && g.explanation_tr) || g.explanation;
-                        return `<div style="margin:4px 0"><span style="font-family:var(--jp);color:var(--terra);font-weight:600;font-size:14px">${esc(g.pattern)}</span><span style="font-size:13px;color:var(--text-2)"> — ${esc(expl)}</span>${g.example_jp ? `<div style="font-family:var(--jp);font-size:12.5px;color:var(--text-3);margin-top:3px">${esc(g.example_jp)}</div>` : ''}${card}</div>`;
-                      }).join('');
-                      d.querySelectorAll('.gadd').forEach((b) => b.onclick = async (ev) => { ev.stopPropagation();
-                        const it = bank.get(b.dataset.lemma); if (!it) return;
-                        try {
-                          const r = await fetch(`${BACKEND}/vocab/${it.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status: 'new' }) });
-                          if (!r.ok) throw new Error();
-                          it.status = 'new'; b.textContent = EN ? 'in review' : '复习中'; b.disabled = true;
-                        } catch { alert(EN ? 'Could not reach study backend (' + BACKEND + ').' : '无法连接学习后端（' + BACKEND + '）。'); }
-                      });
-                      el.appendChild(d); };
-                    el.appendChild(chip);
+                    chip.className = 'rd-gchip';
+                    chip.textContent = '文' + s.grammar.length;
+                    chip.onclick = (e) => { e.stopPropagation(); showGrammar(s.grammar, chip); };
+                    jp.appendChild(chip);
                   }
                   const en = document.createElement('div'); en.className = 'en'; en.textContent = s.en || ''; en.dataset.jp = s.jp || s.text || tokens.map((t) => t.t || '').join('');
                   el.appendChild(en);
@@ -208,31 +201,96 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             }
           }
 
-          // word → sheet
+          // ---- Study rail (word + grammar); bottom-sheet fallback on ≤760px ----
+          const railBody = document.getElementById('rd-rail-body');
+          const isMobile = () => window.matchMedia('(max-width: 760px)').matches;
+          let tab = 'word', curWord = null, curGrammar = null;
+          const posColor = (p) => POS[p] || 'var(--text-3)';
+
+          function wordCardHtml(d) {
+            const already = saved.has(d.w);
+            const col = posColor(d.p);
+            return `<div class="rd-wcard">
+              <div class="rd-wtop"><div class="rd-whead">${esc(d.w)}</div>${d.p ? `<span class="rd-wpos" style="color:${col};border-color:color-mix(in srgb,${col} 45%,var(--border))">${esc(d.p)}</span>` : ''}</div>
+              <div class="rd-wread">${esc(d.r)}</div>
+              <div class="rd-wgloss">${esc(d.m)}</div>
+              ${d.n ? `<div class="rd-wex">${esc(d.n)}</div>` : ''}
+              <div class="rd-wacts"><button id="sv" class="rd-wsave">${already ? '★ 保存済み' : '★ 保存'}</button><button id="sv-known" class="rd-wknown">既知</button></div>
+            </div>`;
+          }
+          const wordEmptyHtml = () => `<div class="rd-empty"><div class="rd-empty-ico">✎</div><div class="rd-empty-jp">文中の単語をタップすると<br>ここに意味が表示されます</div><div class="rd-empty-en">Tap any word to see it here</div></div>`;
+          const grammarEmptyHtml = () => `<div class="rd-empty"><div class="rd-empty-jp">「文法」チップをタップ</div><div class="rd-empty-en">Tap a 文法 chip on a sentence</div></div>`;
+
+          function grammarCardHtml(g, bank) {
+            const bk = g.card && bank.get(g.card);
+            const card = bk ? `<div style="margin:9px 0 0;padding:8px 11px;border-left:2px solid var(--terra);background:var(--bg-2);border-radius:0 8px 8px 0"><div style="font-size:12px"><span style="font-family:var(--jp);font-weight:600;color:var(--text)">📖 ${esc(bk.lemma)}</span>${bk.pos ? `<span style="color:var(--text-3)"> · ${esc(bk.pos)}</span>` : ''}<button class="gadd" data-lemma="${att(bk.lemma)}" ${bk.status !== 'known' ? 'disabled' : ''} style="float:right;background:var(--bg-3);color:var(--text);border:1px solid var(--border-strong);border-radius:7px;padding:2px 9px;font-size:11px;cursor:pointer;font-family:var(--sans)">${bk.status !== 'known' ? (EN ? 'in review' : '复习中') : (EN ? '+ review' : '＋复习')}</button></div><div style="white-space:pre-line;font-size:12.5px;color:var(--text-2);margin-top:4px">${esc(bk.gloss || '')}</div>${bk.example ? `<div style="white-space:pre-line;font-family:var(--jp);font-size:12px;color:var(--text-3);margin-top:5px">${esc(bk.example)}</div>` : ''}</div>` : '';
+            const expl = (!EN && g.explanation_tr) || g.explanation;
+            return `<div class="rd-gcard"><div class="rd-gpat">${esc(g.pattern)}</div><div class="rd-gexpl">${esc(expl)}</div>${g.example_jp ? `<div class="rd-gex">${esc(g.example_jp)}</div>` : ''}${card}</div>`;
+          }
+
+          function wireWordButtons(d) {
+            const sv = document.getElementById('sv'), svk = document.getElementById('sv-known');
+            if (sv) sv.onclick = () => saveWord(d, null);
+            if (svk) svk.onclick = () => saveWord(d, 'known');
+          }
+          function wireGadd(bank, root) {
+            root.querySelectorAll('.gadd').forEach((b) => b.onclick = async (ev) => { ev.stopPropagation();
+              const it = bank.get(b.dataset.lemma); if (!it) return;
+              try {
+                const r = await fetch(`${BACKEND}/vocab/${it.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status: 'new' }) });
+                if (!r.ok) throw new Error();
+                it.status = 'new'; b.textContent = EN ? 'in review' : '复习中'; b.disabled = true;
+              } catch { alert(EN ? 'Could not reach study backend (' + BACKEND + ').' : '无法连接学习后端（' + BACKEND + '）。'); }
+            });
+          }
+          function setTab(next) { tab = next; document.querySelectorAll('.rd-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab)); }
+
+          function showWord(d) {
+            curWord = d;
+            if (isMobile()) { sheetBody.innerHTML = wordCardHtml(d); sheet.style.transform = 'none'; }
+            else { setTab('word'); railBody.innerHTML = wordCardHtml(d); }
+            wireWordButtons(d);
+          }
+
+          async function showGrammar(grammar, chip) {
+            curGrammar = grammar;
+            document.querySelectorAll('.rd-gchip.active').forEach((c) => c.classList.remove('active'));
+            chip?.classList.add('active');
+            const mobile = isMobile();
+            const container = mobile ? sheetBody : railBody;
+            if (!mobile) setTab('grammar');
+            container.innerHTML = `<div class="rd-empty"><div class="rd-empty-en">…</div></div>`;
+            if (mobile) sheet.style.transform = 'none';
+            const bank = await grammarBank();
+            container.innerHTML = `<div class="rd-glist">${grammar.map((g) => grammarCardHtml(g, bank)).join('')}</div>`;
+            wireGadd(bank, container);
+          }
+
+          async function saveWord(d, status) {
+            try {
+              const r = await fetch(`${BACKEND}/vocab`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...H },
+                body: JSON.stringify({ kind: 'word', source_id: sourceId, lemma: d.w, reading: d.r, pos: d.p, gloss: d.m }) });
+              if (!r.ok) throw new Error();
+              const id = (await r.json()).id;
+              if (status) await fetch(`${BACKEND}/vocab/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status }) });
+              saved.add(d.w); document.getElementById('c-saved').textContent = saved.size;
+              render();
+              if (isMobile()) sheet.style.transform = 'translateY(115%)';
+              else if (tab === 'word') { railBody.innerHTML = wordCardHtml(d); wireWordButtons(d); }
+            } catch { alert(EN ? 'Could not reach study backend (' + BACKEND + ').' : '无法连接学习后端（' + BACKEND + '）。'); }
+          }
+
+          // word tap → rail Word card (bottom sheet on mobile)
           rd.addEventListener('click', (e) => {
             const w = e.target.closest('.word'); if (!w) return; e.stopPropagation();
-            const d = w.dataset;
-            const already = saved.has(d.w);
-            sheetBody.innerHTML =
-              `<div style="font-family:var(--jp);font-size:26px;font-weight:600">${esc(d.w)}</div>` +
-              `<div style="color:var(--text-3);font-size:13px;font-family:var(--mono);margin:3px 0 10px">${esc(d.r)}${d.p ? ' · ' + esc(d.p) : ''}</div>` +
-              `<div style="font-size:16px;color:var(--text)">${esc(d.m)}</div>${d.n ? `<div style="color:var(--text-2);font-size:13px;margin-top:7px;line-height:1.55;font-family:var(--jp)">${esc(d.n)}</div>` : ''}` +
-              `<div style="display:flex;gap:9px;margin-top:16px"><button id="sv" class="btn-accent" style="padding:9px 16px;font-size:14px">${already ? '★ 保存済み' : '★ 単語帳に保存'}</button><button id="sv-known" style="background:var(--bg-3);color:var(--text);border:1px solid var(--border-strong);border-radius:9px;padding:9px 16px;font-size:14px;cursor:pointer;font-family:var(--sans)">既知にする</button></div>`;
-            sheet.style.transform = 'none';
-            const doSave = async (status) => {
-              try {
-                const r = await fetch(`${BACKEND}/vocab`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...H },
-                  body: JSON.stringify({ kind: 'word', source_id: sourceId, lemma: d.w, reading: d.r, pos: d.p, gloss: d.m }) });
-                if (!r.ok) throw new Error();
-                const id = (await r.json()).id;
-                if (status) await fetch(`${BACKEND}/vocab/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status }) });
-                saved.add(d.w); document.getElementById('c-saved').textContent = saved.size;
-                sheet.style.transform = 'translateY(115%)'; render();
-              } catch { alert(EN ? 'Could not reach study backend (' + BACKEND + ').' : '无法连接学习后端（' + BACKEND + '）。'); }
-            };
-            document.getElementById('sv').onclick = () => doSave(null);
-            document.getElementById('sv-known').onclick = () => doSave('known');
+            showWord(w.dataset);
           });
+          document.querySelectorAll('.rd-tabs button').forEach((b) => b.onclick = () => {
+            setTab(b.dataset.tab);
+            if (tab === 'word') { railBody.innerHTML = curWord ? wordCardHtml(curWord) : wordEmptyHtml(); if (curWord) wireWordButtons(curWord); }
+            else if (curGrammar) showGrammar(curGrammar); else railBody.innerHTML = grammarEmptyHtml();
+          });
+          railBody.innerHTML = wordEmptyHtml();
           document.getElementById('sheet-x').onclick = () => { sheet.style.transform = 'translateY(115%)'; };
 
           // toolbar

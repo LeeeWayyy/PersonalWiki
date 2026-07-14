@@ -97,11 +97,6 @@ const csp = [
         ))}
       </nav>
 
-      <div class="seg" style="margin-top:12px;flex:none" aria-label="Language">
-        <button type="button" data-set-lang="en">EN</button>
-        <button type="button" data-set-lang="zh">中文</button>
-      </div>
-
       {sync && (
         <div class="side-foot"><span class="dot"></span><span data-i18n="side.synced">{t('side.synced')}</span> · {sync.commit}<br /><span style="opacity:.7">{syncWhen}</span></div>
       )}
@@ -113,7 +108,13 @@ const csp = [
           <a href="/" data-i18n="crumb.home">{t('crumb.home')}</a>
           {crumbs.map((c) => (<><span class="sep">/</span>{c.href ? <a href={c.href} data-i18n={c.i18n}>{c.i18n ? t(c.i18n) : c.label}</a> : <span class="cur" data-i18n={c.i18n}>{c.i18n ? t(c.i18n) : c.label}</span>}</>))}
         </div>
-        <div class="topbar-right"><slot name="topright" /></div>
+        <div class="topbar-right">
+          <slot name="topright" />
+          <div class="lang-pill" aria-label="Language">
+            <button type="button" data-set-lang="en">EN</button>
+            <button type="button" data-set-lang="zh">中</button>
+          </div>
+        </div>
       </div>
       <main class={rail ? 'content article' : 'content'}>
         {rail ? (

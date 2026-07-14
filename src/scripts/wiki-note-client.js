@@ -13,7 +13,7 @@ export function installWikiNote() {
   const BACKEND = localStorage.getItem('backendUrl') || 'http://localhost:8787';
   const TOKEN = localStorage.getItem('backendToken') || '';
   const H = { 'Content-Type': 'application/json', ...(TOKEN ? { 'X-Auth-Token': TOKEN } : {}) };
-  const bar = art.querySelector('.humannote');
+  const prose = art.querySelector('.prose');
   let editor = null;
 
   function zoneEl(create) {
@@ -43,7 +43,9 @@ export function installWikiNote() {
         <button type="button" class="btn-quiet" data-act="cancel">${esc(t('act.cancel'))}</button>
         <span class="status"></span>
       </div>`;
-    bar.after(editor);
+    // The empty-state row is gone (the ＋ action-group button replaces it), so
+    // the editor mounts just above the prose where the human-zone renders.
+    prose.before(editor);
     art.classList.add('editing-human');
     const ta = editor.querySelector('textarea');
     const status = editor.querySelector('.status');
@@ -85,11 +87,12 @@ export function installWikiNote() {
     ta.focus();
   }
 
-  // The empty-state bar and the rendered zone both open the editor; links
-  // inside promoted notes keep working.
+  // Clicking a rendered note opens the editor; links inside notes keep working.
   art.addEventListener('click', (e) => {
     if (e.target.closest('a')) return;
-    if (e.target.closest('.humannote, .zone-human')) openEditor();
+    if (e.target.closest('.zone-human')) openEditor();
   });
+  // Both the ✎ Edit and ＋ add-note buttons open the same human-zone editor.
   document.querySelector('[data-edit-page]')?.addEventListener('click', openEditor);
+  document.querySelector('[data-add-note]')?.addEventListener('click', openEditor);
 }

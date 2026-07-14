@@ -1,7 +1,8 @@
 ---
 import { getCollection, render } from 'astro:content';
 import Base from '../../layouts/Base.astro';
-import { loadVault, pageNeighbors, cleanTitle as clean } from '../../lib/vault.mjs';
+import PageOpDialog from '../../components/PageOpDialog.astro';
+import { loadVault, pageNeighbors, cleanTitle as clean, enOf, sourceDisplay } from '../../lib/vault.mjs';
 import { t } from '../../lib/i18n.mjs';
 
 export async function getStaticPaths() {
@@ -14,8 +15,10 @@ const { Content } = await render(entry);
 
 const { pages, backlinks, sourceMap } = loadVault();
 const page = pages.find((p) => p.rel === entry.id);
-const title = page?.title ?? entry.id;
 const kind = page?.kind ?? 'other';
+// Map H1s are the raw ingest filename; show the source book's clean title instead.
+const mapSource = kind === 'map' && page?.data?.source_id ? sourceMap.get(page.data.source_id) : null;
+const title = mapSource ? sourceDisplay(mapSource).title : (page?.title ?? entry.id);
 const backHrefs = page ? [...(backlinks.get(page.href) ?? [])] : [];
 const backPages = backHrefs.map((h) => pages.find((p) => p.href === h)).filter(Boolean);
 const pageSources = (page?.sources ?? []).map((id) => sourceMap.get(id)).filter(Boolean);
@@ -34,23 +37,43 @@ const gNodes = neigh.map((nb, i) => {
     short: [...(nb.title || '')].slice(0, 3).join('') };
 });
 const colorOf = (d: string) => d === 'out' ? '#d3835a' : d === 'in' ? '#8faa7e' : '#e0ab5f';
+// Full-fidelity data for the expandable interactive graph (full titles + en alias).
+const graphNodes = neigh.map((nb) => {
+  const p = pages.find((x) => x.href === nb.href);
+  return { title: nb.title, en: p ? enOf(p) : '', dir: nb.dir, href: nb.href };
+});
+const graphJson = JSON.stringify({ title, nodes: graphNodes }).replace(/</g, '\\u003c');
 const isBio = (t: string) => t.startsWith('biology/');
 const distilled = pageSources.map((s: any) => clean(s.title)).join(', ');
 const humanInner = (entry.body?.match(/<!--\s*human-zone\s*-->([\s\S]*?)<!--\s*\/human-zone\s*-->/)?.[1] ?? '').trim();
+const opCards = pages
+  .filter((p) => p.kind === 'entity' || p.kind === 'topic')
+  .map((p) => ({ rel: p.rel, title: p.title, kindKey: p.kind === 'topic' ? 'kind.topic' : 'kind.entity' }));
 ---
 <Base title={title} crumbs={[{ i18n: kindKey }, { label: title }]} active={activeKey} rail={true}>
-  {isArticle && <button slot="topright" class="btn-quiet" data-i18n="act.edit" data-edit-page>{t('act.edit')}</button>}
 
   <article data-wiki-rel={isArticle ? entry.id : undefined} class:list={[humanInner && 'has-human']}>
     <div class="title-row">
-      <div style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
-        <span class={`kind-tag ${kind === 'topic' ? 'topic' : ''}`} data-i18n={kindKey}>{t(kindKey)}</span>
-        {page?.last_ingested && <span class="metaline" data-i18n="wiki.updated" data-i18n-args={JSON.stringify({ d: page.last_ingested })}>{t('wiki.updated', { d: page.last_ingested })}</span>}
+      <div class="title-row-head">
+        <div class="title-row-main">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
+            <span class={`kind-tag ${kind === 'topic' ? 'topic' : ''}`} data-i18n={kindKey}>{t(kindKey)}</span>
+            {page?.last_ingested && <span class="metaline" data-i18n="wiki.updated" data-i18n-args={JSON.stringify({ d: page.last_ingested })}>{t('wiki.updated', { d: page.last_ingested })}</span>}
+          </div>
+          <h1 style="font-family:var(--serifcjk);font-size:42px;font-weight:600;line-height:1.08;margin:0 0 10px;letter-spacing:-.01em">{title}</h1>
+          {page?.aliases?.length ? (
+            <div style="color:var(--text-3);font-size:14px;margin-bottom:14px"><span data-i18n="wiki.aliases">{t('wiki.aliases')}</span> · <span style="color:var(--text-2)">{page.aliases.join(' · ')}</span></div>
+          ) : null}
+        </div>
+        {isArticle && (
+          <div class="page-actions">
+            <button type="button" class="pa-edit" data-edit-page data-i18n="act.edit">{t('act.edit')}</button>
+            <button type="button" class="pa-icon" data-add-note title={t('wiki.addNote')} data-i18n-title="wiki.addNote" aria-label={t('wiki.addNote')}>＋</button>
+            <button type="button" class="pa-icon pa-merge" data-page-op="merge" title={t('idx.merge')} data-i18n-title="idx.merge" aria-label={t('idx.merge')}>⇉</button>
+            <button type="button" class="pa-icon pa-delete" data-page-op="delete" title={t('idx.deletePage')} data-i18n-title="idx.deletePage" aria-label={t('idx.deletePage')}>🗑</button>
+          </div>
+        )}
       </div>
-      <h1 style="font-family:var(--serifcjk);font-size:42px;font-weight:600;line-height:1.08;margin:0 0 10px;letter-spacing:-.01em">{title}</h1>
-      {page?.aliases?.length ? (
-        <div style="color:var(--text-3);font-size:14px;margin-bottom:14px"><span data-i18n="wiki.aliases">{t('wiki.aliases')}</span> · <span style="color:var(--text-2)">{page.aliases.join(' · ')}</span></div>
-      ) : null}
       {page?.tags?.length ? (
         <div style="display:flex;flex-wrap:wrap;gap:7px">
           {page.tags.map((t: string) => <a class={`chip ${isBio(t) ? 'tag-bio' : ''}`} href={`/wiki/_index/${t.replace(/\//g, '__')}`}>{t}</a>)}
@@ -58,9 +81,6 @@ const humanInner = (entry.body?.match(/<!--\s*human-zone\s*-->([\s\S]*?)<!--\s*\
       ) : null}
     </div>
 
-    {isArticle && (
-      <div class="humannote"><span class="plus">＋</span><span data-i18n="wiki.humannote">{t('wiki.humannote')}</span></div>
-    )}
     {isArticle && pageSources.length ? (
       <div class="syn-banner">
         <span class="mark">✦</span>
@@ -71,6 +91,16 @@ const humanInner = (entry.body?.match(/<!--\s*human-zone\s*-->([\s\S]*?)<!--\s*\
 
     <div class="prose"><Content /></div>
   </article>
+
+  {isArticle && <PageOpDialog cards={opCards} />}
+
+  {neigh.length ? (
+    <div class="gph-overlay" id="graph-overlay" hidden>
+      <div class="gph-backdrop" data-gph-close></div>
+      <div class="gph-panel"></div>
+      <script type="application/json" id="graph-data" set:html={graphJson}></script>
+    </div>
+  ) : null}
 
   <Fragment slot="rail">
     {pageSources.length ? (
@@ -118,22 +148,69 @@ const humanInner = (entry.body?.match(/<!--\s*human-zone\s*-->([\s\S]*?)<!--\s*\
           <div style="display:flex;gap:12px;margin-top:6px;flex-wrap:wrap;font-size:11px;font-family:var(--mono);padding:0 4px 2px">
             <span style="color:var(--terra)" data-i18n="graph.out">{t('graph.out')}</span><span style="color:var(--sage)" data-i18n="graph.in">{t('graph.in')}</span><span style="color:var(--amber)" data-i18n="graph.both">{t('graph.both')}</span>
           </div>
+          <button type="button" id="graph-expand" class="gph-expand" data-i18n="graph.expand">{t('graph.expand')}</button>
         </div>
       </div>
     ) : null}
   </Fragment>
 </Base>
 
+{neigh.length ? (
+  <script>
+    import { mountGraph } from '../../scripts/graph-client.js';
+    const overlay = document.getElementById('graph-overlay') as HTMLElement | null;
+    const panel = overlay?.querySelector('.gph-panel') as HTMLElement | null;
+    const data = JSON.parse(document.getElementById('graph-data')?.textContent || '{}');
+    let mounted = false;
+    function openGraph() {
+      if (!overlay || !panel) return;
+      if (!mounted) { mountGraph(panel, data); mounted = true; }
+      overlay.hidden = false;
+    }
+    function closeGraph() { if (overlay) overlay.hidden = true; }
+    document.getElementById('graph-expand')?.addEventListener('click', openGraph);
+    overlay?.addEventListener('click', (e) => { if ((e.target as Element)?.closest('[data-gph-close]')) closeGraph(); });
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay && !overlay.hidden) closeGraph(); });
+  </script>
+) : null}
+
 {needsMermaid && (
   <script>
     import mermaid from 'mermaid';
-    mermaid.initialize({ startOnLoad: true, theme: 'dark', themeVariables: { fontFamily: 'Songti SC, STSong, serif' } });
+    // Palette-matched argument map. ponytail: per-node claim/evidence roles
+    // (terra vs sage kickers) need classDefs in the diagram source — themed
+    // uniformly here via themeVariables + a CSS pass in global.css.
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        fontFamily: 'Songti SC, STSong, serif',
+        primaryColor: '#3e2d21',
+        primaryBorderColor: '#7f543b',
+        primaryTextColor: '#efe7da',
+        lineColor: '#3d352a',
+        mainBkg: '#3e2d21',
+        nodeBorder: '#7f543b',
+        clusterBkg: '#1b1712',
+        edgeLabelBackground: '#221d16',
+      },
+    });
   </script>
 )}
 
 {isArticle && (
   <script>
     import { installWikiNote } from '../../scripts/wiki-note-client.js';
+    import { installPageOps } from '../../scripts/wiki-page-client.js';
     installWikiNote();
+    const ops = installPageOps();
+    const art = document.querySelector('article[data-wiki-rel]') as HTMLElement | null;
+    const rel = art?.dataset.wikiRel;
+    if (ops && rel) {
+      const name = document.querySelector('.title-row h1')?.textContent?.trim() || rel;
+      const item = [{ rel, name }];
+      document.querySelector('[data-page-op="merge"]')?.addEventListener('click', () => ops.open(item, null, 'merge'));
+      document.querySelector('[data-page-op="delete"]')?.addEventListener('click', () => ops.open(item, null, 'delete'));
+    }
   </script>
 )}

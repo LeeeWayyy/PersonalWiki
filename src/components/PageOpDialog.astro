@@ -1,0 +1,50 @@
+---
+// Shared merge/delete dialog for pages. Driven by installPageOps() over one
+// page (wiki article action group) or many (index selection mode). The
+// link-fate strip visualizes the graph mutation.
+import { t } from '../lib/i18n.mjs';
+interface Card { rel: string; title: string; kindKey: string; }
+const { cards = [] } = Astro.props as { cards: Card[] };
+---
+<dialog id="idx-page-dialog" class="idx-page-dialog" aria-labelledby="idx-page-dialog-title">
+  <form method="dialog">
+    <div class="idx-op-kicker" data-i18n="idx.manage">{t('idx.manage')}</div>
+    <h2 id="idx-page-dialog-title"></h2>
+    <p class="idx-op-sub" data-i18n="idx.manageSub">{t('idx.manageSub')}</p>
+
+    <div class="seg idx-op-modes" aria-label={t('idx.manage')}>
+      <button type="button" class="on" data-op-mode="merge" data-i18n="idx.merge">{t('idx.merge')}</button>
+      <button type="button" data-op-mode="delete" data-i18n="idx.deletePage">{t('idx.deletePage')}</button>
+    </div>
+
+    <section data-op-panel="merge">
+      <label class="idx-op-label" for="idx-merge-target" data-i18n="idx.mergeTarget">{t('idx.mergeTarget')}</label>
+      <select id="idx-merge-target" class="field">
+        <option value="" data-i18n="idx.chooseTarget">{t('idx.chooseTarget')}</option>
+        {cards.map((c) => <option value={c.rel} data-title={c.title} data-kind-key={c.kindKey}>{c.title} · {t(c.kindKey)}</option>)}
+      </select>
+      <div class="idx-link-fate" aria-hidden="true">
+        <span class="idx-fate-node" data-op-source></span>
+        <span class="idx-fate-edge"><span>→</span><small data-i18n="idx.linksAliases">{t('idx.linksAliases')}</small></span>
+        <span class="idx-fate-node target" data-op-target data-i18n="idx.chooseTarget">{t('idx.chooseTarget')}</span>
+      </div>
+      <p class="idx-op-note" data-i18n="idx.mergeNote">{t('idx.mergeNote')}</p>
+    </section>
+
+    <section data-op-panel="delete" hidden>
+      <div class="idx-link-fate danger" aria-hidden="true">
+        <span class="idx-fate-node" data-op-delete-source></span>
+        <span class="idx-fate-edge"><span>→</span><small data-i18n="idx.incomingLinks">{t('idx.incomingLinks')}</small></span>
+        <span class="idx-fate-node plain" data-i18n="idx.plainText">{t('idx.plainText')}</span>
+      </div>
+      <p class="idx-op-note" data-i18n="idx.deleteNote">{t('idx.deleteNote')}</p>
+    </section>
+
+    <div class="idx-op-foot">
+      <span class="idx-op-status" role="status" aria-live="polite"></span>
+      <button type="submit" class="btn-quiet" data-op-cancel data-i18n="act.cancel">{t('act.cancel')}</button>
+      <button type="button" class="btn-accent" data-op-confirm="merge" disabled data-i18n="idx.confirmMerge">{t('idx.confirmMerge')}</button>
+      <button type="button" class="idx-danger" data-op-confirm="delete" hidden data-i18n="idx.confirmDelete">{t('idx.confirmDelete')}</button>
+    </div>
+  </form>
+</dialog>
