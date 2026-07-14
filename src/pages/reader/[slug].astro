@@ -125,6 +125,16 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             document.getElementById('c-saved').textContent = saved.size;
           }
 
+          // Grammar card bank (lemma → item), lazy-loaded on first 文法 chip tap.
+          let gbank = null;
+          async function grammarBank() {
+            if (!gbank) {
+              try { const r = await fetch(`${BACKEND}/vocab?kind=grammar`, { headers: H }); if (r.ok) gbank = new Map((await r.json()).map((i) => [i.lemma, i])); } catch {}
+              gbank = gbank || new Map();
+            }
+            return gbank;
+          }
+
           function tokenHtml(t) {
             const ruby = t.rt ? `<ruby>${esc(t.t)}<rt>${esc(t.rt)}</rt></ruby>` : esc(t.t);
             if (!t.w || !t.m) return ruby;
@@ -149,10 +159,24 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
                     const chip = document.createElement('span');
                     chip.style.cssText = 'display:inline-block;font-size:11.5px;color:var(--terra);background:color-mix(in srgb,var(--terra) 12%,var(--bg-2));border:1px solid color-mix(in srgb,var(--terra) 30%,var(--border));border-radius:20px;padding:2px 11px;margin-top:9px;cursor:pointer';
                     chip.textContent = '文法 ' + s.grammar.length;
-                    chip.onclick = (e) => { e.stopPropagation();
+                    chip.onclick = async (e) => { e.stopPropagation();
                       let d = el.querySelector('.gdet'); if (d) { d.remove(); return; }
+                      const bank = await grammarBank();
                       d = document.createElement('div'); d.className = 'gdet'; d.style.cssText = 'background:var(--bg-1);border:1px solid var(--border);border-radius:10px;padding:11px 14px;margin-top:10px';
-                      d.innerHTML = s.grammar.map((g) => `<div style="margin:4px 0"><span style="font-family:var(--jp);color:var(--terra);font-weight:600;font-size:14px">${esc(g.pattern)}</span><span style="font-size:13px;color:var(--text-2)"> — ${esc(g.explanation)}</span>${g.example_jp ? `<div style="font-family:var(--jp);font-size:12.5px;color:var(--text-3);margin-top:3px">${esc(g.example_jp)}</div>` : ''}</div>`).join('');
+                      d.innerHTML = s.grammar.map((g) => {
+                        const bk = g.card && bank.get(g.card);
+                        const card = bk ? `<div style="margin:7px 0 3px;padding:8px 11px;border-left:2px solid var(--terra);background:var(--bg-2);border-radius:0 8px 8px 0"><div style="font-size:12px"><span style="font-family:var(--jp);font-weight:600;color:var(--text)">📖 ${esc(bk.lemma)}</span>${bk.pos ? `<span style="color:var(--text-3)"> · ${esc(bk.pos)}</span>` : ''}<button class="gadd" data-lemma="${att(bk.lemma)}" ${bk.status !== 'known' ? 'disabled' : ''} style="float:right;background:var(--bg-3);color:var(--text);border:1px solid var(--border-strong);border-radius:7px;padding:2px 9px;font-size:11px;cursor:pointer;font-family:var(--sans)">${bk.status !== 'known' ? (EN ? 'in review' : '复习中') : (EN ? '+ review' : '＋复习')}</button></div><div style="white-space:pre-line;font-size:12.5px;color:var(--text-2);margin-top:4px">${esc(bk.gloss || '')}</div>${bk.example ? `<div style="white-space:pre-line;font-family:var(--jp);font-size:12px;color:var(--text-3);margin-top:5px">${esc(bk.example)}</div>` : ''}</div>` : '';
+                        const expl = (!EN && g.explanation_tr) || g.explanation;
+                        return `<div style="margin:4px 0"><span style="font-family:var(--jp);color:var(--terra);font-weight:600;font-size:14px">${esc(g.pattern)}</span><span style="font-size:13px;color:var(--text-2)"> — ${esc(expl)}</span>${g.example_jp ? `<div style="font-family:var(--jp);font-size:12.5px;color:var(--text-3);margin-top:3px">${esc(g.example_jp)}</div>` : ''}${card}</div>`;
+                      }).join('');
+                      d.querySelectorAll('.gadd').forEach((b) => b.onclick = async (ev) => { ev.stopPropagation();
+                        const it = bank.get(b.dataset.lemma); if (!it) return;
+                        try {
+                          const r = await fetch(`${BACKEND}/vocab/${it.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status: 'new' }) });
+                          if (!r.ok) throw new Error();
+                          it.status = 'new'; b.textContent = EN ? 'in review' : '复习中'; b.disabled = true;
+                        } catch { alert(EN ? 'Could not reach study backend (' + BACKEND + ').' : '无法连接学习后端（' + BACKEND + '）。'); }
+                      });
                       el.appendChild(d); };
                     el.appendChild(chip);
                   }

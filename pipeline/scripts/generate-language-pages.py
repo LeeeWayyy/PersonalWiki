@@ -66,7 +66,7 @@ LOG_PATH = VAULT_ROOT / ".wiki" / "log.md"
 CACHE_DIR = VAULT_ROOT / ".wiki" / "lang-cache"
 EXTRACT = TOOLING_ROOT / "scripts" / "extract.py"
 
-PROMPT_VERSION = "v4"  # v4: per-sentence translation target = PW_TRANSLATE_LANG
+PROMPT_VERSION = "v5"  # v5: grammar explanations bilingual (English + PW_TRANSLATE_LANG)
 TARGET_LANG = os.environ.get("PW_TRANSLATE_LANG", "Simplified Chinese")
 SOURCE_CHAR_LIMIT = 300_000
 LLM_TIMEOUT_S = 900
@@ -97,6 +97,49 @@ def kata2hira(s: str) -> str:
 
 def has_kanji(s: str) -> bool:
     return bool(CJK_RX.search(s))
+
+
+GRAMMAR_BANK_PATH = TOOLING_ROOT / "data" / "grammar-cards.ja.json"
+
+
+def _norm_grammar(pattern: str) -> str:
+    """Canonical grammar-pattern identity: drop tilde/dash placeholders, quotes,
+    punctuation, and whitespace so 〜のだ / ～のだ / —のだ all collide."""
+    return re.sub(r"[～〜~—\s「」『』（）、。・…]", "", pattern).lower()
+
+
+def grammar_alias_index() -> dict[str, str]:
+    """Normalized alias -> card lemma from the committed grammar bank
+    (pipeline/data/grammar-cards.ja.json, seeded by scripts/import_grammar_book.py).
+    Lemmas expand on ／ (combined patterns) and （…） (optional parts)."""
+    if not GRAMMAR_BANK_PATH.is_file():
+        return {}
+    idx: dict[str, str] = {}
+    for card in json.loads(GRAMMAR_BANK_PATH.read_text(encoding="utf-8"))["cards"]:
+        lemma = card["lemma"]
+        for part in lemma.split("／"):
+            for variant in (part, re.sub(r"（[^）]*）", "", part)):
+                key = _norm_grammar(variant)
+                if key:
+                    idx.setdefault(key, lemma)
+    return idx
+
+
+def link_grammar_cards(per_chapter: list[tuple[str, dict]]) -> int:
+    """Attach `card: <bank lemma>` to each LLM grammar point whose pattern
+    matches a grammar card, so readers can jump from sentence to card."""
+    idx = grammar_alias_index()
+    linked = 0
+    if not idx:
+        return linked
+    for _chap, data in per_chapter:
+        for g in data["grammar_points"]:
+            candidates = [g["pattern"], *g["pattern"].split("／")]
+            lemma = next((idx[k] for k in map(_norm_grammar, candidates) if k in idx), None)
+            if lemma:
+                g["card"] = lemma
+                linked += 1
+    return linked
 
 
 def chapter_key(raw_title: str) -> str:
@@ -215,6 +258,7 @@ exactly this shape:
   "grammar_points": [
     {{"pattern": "the grammar pattern as it appears (e.g. 〜なければならない)",
       "explanation": "what it means / when it's used, 1-2 sentences English",
+      "explanation_tr": "the same explanation in {TARGET_LANG}",
       "example_jp": "a short example sentence from or fitting the chapter",
       "s": <the sentence number this pattern appears in, or 0 if general>}}
   ]
@@ -285,6 +329,7 @@ def validate(obj: dict, sentences: list[str], words: list[dict],
         grammar.append({
             "pattern": pat,
             "explanation": str(g.get("explanation") or "").strip(),
+            "explanation_tr": str(g.get("explanation_tr") or "").strip(),
             "example_jp": str(g.get("example_jp") or "").strip(),
             "s": s,
         })
@@ -385,6 +430,7 @@ def render_reading_html(display: str, source_id: str,
             )
         gitems = "".join(
             f'<div class="gp"><b>{esc(g["pattern"])}</b><div>{esc(g["explanation"])}</div>'
+            + (f'<div>{esc(g["explanation_tr"])}</div>' if g.get("explanation_tr") else "")
             + (f'<div class="ex">{esc(g["example_jp"])}</div>' if g["example_jp"] else "")
             + "</div>"
             for g in data["grammar_points"]
@@ -478,7 +524,7 @@ document.addEventListener('click', function(e){
   if (s) {
     var g = []; try { g = JSON.parse(s.dataset.g || '[]'); } catch (_) {}
     show(g.length
-      ? g.map(function(x){ return '<b>' + E(x.pattern) + '</b><div>' + E(x.explanation) + '</div>' +
+      ? g.map(function(x){ return '<b>' + E(x.pattern) + '</b><div>' + E(x.explanation) + '</div>' + (x.explanation_tr ? '<div>' + E(x.explanation_tr) + '</div>' : '') +
           (x.example_jp ? '<div class="ex">' + E(x.example_jp) + '</div>' : ''); }).join('<hr>')
       : '<i>No grammar note for this sentence.</i>');
     return;
@@ -597,6 +643,10 @@ def generate(source_id: str, refresh: bool, dry_run: bool, jobs: int = 1) -> lis
         with ThreadPoolExecutor(max_workers=jobs) as ex:
             for result in ex.map(load_one, work):
                 per_chapter.append(result)
+
+    linked = link_grammar_cards(per_chapter)
+    if linked:
+        print(f"  linked {linked} grammar points to grammar cards")
 
     # Global gloss map: key → word (first meaning wins). Inline tokens look up
     # their gloss here; the render's `seen` set drives first-occurrence highlight.
