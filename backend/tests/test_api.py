@@ -1854,6 +1854,84 @@ def test_human_zone_get_put_roundtrip(client, auth, content_dir):
     assert client.put("/wiki/human-zone", json={"rel": "entities/ATP", "text": "x"}).status_code in (401, 403)
 
 
+def test_page_remove_route_requires_confirmation(client, auth, monkeypatch):
+    from app import ingest_runner as ir
+    from app import promote
+
+    calls = []
+    monkeypatch.setattr(ir, "REBUILD_CMD", "")
+    monkeypatch.setattr(
+        promote,
+        "remove_page",
+        lambda content, repo, rel, merge: calls.append((content, repo, rel, merge))
+        or {"ok": True, "wiki_rel": rel, "merge_into": merge, "committed": True},
+    )
+
+    endpoint = "/wiki/page/remove"
+    payload = {"rel": "entities/X", "merge_into": "entities/Y", "confirmation": "wrong"}
+    assert client.post(endpoint, json=payload, headers=auth).status_code == 400
+    assert client.post(endpoint, json={**payload, "confirmation": "entities/X"}, headers=auth).status_code == 200
+    assert client.post(endpoint, json={"rel": "entities/X", "confirmation": "entities/X"}, headers=auth).status_code == 200
+    assert client.post(endpoint, json={"rel": "entities/X", "confirmation": "entities/X"}).status_code in (401, 403)
+    assert [call[2:] for call in calls] == [
+        ("entities/X", "entities/Y"),
+        ("entities/X", None),
+    ]
+
+
+def test_remove_page_commits_graph_changes(tmp_path):
+    from app import promote
+
+    content = tmp_path / "content"
+    entities = content / "wiki" / "entities"
+    maps = content / "wiki" / "_maps"
+    entities.mkdir(parents=True)
+    maps.mkdir()
+    (content / ".gitignore").write_text("wiki/.alias-index.json\n.wiki/ingest.lock\n", encoding="utf-8")
+    (content / "wiki" / "_taxonomy.md").write_text(
+        "# Taxonomy\n\n## Domain\n- `test/domain`\n\n"
+        "## Form\n- `concept`\n\n## Reserved\n- `taxonomy-gap`\n",
+        encoding="utf-8",
+    )
+
+    def write_page(stem, pid, body):
+        (entities / f"{stem}.md").write_text(
+            "---\n"
+            "type: Entity\n"
+            f"page_id: {pid}\n"
+            f"aliases: [{stem}]\n"
+            "tags: [test/domain, concept]\n"
+            "sources: []\n"
+            "last_ingested: 2026-07-13\n"
+            "---\n"
+            f"# {stem}\n\n<!-- llm-zone -->\n{body}\n<!-- /llm-zone -->\n",
+            encoding="utf-8",
+        )
+
+    write_page("X", "X" * 26, "doomed")
+    write_page("Keep", "K" * 26, "[[X]] survives as text")
+    (maps / "source.md").write_text("[[X]]\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(content), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(content), "config", "user.email", "t@t.t"], check=True)
+    subprocess.run(["git", "-C", str(content), "config", "user.name", "t"], check=True)
+    subprocess.run(["git", "-C", str(content), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(content), "commit", "-q", "-m", "init"], check=True)
+
+    result = promote.remove_page(content, Path(__file__).resolve().parents[2], "entities/X")
+
+    assert result["ok"] and not (entities / "X.md").exists()
+    assert "[[X]]" not in (entities / "Keep.md").read_text(encoding="utf-8")
+    assert (maps / "source.md").read_text(encoding="utf-8") == "X\n"
+    assert subprocess.run(
+        ["git", "-C", str(content), "status", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout == ""
+    assert subprocess.run(
+        ["git", "-C", str(content), "log", "-1", "--pretty=%s"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == "wiki: delete X"
+
+
 def test_promote_replaces_note_with_regex_replacement_literals():
     from app import promote
 

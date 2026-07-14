@@ -67,18 +67,17 @@ def all_wiki_pages() -> list[Path]:
 
 def _pages_to_rewrite() -> list[Path]:
     """Pages whose wikilinks must be scanned for rewriting on rename.
-    Includes content pages (entities/, topics/) plus MOC files
-    (`wiki/_index/*.md`) so MOC links follow renames immediately
-    instead of waiting for the next ingest's MOC regeneration.
+    Includes content pages plus generated MOCs and maps so generated links
+    follow renames immediately instead of staying orphaned until regeneration.
 
     Implementation note: this is a local extension of `all_wiki_pages()`,
     NOT a modification. Other scripts (alias-index, add-page-id) still
     rely on the strict inclusion list and must keep their behavior
     unchanged."""
     pages = all_wiki_pages()
-    index_dir = WIKI_DIR / "_index"
-    if index_dir.is_dir():
-        pages.extend(sorted(index_dir.rglob("*.md")))
+    for generated_dir in (WIKI_DIR / "_index", WIKI_DIR / "_maps"):
+        if generated_dir.is_dir():
+            pages.extend(sorted(generated_dir.rglob("*.md")))
     return pages
 
 

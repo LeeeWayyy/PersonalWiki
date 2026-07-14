@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import math
+import subprocess
 import uuid
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -429,6 +430,55 @@ async def put_human_zone(request: Request, x_auth_token: str | None = Header(Non
             raise HTTPException(500, f"git commit failed: {exc}") from exc
     LOGGER.info("human-zone edit wiki_rel=%s committed=%s", rel, result["committed"])
     return result
+
+
+@router.post("/wiki/page/remove")
+async def remove_wiki_page(request: Request, x_auth_token: str | None = Header(None)):
+    """Delete or merge a content page after an explicit client confirmation."""
+    require_auth(x_auth_token)
+    body = await json_object(request)
+    rel = optional_string(body.get("rel"), "rel").strip()
+    merge_into = optional_string(body.get("merge_into"), "merge_into").strip() or None
+    confirmation = optional_string(body.get("confirmation"), "confirmation").strip()
+    if not rel or not _valid_wiki_rel(rel):
+        raise HTTPException(400, "invalid rel")
+    if merge_into and not _valid_wiki_rel(merge_into):
+        raise HTTPException(400, "invalid merge_into")
+    if confirmation != rel:
+        raise HTTPException(400, "confirmation must exactly match rel")
+
+    async with ir.LOCK:
+        try:
+            result = await asyncio.to_thread(
+                promote_mod.remove_page, ir.CONTENT_DIR, ir.REPO, rel, merge_into,
+            )
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        rebuilt = False
+        rebuild_warning = None
+        if ir.REBUILD_CMD:
+            try:
+                rebuild = await asyncio.to_thread(
+                    subprocess.run,
+                    ir.REBUILD_CMD,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=ir.JOB_TIMEOUT_S,
+                )
+                rebuilt = rebuild.returncode == 0
+                if not rebuilt:
+                    lines = (rebuild.stderr or rebuild.stdout or "site rebuild failed").strip().splitlines()
+                    rebuild_warning = lines[-1] if lines else "site rebuild failed"
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                rebuild_warning = f"site rebuild failed: {exc}"
+
+    LOGGER.info("wiki page remove rel=%s merge_into=%s rebuilt=%s", rel, merge_into, rebuilt)
+    return {**result, "rebuilt": rebuilt, "rebuild_warning": rebuild_warning}
 
 
 @router.delete("/annotations/{aid}")

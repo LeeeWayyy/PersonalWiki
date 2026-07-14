@@ -326,3 +326,100 @@ def _restore_git_index_snapshot(content_dir: Path, path: Path, snapshot: tuple[s
             (exc.stderr or exc.stdout or str(exc)).strip(),
         )
         return
+
+
+def _content_page_path(content_dir: Path, wiki_rel: str) -> tuple[str, Path]:
+    rel = (wiki_rel or "").strip().lstrip("/").removesuffix(".md")
+    parts = rel.split("/")
+    if len(parts) < 2 or parts[0] not in {"entities", "topics"} or any(
+        part in {"", ".", ".."} for part in parts
+    ) or "\\" in rel:
+        raise ValueError("page must be under entities/ or topics/")
+    return rel, _safe_page_path(content_dir, rel)
+
+
+def _ensure_clean_repo(content_dir: Path) -> None:
+    if not (content_dir / ".git").exists():
+        raise RuntimeError("wiki folder is not a git repo")
+    result = subprocess.run(
+        ["git", "-C", str(content_dir), "-c", "core.quotepath=false", "status", "--porcelain"],
+        capture_output=True, text=True, timeout=30,
+    )
+    dirty = [line for line in result.stdout.splitlines() if not line.endswith(" .wiki/ingest.lock")]
+    if result.returncode != 0 or dirty:
+        detail = (result.stderr or "\n".join(dirty)).strip()
+        raise RuntimeError(detail or "git status failed")
+
+
+def _restore_page_operation(content_dir: Path, alias_index: Path, env: dict[str, str]) -> None:
+    status = subprocess.run(
+        ["git", "-C", str(content_dir), "-c", "core.quotepath=false", "status", "--porcelain"],
+        capture_output=True, text=True, timeout=30,
+    )
+    subprocess.run(
+        ["git", "-C", str(content_dir), "restore", "--source=HEAD", "--staged", "--worktree", "--", "wiki"],
+        check=False, capture_output=True, text=True, timeout=30,
+    )
+    for line in status.stdout.splitlines():
+        if line.startswith("?? wiki/"):
+            path = content_dir / line[3:]
+            if path.is_file():
+                path.unlink()
+    subprocess.run(
+        [str(alias_index), "build"], cwd=content_dir, env=env,
+        check=False, capture_output=True, text=True, timeout=120,
+    )
+
+
+def remove_page(content_dir: Path, repo_root: Path, wiki_rel: str, merge_into: str | None = None) -> dict:
+    """Run the graph-safe page tool, verify aliases, and commit its wiki changes."""
+    content_dir = content_dir.resolve()
+    rel, page = _content_page_path(content_dir, wiki_rel)
+    target_rel, target = _content_page_path(content_dir, merge_into) if merge_into else (None, None)
+    if not page.is_file():
+        raise ValueError(f"wiki page not found: wiki/{rel}.md")
+    if target is not None and (target == page or not target.is_file()):
+        raise ValueError("merge target must be a different existing page")
+
+    delete_tool = repo_root / "pipeline" / "scripts" / "delete-page.py"
+    alias_index = repo_root / "pipeline" / "scripts" / "alias-index.py"
+    env = {**os.environ, "PW_CONTENT_DIR": str(content_dir), "VAULT_CONTENT_DIR": str(content_dir)}
+    argv = [str(delete_tool)]
+    if target is not None:
+        argv += ["--merge-into", str(target)]
+    argv.append(str(page))
+
+    with _content_ingest_lock(content_dir):
+        _ensure_clean_repo(content_dir)
+        try:
+            result = subprocess.run(
+                argv, cwd=content_dir, env=env, capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "page operation failed").strip())
+            check = subprocess.run(
+                [str(alias_index), "check"], cwd=content_dir, env=env,
+                capture_output=True, text=True, timeout=120,
+            )
+            if check.returncode != 0:
+                raise RuntimeError((check.stderr or check.stdout or "alias check failed").strip())
+            scopes = [
+                scope for scope in ("wiki/entities", "wiki/topics", "wiki/_index", "wiki/_maps")
+                if (content_dir / scope).exists()
+            ]
+            subprocess.run(
+                ["git", "-C", str(content_dir), "add", "-A", "--", *scopes],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+            message = f"wiki: merge {page.stem} into {target.stem}" if target else f"wiki: delete {page.stem}"
+            subprocess.run(
+                ["git", "-C", str(content_dir), "commit", "-m", message, "--", *scopes],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
+        except Exception as exc:
+            _restore_page_operation(content_dir, alias_index, env)
+            if isinstance(exc, (ValueError, RuntimeError)):
+                raise
+            detail = getattr(exc, "stderr", None) or getattr(exc, "stdout", None) or str(exc)
+            raise RuntimeError(str(detail).strip() or "page operation failed") from exc
+    return {"ok": True, "wiki_rel": rel, "merge_into": target_rel, "committed": True}
