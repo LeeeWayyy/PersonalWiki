@@ -30,6 +30,11 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
     #rd .sent:hover { background: var(--bg-1); }
     #rd .word:hover { filter: brightness(1.35); }
     #rd-toolbar button { font-family: var(--sans); }
+    /* ponytail: native offscreen virtualization — browser skips layout/paint for paragraphs out of view */
+    #rd .para { content-visibility: auto; contain-intrinsic-size: auto 220px; }
+    #rd-pager button { background: var(--bg-2); color: var(--text); border: 1px solid var(--border-strong); border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer; }
+    #rd-pager button:disabled { opacity: .35; cursor: default; }
+    #rd-chap { background: var(--bg-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; font-family: var(--sans); max-width: min(60vw, 420px); }
   </style>
 
   <div style="max-width:1180px;margin:0 auto">
@@ -51,6 +56,13 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
               <button data-m="show" class="on" style="flex:none">表示</button>
               <button data-m="tap" style="flex:none">タップ</button>
               <button data-m="hide" style="flex:none">非表示</button>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:7px">
+            <span style="font-size:12px;color:var(--text-3)">表示</span>
+            <div class="seg" id="t-view" style="padding:2px">
+              <button data-v="scroll" class="on" style="flex:none">スクロール</button>
+              <button data-v="page" style="flex:none">ページ</button>
             </div>
           </div>
           <div class="seg" style="padding:2px">
@@ -77,6 +89,11 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             <div id="rd-rail-body"></div>
           </aside>
         </div>
+        <div id="rd-pager" style="display:none;align-items:center;justify-content:center;gap:14px;margin:28px 0 6px;font-family:var(--sans)">
+          <button id="rd-prev" type="button">← 前</button>
+          <select id="rd-chap" aria-label="chapter"></select>
+          <button id="rd-next" type="button">次 →</button>
+        </div>
         <div id="rd-sheet" style="position:fixed;left:0;right:0;bottom:0;z-index:30;background:var(--bg-2);border-top:1px solid var(--border-strong);box-shadow:0 -10px 34px rgba(0,0,0,.5);padding:18px 24px 26px;font-family:var(--sans);max-height:52vh;overflow:auto;transition:transform .22s ease;transform:translateY(115%)">
           <div style="max-width:640px;margin:0 auto;position:relative">
             <button id="sheet-x" style="position:absolute;right:0;top:-2px;background:none;border:none;color:var(--text-3);font-size:22px;cursor:pointer;line-height:1">×</button>
@@ -96,6 +113,9 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           const H = TOKEN ? { 'X-Auth-Token': TOKEN } : {};
           const saved = new Set();
           let fontSize = 24, furi = true, trans = 'show';
+          const POSKEY = 'pw:read:' + sourceId;
+          let pageMode = false, curPage = 0, savedY = 0;
+          try { const p = JSON.parse(localStorage.getItem(POSKEY) || '{}'); pageMode = !!p.mode; curPage = p.page || 0; savedY = p.y || 0; } catch {}
           const parasOf = (ch) => ch.paragraphs || [{ sentences: ch.sentences || [] }];
           const tokensOf = (s) => Array.isArray(s.tokens) && s.tokens.length
             ? s.tokens
@@ -151,15 +171,25 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             return `<span class="word" data-w="${att(t.w)}" data-r="${att(t.rt || t.t)}" data-m="${att(t.m)}" data-n="${att(t.n || '')}" data-p="${att(t.pos || '')}" style="${posStyle(t.pos, isNew)}">${ruby}</span>`;
           }
 
+          function countNew() {
+            let n = 0;
+            for (const ch of reading.chapters) for (const para of parasOf(ch)) for (const s of para.sentences)
+              for (const tk of tokensOf(s)) if (tk.w && tk.m && tk.new && !saved.has(tk.w)) n++;
+            return n;
+          }
+          function updateNewCount() { document.getElementById('c-new').textContent = countNew(); }
+
           function render() {
-            rd.innerHTML = ''; let newCount = 0;
-            for (const ch of reading.chapters) {
+            rd.innerHTML = '';
+            if (pageMode) curPage = Math.max(0, Math.min(curPage, reading.chapters.length - 1));
+            // ponytail: page mode renders one chapter's DOM at a time; scroll mode renders all
+            const chapters = pageMode ? (reading.chapters[curPage] ? [reading.chapters[curPage]] : []) : reading.chapters;
+            for (const ch of chapters) {
               if (ch.chapter) { const h = document.createElement('div'); h.style.cssText = 'font-family:var(--jp);font-size:19px;font-weight:600;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:8px;margin:26px 0 18px'; h.textContent = ch.chapter; rd.appendChild(h); }
               for (const para of parasOf(ch)) {
-                const pEl = document.createElement('div'); pEl.style.cssText = 'margin:0 0 20px;border-left:2px solid transparent;padding-left:4px';
+                const pEl = document.createElement('div'); pEl.className = 'para'; pEl.style.cssText = 'margin:0 0 20px;border-left:2px solid transparent;padding-left:4px';
                 for (const s of para.sentences) {
                   const tokens = tokensOf(s);
-                  for (const t of tokens) if (t.w && t.m && t.new && !saved.has(t.w)) newCount++;
                   const el = document.createElement('div'); el.className = 'sent';
                   const jp = document.createElement('div'); jp.className = 'jp'; jp.style.fontSize = fontSize + 'px';
                   jp.innerHTML = tokens.map(tokenHtml).join('');
@@ -181,8 +211,18 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
                 rd.appendChild(pEl);
               }
             }
-            document.getElementById('c-new').textContent = newCount;
+            updateNewCount();
             applyModes();
+            updatePager();
+          }
+
+          function updatePager() {
+            const bar = document.getElementById('rd-pager');
+            bar.style.display = pageMode ? 'flex' : 'none';
+            if (!pageMode) return;
+            document.getElementById('rd-chap').value = String(curPage);
+            document.getElementById('rd-prev').disabled = curPage === 0;
+            document.getElementById('rd-next').disabled = curPage === reading.chapters.length - 1;
           }
 
           function applyModes() {
@@ -274,7 +314,9 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
               const id = (await r.json()).id;
               if (status) await fetch(`${BACKEND}/vocab/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status }) });
               saved.add(d.w); document.getElementById('c-saved').textContent = saved.size;
-              render();
+              // ponytail: restyle just the matching tokens instead of rebuilding the whole document
+              rd.querySelectorAll('.word').forEach((w) => { if (w.dataset.w === d.w) w.setAttribute('style', posStyle(w.dataset.p, false)); });
+              updateNewCount();
               if (isMobile()) sheet.style.transform = 'translateY(115%)';
               else if (tab === 'word') { railBody.innerHTML = wordCardHtml(d); wireWordButtons(d); }
             } catch { alert(EN ? 'Could not reach study backend (' + BACKEND + ').' : '无法连接学习后端（' + BACKEND + '）。'); }
@@ -303,7 +345,29 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           document.getElementById('t-bigger').onclick = () => { fontSize = Math.min(34, fontSize + 2); document.querySelectorAll('#rd .jp').forEach((j) => j.style.fontSize = fontSize + 'px'); };
           document.getElementById('t-smaller').onclick = () => { fontSize = Math.max(16, fontSize - 2); document.querySelectorAll('#rd .jp').forEach((j) => j.style.fontSize = fontSize + 'px'); };
 
-          loadKnown().then(render);
+          // ---- View mode (scroll ⇄ page) + chapter pager + position memory ----
+          const chapSel = document.getElementById('rd-chap');
+          chapSel.innerHTML = reading.chapters.map((ch, i) =>
+            `<option value="${i}">${esc(ch.chapter || (EN ? 'Chapter ' : '第') + (i + 1) + (EN ? '' : '章'))}</option>`).join('');
+          function savePos() { try { localStorage.setItem(POSKEY, JSON.stringify({ mode: pageMode, page: curPage, y: window.scrollY })); } catch {} }
+          function goPage(i) { curPage = Math.max(0, Math.min(i, reading.chapters.length - 1)); savePos(); render(); window.scrollTo({ top: 0 }); }
+          document.getElementById('rd-prev').onclick = () => goPage(curPage - 1);
+          document.getElementById('rd-next').onclick = () => goPage(curPage + 1);
+          chapSel.onchange = (e) => goPage(+e.target.value);
+          document.querySelectorAll('#t-view button').forEach((b) => {
+            b.classList.toggle('on', (b.dataset.v === 'page') === pageMode);
+            b.onclick = () => { pageMode = b.dataset.v === 'page';
+              document.querySelectorAll('#t-view button').forEach((x) => x.classList.toggle('on', x === b));
+              savePos(); render(); window.scrollTo({ top: 0 }); };
+          });
+          document.addEventListener('keydown', (e) => {
+            if (!pageMode || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+            if (e.key === 'ArrowRight') goPage(curPage + 1);
+            else if (e.key === 'ArrowLeft') goPage(curPage - 1);
+          });
+          let scrollT; window.addEventListener('scroll', () => { if (pageMode) return; clearTimeout(scrollT); scrollT = setTimeout(savePos, 300); });
+
+          loadKnown().then(() => { render(); if (!pageMode && savedY) window.scrollTo(0, savedY); });
         </script>
       </>
     ) : (
