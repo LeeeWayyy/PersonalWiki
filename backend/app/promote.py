@@ -24,6 +24,7 @@ from urllib.parse import quote as _q
 HUMAN_OPEN = "<!-- human-zone -->"
 HUMAN_CLOSE = "<!-- /human-zone -->"
 COMMENT_TOKEN_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
+HUMAN_OPEN_RE = re.compile(r"(?m)^" + re.escape(HUMAN_OPEN) + r"[ \t]*(?:\r?$)")
 HUMAN_CLOSE_RE = re.compile(r"(?m)^" + re.escape(HUMAN_CLOSE) + r"[ \t]*(?:\r?$)")
 LOGGER = logging.getLogger(__name__)
 
@@ -117,6 +118,60 @@ def insert_note(page_text: str, aid: str, note_md: str) -> str:
     return body + "\n\n" + zone + "\n"
 
 
+def read_zone(page_text: str) -> str | None:
+    """Inner markdown of the human-zone, or None when the page has no zone."""
+    o = HUMAN_OPEN_RE.search(page_text)
+    c = HUMAN_CLOSE_RE.search(page_text)
+    if not o or not c or c.start() < o.end():
+        return None
+    return page_text[o.end():c.start()].strip("\n")
+
+
+def replace_zone(page_text: str, inner: str) -> str:
+    """Replace the human-zone's inner markdown (append a zone if none exists)."""
+    inner = inner.strip("\n")
+    block = f"{HUMAN_OPEN}\n\n{inner}\n\n{HUMAN_CLOSE}" if inner else f"{HUMAN_OPEN}\n{HUMAN_CLOSE}"
+    o = HUMAN_OPEN_RE.search(page_text)
+    c = HUMAN_CLOSE_RE.search(page_text)
+    if o and c and c.start() >= o.end():
+        return page_text[:o.start()] + block + page_text[c.end():]
+    if o or c:
+        raise ValueError("malformed human-zone markers: expected a matched open/close pair, each on its own line")
+    return page_text.rstrip("\n") + "\n\n" + block + "\n"
+
+
+def get_zone(content_dir: Path, wiki_rel: str) -> dict:
+    """Read a wiki page's human-zone. Raises ValueError for a bad path / missing page."""
+    path = _safe_page_path(content_dir.resolve(), wiki_rel)
+    if not path.exists():
+        raise ValueError(f"wiki page not found: wiki/{wiki_rel}.md")
+    text = read_zone(path.read_text(encoding="utf-8"))
+    return {"wiki_rel": wiki_rel, "text": text or "", "exists": text is not None}
+
+
+def set_zone(content_dir: Path, wiki_rel: str, text: str) -> dict:
+    """Replace a wiki page's human-zone and git-commit it (same guarantees as promote)."""
+    content_dir = content_dir.resolve()
+    with _content_ingest_lock(content_dir):
+        path = _safe_page_path(content_dir, wiki_rel)
+        if not path.exists():
+            raise ValueError(f"wiki page not found: wiki/{wiki_rel}.md")
+        _ensure_clean_target_page(content_dir, path)
+        original = path.read_text(encoding="utf-8")
+        updated = replace_zone(original, text)
+        committed = False
+        if updated != original:
+            index_snapshot = _git_index_snapshot(content_dir, path)
+            _atomic_write_text(path, updated)
+            try:
+                committed = _git_commit(content_dir, path, f"human-zone: edit wiki/{wiki_rel}")
+            except Exception:
+                _atomic_write_text(path, original)
+                _restore_git_index_snapshot(content_dir, path, index_snapshot)
+                raise
+    return {"ok": True, "wiki_rel": wiki_rel, "committed": committed}
+
+
 def _safe_page_path(content_dir: Path, wiki_rel: str) -> Path:
     rel = (wiki_rel or "").strip().lstrip("/")
     if rel.endswith(".md"):
@@ -154,7 +209,7 @@ def _promote_to_page_locked(anno: dict, source_title: str, content_dir: Path, wi
         index_snapshot = _git_index_snapshot(content_dir, path)
         _atomic_write_text(path, updated)
         try:
-            committed = _git_commit(content_dir, path, aid, wiki_rel)
+            committed = _git_commit(content_dir, path, f"human-zone: promote annotation {aid} → wiki/{wiki_rel}")
         except Exception:
             _atomic_write_text(path, original)
             _restore_git_index_snapshot(content_dir, path, index_snapshot)
@@ -193,7 +248,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def _git_commit(content_dir: Path, path: Path, aid: str, wiki_rel: str) -> bool:
+def _git_commit(content_dir: Path, path: Path, message: str) -> bool:
     """Best-effort commit in the content repo; returns True on success. If the dir
     isn't a git repo the file is still written (returns False)."""
     if not (content_dir / ".git").exists():
@@ -207,8 +262,7 @@ def _git_commit(content_dir: Path, path: Path, aid: str, wiki_rel: str) -> bool:
                             capture_output=True, text=True, timeout=30)
         if st.returncode == 0:
             return False
-        subprocess.run(["git", "-C", str(content_dir), "commit", "-m",
-                        f"human-zone: promote annotation {aid} → wiki/{wiki_rel}", "--", rel],
+        subprocess.run(["git", "-C", str(content_dir), "commit", "-m", message, "--", rel],
                        check=True, capture_output=True, text=True, timeout=30)
         return True
     except subprocess.CalledProcessError as e:  # noqa

@@ -1828,6 +1828,32 @@ def test_promote_into_human_zone(client, auth, content_dir):
     assert page2.count(f"<!-- anno:{a['id']} -->") == 1
 
 
+def test_human_zone_get_put_roundtrip(client, auth, content_dir):
+    # shared session content repo: other tests may have written the zone already
+    r = client.get("/wiki/human-zone?rel=entities/ATP", headers=auth)
+    assert r.status_code == 200
+    assert r.json()["exists"] is True and isinstance(r.json()["text"], str)
+
+    r = client.put("/wiki/human-zone", json={"rel": "entities/ATP", "text": "my note\n\nsecond para"}, headers=auth)
+    assert r.status_code == 200 and r.json()["ok"]
+    page = (content_dir / "wiki" / "entities" / "ATP.md").read_text(encoding="utf-8")
+    assert page.count("<!-- human-zone -->") == 1 and "my note" in page
+
+    r = client.get("/wiki/human-zone?rel=entities/ATP", headers=auth)
+    assert r.json() == {"wiki_rel": "entities/ATP", "text": "my note\n\nsecond para", "exists": True}
+
+    # replace, not append; still one zone
+    client.put("/wiki/human-zone", json={"rel": "entities/ATP", "text": "edited"}, headers=auth)
+    page = (content_dir / "wiki" / "entities" / "ATP.md").read_text(encoding="utf-8")
+    assert "my note" not in page and "edited" in page and page.count("<!-- human-zone -->") == 1
+
+    # guardrails
+    assert client.get("/wiki/human-zone?rel=../secrets", headers=auth).status_code == 400
+    assert client.get("/wiki/human-zone?rel=entities/NOPE", headers=auth).status_code == 404
+    assert client.put("/wiki/human-zone", json={"rel": "entities/ATP", "text": 5}, headers=auth).status_code == 400
+    assert client.put("/wiki/human-zone", json={"rel": "entities/ATP", "text": "x"}).status_code in (401, 403)
+
+
 def test_promote_replaces_note_with_regex_replacement_literals():
     from app import promote
 

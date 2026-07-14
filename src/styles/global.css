@@ -106,8 +106,22 @@ a:hover { text-decoration: none; }
 .kind-tag.topic { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 42%, transparent); }
 .metaline { color: var(--text-3); font-size: 12px; font-family: var(--mono); }
 
-/* Markdown human-zone is hidden; the article template renders the empty-state row. */
-.zone-human { display: none; }
+/* Personal notes: the markdown human-zone renders as a dashed panel; the
+   empty-state row shows instead when the zone is absent/empty, and both hide
+   while the inline editor is open. */
+.zone-human { border: 1px dashed var(--border-strong); border-radius: 12px; padding: 14px 18px; margin: 26px 0 0;
+  color: var(--text-2); font-size: 14.5px; line-height: 1.75; }
+.zone-human > :first-child { margin-top: 0; }
+.zone-human > :last-child { margin-bottom: 0; }
+article:not(.has-human) .zone-human, article.editing-human .zone-human { display: none; }
+article.has-human .humannote, article.editing-human .humannote { display: none; }
+.human-editor { margin: 0 0 26px; }
+.human-editor textarea { width: 100%; background: var(--bg-1); border: 1px dashed var(--terra); border-radius: 12px;
+  padding: 13px 16px; color: var(--text); font-size: 14.5px; line-height: 1.7; font-family: var(--sans); resize: vertical; }
+.human-editor textarea:focus { outline: none; }
+.human-editor .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.human-editor .save { color: var(--terra); border-color: color-mix(in srgb, var(--terra) 42%, transparent); }
+.human-editor .status { font-size: 12px; color: var(--text-3); }
 .humannote { display: flex; align-items: center; gap: 11px; border: 1px dashed var(--border-strong); border-radius: 12px;
   padding: 13px 16px; margin: 0 0 26px; color: var(--text-3); cursor: text; }
 .humannote:hover { border-color: var(--terra); color: var(--text-2); }

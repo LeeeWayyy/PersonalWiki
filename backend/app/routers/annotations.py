@@ -392,6 +392,45 @@ async def promote_annotation(aid: str, request: Request, x_auth_token: str | Non
     return {**result, "annotation": _annotation_dict(updated)}
 
 
+@router.get("/wiki/human-zone")
+async def get_human_zone(rel: str, x_auth_token: str | None = Header(None)):
+    require_auth(x_auth_token)
+    if not _valid_wiki_rel(rel):
+        raise HTTPException(400, "invalid rel")
+    try:
+        return await asyncio.to_thread(promote_mod.get_zone, ir.CONTENT_DIR, rel)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.put("/wiki/human-zone")
+async def put_human_zone(request: Request, x_auth_token: str | None = Header(None)):
+    """Replace a wiki page's human-zone from the UI and commit it.
+
+    Serialized behind the ingest lock so it cannot race an ingest commit.
+    """
+    require_auth(x_auth_token)
+    body = await json_object(request)
+    rel = optional_string(body.get("rel"), "rel").strip()
+    if not rel or not _valid_wiki_rel(rel):
+        raise HTTPException(400, "invalid rel")
+    text = body.get("text")
+    if not isinstance(text, str):
+        raise HTTPException(400, "text must be a string")
+    if len(text) > 65536:
+        raise HTTPException(400, "text too large")
+    async with ir.LOCK:
+        try:
+            result = await asyncio.to_thread(promote_mod.set_zone, ir.CONTENT_DIR, rel, text)
+        except ValueError as exc:
+            status = 404 if "not found" in str(exc) else 400
+            raise HTTPException(status, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(500, f"git commit failed: {exc}") from exc
+    LOGGER.info("human-zone edit wiki_rel=%s committed=%s", rel, result["committed"])
+    return result
+
+
 @router.delete("/annotations/{aid}")
 async def delete_annotation(aid: str, x_auth_token: str | None = Header(None)):
     require_auth(x_auth_token)
