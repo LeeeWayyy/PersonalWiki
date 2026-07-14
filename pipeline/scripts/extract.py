@@ -606,6 +606,37 @@ def _pdf_outline_sections(reader) -> list[tuple[str, int]]:
     return out
 
 
+# Characters that can legitimately end a sentence (CJK + ASCII enders and
+# closing quotes/brackets). Page text ending on anything else is mid-sentence.
+_SENTENCE_END = "。．！？!?….」』）)〉》］]\"'"
+
+
+def _strip_printed_title(title: str, body: str) -> str:
+    """Drop the section's first line when it just repeats the outline title —
+    chapter titles are usually printed on the page, and the heading already
+    carries them; left in, the bare line glues into the following sentence."""
+    lines = body.lstrip("\n").split("\n", 1)
+    if lines and " ".join(lines[0].split()) == " ".join(title.split()):
+        return lines[1].lstrip("\n") if len(lines) > 1 else ""
+    return body
+
+
+def _join_pages(texts: list[str]) -> str:
+    """Join page texts; a page ending mid-sentence joins the next page with a
+    plain newline (same paragraph) instead of a paragraph break, so sentences
+    spanning a page break survive downstream paragraph/sentence splitting."""
+    out = ""
+    for t in texts:
+        if not t:
+            continue
+        if not out:
+            out = t
+            continue
+        sep = "\n\n" if out.rstrip()[-1] in _SENTENCE_END else "\n"
+        out = out.rstrip("\n") + sep + t
+    return out
+
+
 def _pdf_sections_from_outline(page_texts: list[str],
                                outline: list[tuple[str, int]]) -> list[str]:
     """Render `## <title>` sections from outline entries and per-page texts.
@@ -614,20 +645,43 @@ def _pdf_sections_from_outline(page_texts: list[str],
     the end. Pages before the first entry become `## Front matter`. Empty
     ranges (e.g. two bookmarks on one page) are skipped — their text lands in
     the neighboring section. Returns [] when the outline yields nothing.
+
+    Outline boundaries are PAGE boundaries, not sentence boundaries: a section
+    whose text stops mid-sentence hands its trailing fragment to the next
+    section so no sentence is severed by a chapter break.
     """
     if not outline:
         return []
-    sections: list[str] = []
+    parts: list[tuple[str, str]] = []
     if outline[0][1] > 0:
-        head = "\n\n".join(t for t in page_texts[:outline[0][1]] if t)
+        head = _join_pages(page_texts[:outline[0][1]])
         if head:
-            sections.append(f"\n\n## Front matter\n\n{head}\n")
+            parts.append(("Front matter", head))
     for n, (title, start) in enumerate(outline):
         end = outline[n + 1][1] if n + 1 < len(outline) else len(page_texts)
-        body = "\n\n".join(t for t in page_texts[start:end] if t)
+        body = _strip_printed_title(title, _join_pages(page_texts[start:end]))
         if body:
-            sections.append(f"\n\n## {title}\n\n{body}\n")
-    return sections
+            parts.append((title, body))
+    for n in range(len(parts) - 1):
+        title, body = parts[n]
+        body = body.rstrip()
+        if not body or body[-1] in _SENTENCE_END:
+            continue
+        cut = max(body.rfind(ch) for ch in _SENTENCE_END)
+        fragment = body[cut + 1:].strip()
+        if cut <= 0 or not fragment:
+            continue
+        # Carry only a SAME-LINE tail (hard-wrap artifact, e.g. "…から。でも").
+        # A tail on its own line is deliberate typesetting — a dedication,
+        # caption, or sign-off — and must stay put.
+        # ponytail: multi-line mid-sentence tails at a chapter boundary are
+        # not carried; revisit if a real book shows one.
+        if "\n" in body[cut + 1:]:
+            continue
+        next_title, next_body = parts[n + 1]
+        parts[n] = (title, body[:cut + 1])
+        parts[n + 1] = (next_title, f"{fragment}\n{next_body}")
+    return [f"\n\n## {title}\n\n{body}\n" for title, body in parts]
 
 
 def _bbox_iou(a: tuple[float, float, float, float],

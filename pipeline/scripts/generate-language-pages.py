@@ -211,8 +211,13 @@ def join_wrapped(lines: list[str]) -> str:
 
 
 def paragraphs_of(text: str) -> list[str]:
-    """Blank-line-separated paragraphs, each with its wrapped lines re-joined."""
-    blocks = re.split(r"\n[ \t　]*\n", text.replace("\r\n", "\n"))
+    """Blank-line-separated paragraphs, each with its wrapped lines re-joined.
+    A full-width-space indent also OPENS a paragraph (the JP typesetting
+    convention) — without this, a page's hard-wrapped lines would all collapse
+    into one paragraph and non-terminated lines would glue into the next
+    sentence."""
+    text = re.sub(r"\n(?=　)", "\n\n", text.replace("\r\n", "\n"))
+    blocks = re.split(r"\n[ \t　]*\n", text)
     paras = [join_wrapped(b.split("\n")).strip() for b in blocks]
     return [p for p in paras if p]
 
@@ -220,7 +225,7 @@ def paragraphs_of(text: str) -> list[str]:
 def split_sentences_in(para: str) -> list[str]:
     """Split ONE paragraph on 。！？ (keeping the ender + any trailing closing
     quote/bracket)."""
-    parts = re.split(r"(?<=[。！？])(?![」』）\)】])", para)
+    parts = re.split(r"(?<=[。！？])(?![」』）\)】〉》])", para)
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -351,6 +356,9 @@ def chapter_data(meta: dict, idx: int, chapter: str, section: str | None,
     if dry_run:
         raise RuntimeError(f"chapter {chapter!r} needs LLM (no cache) — skipped under --dry-run")
     text = dl.extract_source_text(EXTRACT, meta["asset"], SOURCE_CHAR_LIMIT, section)
+    # Drop the section's own `## <title>` heading line — the chapter label is
+    # rendered separately; left in, it becomes a bogus first "sentence".
+    text = re.sub(r"(?m)^##\s.*$", "", text)
     if not text.strip():
         raise RuntimeError(f"chapter {chapter!r}: section matched no text (blank slice)")
     paras = split_paragraphs(text)
