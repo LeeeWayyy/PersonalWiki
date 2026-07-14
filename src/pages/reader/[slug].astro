@@ -180,7 +180,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
                 en.textContent = r.ok ? (await r.json()).translation : (EN ? '(translation unavailable)' : '（翻译不可用）'); }
               catch { en.textContent = EN
                 ? `(study backend offline — start it: cd backend && bash run.sh · expected at ${BACKEND})`
-                : `（学习后端离线 — 启动方式：cd backend && bash run.sh · 预期地址 ${BACKEND}）`; }
+                : `（学习后端未运行 — 启动方式：cd backend && bash run.sh · 预期地址 ${BACKEND}）`; }
             }
           }
 
