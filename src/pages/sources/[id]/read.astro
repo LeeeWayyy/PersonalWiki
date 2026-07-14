@@ -3,6 +3,7 @@ import Base from '../../../layouts/Base.astro';
 import SourceReader from '../../../components/SourceReader.astro';
 import { loadVault, blocksForSource, citationsForSource, cleanTitle as clean } from '../../../lib/vault.mjs';
 import { sourceReaderChapterHref, sourceReaderSections } from '../../../lib/source-reader-chapters.mjs';
+import { t } from '../../../lib/i18n.mjs';
 import type { SourceMeta, Citation } from '../../../lib/vault.mjs';
 
 export async function getStaticPaths() {
@@ -50,16 +51,17 @@ const redirectTargets = chapterLinks.map((chapter) => ({
 const readerProps = {
   source, blocks, citations, promoteFrom: citations, chapterLinks,
   hasToc: chapterLinks.length > 1,
-  detail: `${source.origin_type} · ${chapterLinks.length} chapters · ${displayBlockCount} blocks`,
+  detailKey: 'sr.detail',
+  detailArgs: { type: source.origin_type, n: chapterLinks.length, b: displayBlockCount },
   configExtras: { chapterScoped: false },
 };
 ---
-<Base title={clean(source.title)} active="sources" crumbs={[{ label: 'Sources', href: '/sources' }, { label: clean(source.title), href: `/sources/${source.id}` }, { label: 'Read' }]}>
+<Base title={clean(source.title)} active="sources" crumbs={[{ i18n: 'kind.sources', href: '/sources' }, { label: clean(source.title), href: `/sources/${source.id}` }, { i18n: 'crumb.read' }]}>
   {isChapterRedirect ? (
     <SourceReader {...readerProps}>
       <div id="sr-read-redirect" class="card" data-href={redirectHref} data-chapters={JSON.stringify(redirectTargets)}>
-        <p class="muted">This source is split into chapters for faster reading.</p>
-        <p><a href={redirectHref}>Open first chapter</a></p>
+        <p class="muted" data-i18n="sr.split">{t('sr.split')}</p>
+        <p><a href={redirectHref} data-i18n="sr.openFirst">{t('sr.openFirst')}</a></p>
       </div>
       <script>
         import { bootSourceReaderRedirect } from '../../../scripts/source-reader-redirect.js';

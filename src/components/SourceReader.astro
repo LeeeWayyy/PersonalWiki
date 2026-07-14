@@ -2,9 +2,11 @@
 // Shared source-reader shell for /sources/[id]/read and /sources/[id]/read/[chapter].
 // Renders the header, prefs panel, chapter TOC, block stream, notes rail, cite
 // groups, and the selection/assist/command overlays. Pages pass what differs:
-// the detail line, chapter scoping, and (for the split-source landing page) a
-// default-slot body that replaces the reader (the chapter redirect card).
+// the detail line (as an i18n key + args), chapter scoping, and (for the
+// split-source landing page) a default-slot body that replaces the reader
+// (the chapter redirect card).
 import { cleanTitle as clean } from '../lib/vault.mjs';
+import { t } from '../lib/i18n.mjs';
 import type { SourceMeta, Citation } from '../lib/vault.mjs';
 import '../styles/source-reader.css';
 
@@ -15,14 +17,15 @@ interface Props {
   promoteFrom: Citation[];    // full list — promote targets are source-wide
   chapterLinks: any[];        // chapters + href
   hasToc: boolean;
-  detail: string;             // sr-detail text in the header
+  detailKey: string;          // i18n key for the sr-detail text in the header
+  detailArgs: Record<string, unknown>;
   currentChapterId?: string;  // marks the active TOC entry
   chapterTitle?: string;      // subtitle under the source title (chapter pages)
   nav?: { prevHref: string; nextHref: string; index: number; count: number };
   configExtras?: Record<string, unknown>; // merged into data-source-reader
 }
 const {
-  source, blocks, citations, promoteFrom, chapterLinks, hasToc, detail,
+  source, blocks, citations, promoteFrom, chapterLinks, hasToc, detailKey, detailArgs,
   currentChapterId = '', chapterTitle = '', nav = null, configExtras = {},
 } = Astro.props as Props;
 
@@ -53,22 +56,23 @@ const promoteTargets = [...new Map((promoteFrom || []).map((c) => [
 const readerConfig = { sourceId: source.id, sourceTitle: clean(source.title), promoteTargets, ...configExtras };
 // A default-slot body (the chapter-redirect card) replaces the reader entirely.
 const hasBody = !Astro.slots.has('default');
+const citedArgs = JSON.stringify({ n: citations.length });
 ---
 <div id="srcread" class={hasToc ? 'has-toc' : ''} data-source-reader={JSON.stringify(readerConfig)}>
   <div class="sr-head">
     <div class="sr-meta">
-      <span class="sr-kicker">Source · read</span>
-      <span class="sr-detail">{detail}</span>
+      <span class="sr-kicker" data-i18n="sr.kicker">{t('sr.kicker')}</span>
+      <span class="sr-detail" data-i18n={detailKey} data-i18n-args={JSON.stringify(detailArgs)}>{t(detailKey, detailArgs)}</span>
       <span id="sr-progress-text" class="sr-detail"></span>
     </div>
     {blocks.length ? (
       <div class="sr-actions" aria-label="Reader controls">
-        <button class="sr-tool" type="button" data-act="resume" title="Resume reading">Resume</button>
-        <button class="sr-tool sr-page-tool" type="button" data-act="page-prev" aria-label="Previous page" title="Previous page">←</button>
-        <button class="sr-tool sr-page-tool" type="button" data-act="page-next" aria-label="Next page" title="Next page">→</button>
-        <button class="sr-tool" type="button" data-act="prefs" aria-controls="sr-prefs" aria-expanded="false" title="Reading preferences">Aa</button>
-        <button class="sr-tool" type="button" data-act="focus" aria-pressed="false" title="Focus mode">Focus</button>
-        <button class="sr-tool sr-notes-toggle" type="button" data-act="notes" aria-controls="sr-notes" aria-expanded="false" title="Notes">Notes</button>
+        <button class="sr-tool" type="button" data-act="resume" title={t('sr.resumeT')} data-i18n-title="sr.resumeT" data-i18n="sr.resume">{t('sr.resume')}</button>
+        <button class="sr-tool sr-page-tool" type="button" data-act="page-prev" aria-label="Previous page" title={t('sr.prevPage')} data-i18n-title="sr.prevPage">←</button>
+        <button class="sr-tool sr-page-tool" type="button" data-act="page-next" aria-label="Next page" title={t('sr.nextPage')} data-i18n-title="sr.nextPage">→</button>
+        <button class="sr-tool" type="button" data-act="prefs" aria-controls="sr-prefs" aria-expanded="false" title={t('sr.prefsT')} data-i18n-title="sr.prefsT">Aa</button>
+        <button class="sr-tool" type="button" data-act="focus" aria-pressed="false" title={t('sr.focusT')} data-i18n-title="sr.focusT" data-i18n="sr.focus">{t('sr.focus')}</button>
+        <button class="sr-tool sr-notes-toggle" type="button" data-act="notes" aria-controls="sr-notes" aria-expanded="false" title={t('sr.notes')} data-i18n-title="sr.notes" data-i18n="sr.notes">{t('sr.notes')}</button>
       </div>
     ) : null}
   </div>
@@ -81,51 +85,51 @@ const hasBody = !Astro.slots.has('default');
     <>
     {nav && (
       <div class="sr-chapter-nav" aria-label="Chapter navigation">
-        {nav.prevHref ? <a href={nav.prevHref}>← Previous</a> : <span></span>}
+        {nav.prevHref ? <a href={nav.prevHref} data-i18n="sr.prev">{t('sr.prev')}</a> : <span></span>}
         <span>{nav.index} / {nav.count}</span>
-        {nav.nextHref ? <a href={nav.nextHref}>Next →</a> : <span></span>}
+        {nav.nextHref ? <a href={nav.nextHref} data-i18n="sr.next">{t('sr.next')}</a> : <span></span>}
       </div>
     )}
     <div id="sr-progress" aria-hidden="true"><span></span></div>
     <div id="sr-prefs" class="sr-prefs" popover="auto">
       <div class="sr-pref-row">
-        <label for="sr-font-size">Size</label>
+        <label for="sr-font-size" data-i18n="sr.size">{t('sr.size')}</label>
         <input id="sr-font-size" type="range" min="16" max="24" step="1" data-pref="fontSize" />
         <output data-out="fontSize"></output>
       </div>
       <div class="sr-pref-row">
-        <label for="sr-line-height">Line</label>
+        <label for="sr-line-height" data-i18n="sr.line">{t('sr.line')}</label>
         <input id="sr-line-height" type="range" min="1.65" max="2.25" step="0.05" data-pref="lineHeight" />
         <output data-out="lineHeight"></output>
       </div>
       <div class="sr-pref-group" role="group" aria-label="Reading mode">
-        <span>Mode</span>
-        <button type="button" data-mode="scroll">Scroll</button>
-        <button type="button" data-mode="page">Page</button>
+        <span data-i18n="sr.mode">{t('sr.mode')}</span>
+        <button type="button" data-mode="scroll" data-i18n="sr.scroll">{t('sr.scroll')}</button>
+        <button type="button" data-mode="page" data-i18n="sr.page">{t('sr.page')}</button>
       </div>
       <div class="sr-pref-group" role="group" aria-label="Text width">
-        <span>Width</span>
-        <button type="button" data-width="34rem">Narrow</button>
-        <button type="button" data-width="42rem">Normal</button>
-        <button type="button" data-width="50rem">Wide</button>
+        <span data-i18n="sr.width">{t('sr.width')}</span>
+        <button type="button" data-width="34rem" data-i18n="sr.narrow">{t('sr.narrow')}</button>
+        <button type="button" data-width="42rem" data-i18n="sr.normal">{t('sr.normal')}</button>
+        <button type="button" data-width="50rem" data-i18n="sr.wide">{t('sr.wide')}</button>
       </div>
       <div class="sr-pref-group" role="group" aria-label="Font">
-        <span>Font</span>
-        <button type="button" data-font="serif">Serif</button>
-        <button type="button" data-font="sans">Sans</button>
+        <span data-i18n="sr.font">{t('sr.font')}</span>
+        <button type="button" data-font="serif" data-i18n="sr.serif">{t('sr.serif')}</button>
+        <button type="button" data-font="sans" data-i18n="sr.sans">{t('sr.sans')}</button>
       </div>
       <div class="sr-pref-group" role="group" aria-label="Theme">
-        <span>Theme</span>
-        <button type="button" data-theme="night">Dark</button>
-        <button type="button" data-theme="paper">Paper</button>
-        <button type="button" data-theme="sepia">Sepia</button>
+        <span data-i18n="sr.theme">{t('sr.theme')}</span>
+        <button type="button" data-theme="night" data-i18n="sr.dark">{t('sr.dark')}</button>
+        <button type="button" data-theme="paper" data-i18n="sr.paper">{t('sr.paper')}</button>
+        <button type="button" data-theme="sepia" data-i18n="sr.sepia">{t('sr.sepia')}</button>
       </div>
-      <button class="sr-reset" type="button" data-act="prefs-reset">Reset</button>
+      <button class="sr-reset" type="button" data-act="prefs-reset" data-i18n="act.reset">{t('act.reset')}</button>
     </div>
     <div id="sr-grid" class={hasToc ? 'has-toc' : ''}>
       {hasToc ? (
         <nav class="sr-toc" aria-label="Chapters">
-          <h4>Chapters</h4>
+          <h4 data-i18n="sr.chapters">{t('sr.chapters')}</h4>
           {chapterLinks.map((chapter) => (
             <a href={chapter.href} class={chapter.id === currentChapterId ? 'on' : ''}>
               <span>{chapter.title}</span>
@@ -144,7 +148,7 @@ const hasBody = !Astro.slots.has('default');
                 : b.type === 'image'
                   ? (
                     <figure class="fig" id={b.id} data-block={b.id} data-section={b.section_id} data-prev={b.prev} data-next={b.next}>
-                      <div class="fig-imgwrap"><img src={b.src} alt={b.text} loading="lazy" /><button class="fig-add" title="Add a note to this figure">＋ note</button></div>
+                      <div class="fig-imgwrap"><img src={b.src} alt={b.text} loading="lazy" /><button class="fig-add" title={t('sr.figAddT')} data-i18n-title="sr.figAddT" data-i18n="sr.figAdd">{t('sr.figAdd')}</button></div>
                       {b.text && <figcaption>{b.text}</figcaption>}
                     </figure>
                   )
@@ -155,14 +159,14 @@ const hasBody = !Astro.slots.has('default');
       </div>
       <aside id="sr-notes" class="rail" style="position:sticky;top:74px">
         <div class="sr-rail-head">
-          <h4>Notes <span id="sr-count" style="color:var(--text-2)"></span></h4>
-          <button class="sr-drawer-close" type="button" data-act="notes-close">Close</button>
+          <h4><span data-i18n="sr.notes">{t('sr.notes')}</span> <span id="sr-count" style="color:var(--text-2)"></span></h4>
+          <button class="sr-drawer-close" type="button" data-act="notes-close" data-i18n="act.close">{t('act.close')}</button>
         </div>
         <div id="sr-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
-          <button data-f="all" class="on">All</button>
-          <button data-f="note" style="color:var(--amber)">Notes</button>
-          <button data-f="question" style="color:var(--sage)">Questions</button>
-          <button data-f="important" style="color:var(--terra)">Important</button>
+          <button data-f="all" class="on" data-i18n="word.all">{t('word.all')}</button>
+          <button data-f="note" style="color:var(--amber)" data-i18n="sr.fNotes">{t('sr.fNotes')}</button>
+          <button data-f="question" style="color:var(--sage)" data-i18n="sr.fQuestions">{t('sr.fQuestions')}</button>
+          <button data-f="important" style="color:var(--terra)" data-i18n="sr.fImportant">{t('sr.fImportant')}</button>
         </div>
         <div id="sr-list"></div>
         <div id="sr-orphans"></div>
@@ -170,14 +174,14 @@ const hasBody = !Astro.slots.has('default');
 
         {citeGroups.length ? (
           <div id="sr-cited" style="margin-top:20px">
-            <h4>Cited by the wiki <span style="color:var(--text-2)">({citations.length})</span></h4>
+            <h4 data-i18n="sr.citedBy" data-i18n-args={citedArgs}>{t('sr.citedBy', { n: citations.length })}</h4>
             {citeGroups.map(([anchor, items], gi) => (
               <details open={gi === 0}>
-                <summary>{anchor || 'General references'}<span class="n">{items.length}</span></summary>
+                <summary>{anchor ? anchor : <span data-i18n="sr.general">{t('sr.general')}</span>}<span class="n">{items.length}</span></summary>
                 {items.map((c) => (
                   <div class="cite-card" data-anchor={anchor}>
                     <div class="ex">{c.kind === 'ai' && <span class="ai">AI</span>} {c.excerpt}</div>
-                    <div class="src"><a href={c.wiki_href} title={c.wiki_title}>{clean(c.wiki_title)}</a>{anchor && <span class="loc">↩ locate</span>}</div>
+                    <div class="src"><a href={c.wiki_href} title={c.wiki_title}>{clean(c.wiki_title)}</a>{anchor && <span class="loc" data-i18n="sr.locate">{t('sr.locate')}</span>}</div>
                   </div>
                 ))}
               </details>
@@ -190,13 +194,13 @@ const hasBody = !Astro.slots.has('default');
     </>
   ) : (
     <>
-      <div class="card"><p class="muted">This source has no readable text yet. Documents (epub/pdf) become readable when local sync extracts <code>vault/.blocks/&lt;source_id&gt;.blocks.json</code>. Language sources are readable now.</p></div>
+      <div class="card"><p class="muted" data-i18n="sr.noText">{t('sr.noText')}</p></div>
       {citeGroups.length ? (
         <div id="sr-cited" style="max-width:640px;margin-top:22px">
-          <h4>Cited by the wiki <span style="color:var(--text-2)">({citations.length})</span></h4>
+          <h4 data-i18n="sr.citedBy" data-i18n-args={citedArgs}>{t('sr.citedBy', { n: citations.length })}</h4>
           {citeGroups.map(([anchor, items], gi) => (
             <details open={gi === 0}>
-              <summary>{anchor || 'General references'}<span class="n">{items.length}</span></summary>
+              <summary>{anchor ? anchor : <span data-i18n="sr.general">{t('sr.general')}</span>}<span class="n">{items.length}</span></summary>
               {items.map((c) => (
                 <div class="cite-card" style="cursor:default">
                   <div class="ex">{c.kind === 'ai' && <span class="ai">AI</span>} {c.excerpt}</div>
@@ -214,28 +218,28 @@ const hasBody = !Astro.slots.has('default');
 {hasBody && blocks.length ? (
   <>
   <div id="sr-pop" popover="auto">
-    <span class="dot" data-color="note" style="background:var(--amber)" title="Note"></span>
-    <span class="dot" data-color="question" style="background:var(--sage)" title="Question"></span>
-    <span class="dot" data-color="important" style="background:var(--terra)" title="Important"></span>
+    <span class="dot" data-color="note" style="background:var(--amber)" title={t('anno.note')} data-i18n-title="anno.note"></span>
+    <span class="dot" data-color="question" style="background:var(--sage)" title={t('anno.question')} data-i18n-title="anno.question"></span>
+    <span class="dot" data-color="important" style="background:var(--terra)" title={t('anno.important')} data-i18n-title="anno.important"></span>
     <span class="sep"></span>
-    <button data-act="comment">Comment</button>
+    <button data-act="comment" data-i18n="act.comment">{t('act.comment')}</button>
     <button data-act="ai">✦ AI</button>
-    <button data-act="copy">Copy</button>
+    <button data-act="copy" data-i18n="act.copy">{t('act.copy')}</button>
   </div>
 
   <div id="sr-assist" popover="auto">
     <div class="hd">
-      <span class="modes"><button data-m="explain" class="on">Explain</button><button data-m="summarize">Summarize</button><button data-m="define">Define</button></span>
-      <button class="x" title="Close">✕</button>
+      <span class="modes"><button data-m="explain" class="on" data-i18n="ai.explain">{t('ai.explain')}</button><button data-m="summarize" data-i18n="ai.summarize">{t('ai.summarize')}</button><button data-m="define" data-i18n="ai.define">{t('ai.define')}</button></span>
+      <button class="x" title={t('act.close')} data-i18n-title="act.close">✕</button>
     </div>
     <div class="src-q"></div>
     <div class="out"></div>
-    <div class="foot">✦ AI · results are not saved as notes</div>
+    <div class="foot" data-i18n="ai.foot">{t('ai.foot')}</div>
   </div>
 
   <dialog id="sr-cmd">
     <div class="cmd-box">
-      <input type="text" placeholder="Jump to chapter, note, filter, ask AI…" autocomplete="off" spellcheck="false" />
+      <input type="text" placeholder={t('sr.cmdPh')} data-i18n-ph="sr.cmdPh" autocomplete="off" spellcheck="false" />
       <div class="cmd-list"></div>
     </div>
   </dialog>

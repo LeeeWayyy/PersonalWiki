@@ -1,6 +1,7 @@
 ---
 import Base from '../layouts/Base.astro';
 import { loadVault, chaptersForSource, sourceReaderHref, sourceDisplay, enOf } from '../lib/vault.mjs';
+import { t } from '../lib/i18n.mjs';
 
 const { pages, sources, backlinks } = loadVault();
 const entities = pages.filter((p) => p.kind === 'entity');
@@ -12,7 +13,7 @@ const mmdd = (d: any) => (d ? String(d).slice(5) : '');
 const cards = content.map((p) => ({
   href: p.href, title: p.title, en: enOf(p), updated: mmdd(p.last_ingested),
   kind: p.kind, tags: p.tags || [],
-  kindLabel: p.kind === 'topic' ? 'Topic' : 'Entity',
+  kindKey: p.kind === 'topic' ? 'kind.topic' : 'kind.entity',
   kindColor: p.kind === 'topic' ? 'var(--amber)' : 'var(--terra)',
   search: (p.title + ' ' + enOf(p) + ' ' + (p.tags || []).join(' ')).toLowerCase(),
 }));
@@ -31,9 +32,10 @@ const src = sources[0];
 const hero = src ? sourceDisplay(src) : { title: '', author: '' };
 const heroChapters = src ? chaptersForSource(src.id).length : 0;
 const heroReadHref = src ? sourceReaderHref(src.id) : '#';
+const idxArgs = JSON.stringify({ n: content.length, m: tagPills.length });
 ---
-<Base title="Dashboard" active="home">
-  <span slot="topright">Reading over <span style="color:var(--text-2)">{sources.length} source{sources.length === 1 ? '' : 's'}</span></span>
+<Base title={t('nav.dashboard')} active="home">
+  <span slot="topright" data-i18n="dash.reading" data-i18n-args={JSON.stringify({ n: sources.length })}>{t('dash.reading', { n: sources.length })}</span>
 
   {src && (
     <section style="position:relative;overflow:hidden;border:1px solid var(--border);border-radius:18px;background:linear-gradient(115deg,#221a12 0%,#1a1610 55%,#161009 100%);padding:26px 30px;margin-bottom:26px">
@@ -47,12 +49,12 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
           <h1 style="font-family:var(--serifcjk);font-size:30px;font-weight:600;line-height:1.15;margin:0 0 7px">{hero.title}</h1>
           {hero.author && <div style="color:var(--text-2);font-family:var(--serifcjk);font-size:15px;margin-bottom:20px">{hero.author}</div>}
           <div style="display:flex;gap:26px;flex-wrap:wrap;align-items:center">
-            {[[entities.length, 'entities'], [topics.length, 'topics'], [heroChapters, 'chapters']].map(([n, l]) => (
-              <div><div style="font-family:var(--serif);font-size:24px;font-weight:600;line-height:1">{n}</div><div style="font-size:12px;color:var(--text-3);margin-top:3px">{l}</div></div>
+            {[[entities.length, 'stat.entities'], [topics.length, 'stat.topics'], [heroChapters, 'stat.chapters']].map(([n, k]) => (
+              <div><div style="font-family:var(--serif);font-size:24px;font-weight:600;line-height:1">{n}</div><div style="font-size:12px;color:var(--text-3);margin-top:3px" data-i18n={k}>{t(String(k))}</div></div>
             ))}
             <div style="margin-left:auto;display:flex;gap:9px">
-              <a href={src.href} style="background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);border-radius:9px;padding:9px 16px;font-size:13.5px">Open source</a>
-              <a href={heroReadHref} class="btn-accent" style="padding:9px 18px">Read →</a>
+              <a href={src.href} style="background:var(--bg-2);border:1px solid var(--border-strong);color:var(--text);border-radius:9px;padding:9px 16px;font-size:13.5px" data-i18n="dash.openSource">{t('dash.openSource')}</a>
+              <a href={heroReadHref} class="btn-accent" style="padding:9px 18px" data-i18n="act.read">{t('act.read')}</a>
             </div>
           </div>
         </div>
@@ -62,10 +64,10 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
 
   <!-- Quick-stats strip -->
   <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">
-    <a href="/entities" class="qtile"><div class="n" style="color:var(--terra)">{entities.length}</div><div class="l">Entities</div></a>
-    <a href="/topics" class="qtile"><div class="n" style="color:var(--amber)">{topics.length}</div><div class="l">Topics</div></a>
-    <a href="/sources" class="qtile"><div class="n" style="color:var(--sage)">{sources.length}</div><div class="l">Sources</div></a>
-    <a href="/reader/review" class="qtile"><div style="display:flex;align-items:baseline"><div class="n" style="color:var(--amber)"><span id="due-count">·</span></div><span class="u">↻</span></div><div class="l">待复习</div></a>
+    <a href="/entities" class="qtile"><div class="n" style="color:var(--terra)">{entities.length}</div><div class="l" data-i18n="kind.entities">{t('kind.entities')}</div></a>
+    <a href="/topics" class="qtile"><div class="n" style="color:var(--amber)">{topics.length}</div><div class="l" data-i18n="kind.topics">{t('kind.topics')}</div></a>
+    <a href="/sources" class="qtile"><div class="n" style="color:var(--sage)">{sources.length}</div><div class="l" data-i18n="kind.sources">{t('kind.sources')}</div></a>
+    <a href="/reader/review" class="qtile"><div style="display:flex;align-items:baseline"><div class="n" style="color:var(--amber)"><span id="due-count">·</span></div><span class="u">↻</span></div><div class="l" data-i18n="dash.due">{t('dash.due')}</div></a>
   </div>
 
   <!-- Ingest console -->
@@ -73,88 +75,88 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap">
       <span style="width:30px;height:30px;border-radius:8px;background:var(--bg-3);border:1px solid var(--border-strong);display:flex;align-items:center;justify-content:center;color:var(--terra);font-size:15px">⟳</span>
       <div>
-        <div style="font-family:var(--serif);font-size:17px;font-weight:600;line-height:1.1">Add to the vault</div>
-        <div style="font-size:12.5px;color:var(--text-3)">Run the Personal Wiki pipeline over a link or file</div>
+        <div style="font-family:var(--serif);font-size:17px;font-weight:600;line-height:1.1" data-i18n="ingest.title">{t('ingest.title')}</div>
+        <div style="font-size:12.5px;color:var(--text-3)" data-i18n="ingest.sub">{t('ingest.sub')}</div>
       </div>
       <div style="margin-left:auto;display:flex;align-items:center;gap:12px">
-        <span id="be-status" style="font-size:12px;font-family:var(--mono);color:var(--text-3)">○ backend offline</span>
-        <button id="be-toggle" class="btn-quiet">⚙ Backend</button>
+        <span id="be-status" style="font-size:12px;font-family:var(--mono);color:var(--text-3)" data-i18n="be.offline">{t('be.offline')}</span>
+        <button id="be-toggle" class="btn-quiet" data-i18n="be.btn">{t('be.btn')}</button>
       </div>
     </div>
 
     <div id="be-settings" style="display:none;gap:12px;flex-wrap:wrap;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:14px">
-      <label style="flex:1;min-width:200px;font-size:11.5px;color:var(--text-3)">Backend URL
+      <label style="flex:1;min-width:200px;font-size:11.5px;color:var(--text-3)"><span data-i18n="be.url">{t('be.url')}</span>
         <input id="be-url" class="field" style="width:100%;margin-top:4px;font-family:var(--mono);font-size:12.5px;padding:7px 10px" placeholder="http://localhost:8787" /></label>
-      <label style="flex:1;min-width:200px;font-size:11.5px;color:var(--text-3)">Auth token
+      <label style="flex:1;min-width:200px;font-size:11.5px;color:var(--text-3)"><span data-i18n="be.token">{t('be.token')}</span>
         <input id="be-token" type="password" class="field" style="width:100%;margin-top:4px;font-family:var(--mono);font-size:12.5px;padding:7px 10px" /></label>
-      <button id="be-save" class="btn-quiet" style="align-self:flex-end">Save</button>
+      <button id="be-save" class="btn-quiet" style="align-self:flex-end" data-i18n="act.save">{t('act.save')}</button>
     </div>
 
     <div style="display:flex;gap:12px;align-items:stretch;flex-wrap:wrap;margin-top:14px">
       <div class="seg" style="width:150px;flex:none">
-        <button id="seg-url" class="on">Link</button><button id="seg-file">File</button>
+        <button id="seg-url" class="on" data-i18n="ingest.link">{t('ingest.link')}</button><button id="seg-file" data-i18n="ingest.file">{t('ingest.file')}</button>
       </div>
-      <input id="ingest-url" class="field" style="flex:1;min-width:220px" placeholder="https://youtube.com/… or an article URL" />
+      <input id="ingest-url" class="field" style="flex:1;min-width:220px" placeholder={t('ingest.urlPh')} data-i18n-ph="ingest.urlPh" />
       <label id="ingest-file-row" style="display:none;flex:1;min-width:220px;align-items:center;gap:10px;padding:9px 13px;background:var(--bg-2);border:1px dashed var(--border-strong);border-radius:9px;color:var(--text-3);font-size:13.5px;cursor:pointer">
-        <span style="color:var(--terra)">＋</span> <span id="ingest-file-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Choose a file (PDF, md, epub/mobi, audio)</span><input id="ingest-file" type="file" style="display:none" />
+        <span style="color:var(--terra)">＋</span> <span id="ingest-file-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-i18n="ingest.choose">{t('ingest.choose')}</span><input id="ingest-file" type="file" style="display:none" />
       </label>
-      <button id="opt-toggle" class="btn-quiet" style="flex:none;padding:9px 13px">选项 <span id="opt-chevron">▾</span></button>
-      <button id="ingest-run" class="btn-accent" style="flex:none;padding:9px 18px">Run ingest ↗</button>
-      <button id="ingest-cancel" class="btn-quiet" style="display:none;flex:none;padding:9px 13px">Cancel</button>
+      <button id="opt-toggle" class="btn-quiet" style="flex:none;padding:9px 13px"><span data-i18n="ingest.opts">{t('ingest.opts')}</span> <span id="opt-chevron">▾</span></button>
+      <button id="ingest-run" class="btn-accent" style="flex:none;padding:9px 18px" data-i18n="ingest.run">{t('ingest.run')}</button>
+      <button id="ingest-cancel" class="btn-quiet" style="display:none;flex:none;padding:9px 13px" data-i18n="act.cancel">{t('act.cancel')}</button>
     </div>
 
     <div id="ingest-options" style="display:none;gap:12px;align-items:center;flex-wrap:wrap;margin-top:12px">
-      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)">Kind
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)"><span data-i18n="ingest.kind">{t('ingest.kind')}</span>
         <select id="ingest-kind" class="field sm"><option value="auto">auto</option><option value="wiki">wiki</option><option value="video">video</option><option value="lang">lang (profile)</option></select></label>
-      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)">Exact section heading
-        <input id="ingest-section-heading" list="ingest-section-list" class="field sm" style="width:180px;font-family:var(--mono)" placeholder="第二章 生命力" />
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-3)"><span data-i18n="ingest.section">{t('ingest.section')}</span>
+        <input id="ingest-section-heading" list="ingest-section-list" class="field sm" style="width:180px;font-family:var(--mono)" placeholder={t('ingest.sectionPh')} data-i18n-ph="ingest.sectionPh" />
         <datalist id="ingest-section-list"></datalist></label>
-      <button id="ingest-sections-load" class="btn-quiet" style="flex:none;padding:6px 12px;font-size:12px">List chapters ▾</button>
+      <button id="ingest-sections-load" class="btn-quiet" style="flex:none;padding:6px 12px;font-size:12px" data-i18n="ingest.listCh">{t('ingest.listCh')}</button>
     </div>
     <pre id="ingest-log" style="display:none;margin:14px 0 0;background:#100d08;border:1px solid var(--border);border-radius:9px;padding:12px 14px;max-height:180px;overflow:auto;font-family:var(--mono);font-size:12px;color:var(--text-2);line-height:1.55;white-space:pre-wrap"></pre>
-    <p style="margin:10px 0 0;font-size:11.5px;color:var(--text-3)">The pipeline commits to the local-only vault and can spend LLM/ASR budget · costly media steps confirm first.</p>
+    <p style="margin:10px 0 0;font-size:11.5px;color:var(--text-3)" data-i18n="ingest.note">{t('ingest.note')}</p>
   </section>
 
   <!-- Knowledge index -->
   <div style="display:grid;grid-template-columns:minmax(0,1fr) 268px;gap:30px;align-items:start">
     <div>
       <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:4px">
-        <h2 style="font-family:var(--serif);font-size:22px;font-weight:600;margin:0">Knowledge index</h2>
+        <h2 style="font-family:var(--serif);font-size:22px;font-weight:600;margin:0" data-i18n="idx.title">{t('idx.title')}</h2>
         <span id="idx-filterlabel" style="color:var(--text-3);font-size:13px"></span>
       </div>
-      <p style="color:var(--text-3);font-size:13.5px;margin:0 0 16px">{content.length} pages across {tagPills.length} tags · filter to narrow the field</p>
+      <p style="color:var(--text-3);font-size:13.5px;margin:0 0 16px" data-i18n="idx.sub" data-i18n-args={idxArgs}>{t('idx.sub', { n: content.length, m: tagPills.length })}</p>
 
       <div style="display:flex;align-items:center;gap:10px;background:var(--bg-1);border:1px solid var(--border);border-radius:11px;padding:9px 14px;margin-bottom:12px">
         <span style="color:var(--text-3)">⌕</span>
-        <input id="idx-search" placeholder="Filter entities & topics…" style="flex:1;background:transparent;border:none;outline:none;color:var(--text);font-size:14px;font-family:var(--sans)" />
-        <button id="idx-clear" style="display:none;background:var(--bg-3);border:1px solid var(--border);color:var(--text-3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--sans)">清除 ✕</button>
+        <input id="idx-search" placeholder={t('idx.ph')} data-i18n-ph="idx.ph" style="flex:1;background:transparent;border:none;outline:none;color:var(--text);font-size:14px;font-family:var(--sans)" />
+        <button id="idx-clear" style="display:none;background:var(--bg-3);border:1px solid var(--border);color:var(--text-3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--sans)" data-i18n="act.clear">{t('act.clear')}</button>
         <div class="viewtog">
-          <button id="view-cards" class="on" title="卡片视图">▦</button>
-          <button id="view-list" title="列表视图">☰</button>
+          <button id="view-cards" class="on" title={t('view.cards')} data-i18n-title="view.cards">▦</button>
+          <button id="view-list" title={t('view.list')} data-i18n-title="view.list">☰</button>
         </div>
       </div>
 
       <div id="idx-pills" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px">
-        <button class="pill active" data-group="all">All <span class="n">{content.length}</span></button>
+        <button class="pill active" data-group="all"><span data-i18n="word.all">{t('word.all')}</span> <span class="n">{content.length}</span></button>
         {tagPills.map(([t, n]) => <button class="pill" data-group={t}>{t} <span class="n">{n}</span></button>)}
       </div>
 
       <div id="idx-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:12px">
         {cards.map((c) => (
           <a href={c.href} class="idx-card" data-tags={c.tags.join(' ')} data-t={c.title} data-search={c.search}>
-            <span class="kt" style={`color:${c.kindColor}`}>{c.kindLabel}</span>
+            <span class="kt" style={`color:${c.kindColor}`} data-i18n={c.kindKey}>{t(c.kindKey)}</span>
             <span class="idx-date">{c.updated}</span>
             <span class="idx-main"><span class="idx-title">{c.title}</span><span class="idx-en">{c.en}</span></span>
             <span class="idx-tags">{c.tags.slice(0, 3).map((t: string) => <span>{t}</span>)}</span>
           </a>
         ))}
       </div>
-      <div id="idx-empty" style="display:none;text-align:center;color:var(--text-3);padding:44px 0;font-size:14px">No pages match. <button id="idx-reset" style="background:none;border:none;color:var(--terra);cursor:pointer;font-size:14px;text-decoration:underline">Reset</button></div>
+      <div id="idx-empty" style="display:none;text-align:center;color:var(--text-3);padding:44px 0;font-size:14px"><span data-i18n="idx.empty">{t('idx.empty')}</span> <button id="idx-reset" style="background:none;border:none;color:var(--terra);cursor:pointer;font-size:14px;text-decoration:underline" data-i18n="act.reset">{t('act.reset')}</button></div>
     </div>
 
     <aside style="display:flex;flex-direction:column;gap:22px;position:sticky;top:74px">
       <div class="card">
-        <h4>Topics · 主题</h4>
+        <h4 data-i18n="rail.topics">{t('rail.topics')}</h4>
         <div style="display:flex;flex-direction:column">
           {topicsRail.map((t) => (
             <a href={t.href} class="rail-link"><span class="serifcjk" style="font-family:var(--serifcjk);font-size:14.5px">{t.title}</span><span class="k">{t.refs}</span></a>
@@ -162,7 +164,7 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
         </div>
       </div>
       <div class="card">
-        <h4>Recently ingested</h4>
+        <h4 data-i18n="rail.recent">{t('rail.recent')}</h4>
         <div style="display:flex;flex-direction:column;gap:9px">
           {recent.map((r) => (
             <a href={r.href} style="display:flex;align-items:center;gap:9px;color:var(--text-2);font-size:13.5px"><span style="width:6px;height:6px;border-radius:50%;background:var(--terra);flex:none"></span>{r.title}</a>
@@ -171,13 +173,13 @@ const heroReadHref = src ? sourceReaderHref(src.id) : '#';
       </div>
       {conflicts.length ? (
         <div class="card" style="border-color:color-mix(in srgb,var(--danger) 30%,var(--border))">
-          <h4 style="color:var(--danger)">Conflicts to resolve</h4>
+          <h4 style="color:var(--danger)" data-i18n="rail.conflicts">{t('rail.conflicts')}</h4>
           <div style="display:flex;flex-direction:column">{conflicts.map((p) => <a href={p.href} class="rail-link"><span class="serifcjk">{p.title}</span></a>)}</div>
         </div>
       ) : (
         <div style="background:color-mix(in srgb,var(--sage) 9%,var(--bg-1));border:1px solid color-mix(in srgb,var(--sage) 24%,var(--border));border-radius:14px;padding:15px 17px">
-          <div style="display:flex;align-items:center;gap:8px"><span style="color:var(--sage);font-size:15px">✓</span><span style="font-size:13.5px;font-weight:500">No open conflicts</span></div>
-          <p style="margin:6px 0 0;font-size:12.5px;color:var(--text-3);line-height:1.5">Every synthesis reconciles cleanly across its sources.</p>
+          <div style="display:flex;align-items:center;gap:8px"><span style="color:var(--sage);font-size:15px">✓</span><span style="font-size:13.5px;font-weight:500" data-i18n="rail.noConflicts">{t('rail.noConflicts')}</span></div>
+          <p style="margin:6px 0 0;font-size:12.5px;color:var(--text-3);line-height:1.5" data-i18n="rail.noConflictsSub">{t('rail.noConflictsSub')}</p>
         </div>
       )}
     </aside>

@@ -2,8 +2,9 @@
 import '../styles/global.css';
 import { readFileSync } from 'node:fs';
 import { loadVault, enOf } from '../lib/vault.mjs';
+import { t } from '../lib/i18n.mjs';
 
-interface Crumb { label: string; href?: string; }
+interface Crumb { label?: string; href?: string; i18n?: string; }
 interface Props { title: string; crumbs?: Crumb[]; active?: string; rail?: boolean; }
 const { title, crumbs = [], active = '', rail = false } = Astro.props;
 
@@ -14,14 +15,15 @@ const maps = pages.filter((p) => p.kind === 'map');
 const mapHref = maps[0]?.href;
 
 // Command-search index (entities + topics + sources), serialized for the ⌘K palette.
+// meta is either a string (shown as-is) or {k, n} translated client-side.
 const kindByHref = new Map(pages.map((p) => [p.href, p.kind]));
 const fwdEnt = (href: string) => {
   const s = forward.get(href); if (!s) return 0;
   let n = 0; for (const h of s) if (kindByHref.get(h) === 'entity') n++; return n;
 };
 const cmdItems = [
-  ...entities.map((p) => ({ kind: 'entity', title: p.title, sub: enOf(p), href: p.href, meta: `${backlinks.get(p.href)?.size || 0} 链接`, glyph: (p.tags || []).some((t: string) => /person|人物|人名/i.test(t)) ? '☺' : '◈' })),
-  ...topics.map((p) => ({ kind: 'topic', title: p.title, sub: enOf(p), href: p.href, meta: `${fwdEnt(p.href)} 实体`, glyph: '❋' })),
+  ...entities.map((p) => ({ kind: 'entity', title: p.title, sub: enOf(p), href: p.href, meta: { k: 'meta.links', n: backlinks.get(p.href)?.size || 0 }, glyph: (p.tags || []).some((t: string) => /person|人物|人名/i.test(t)) ? '☺' : '◈' })),
+  ...topics.map((p) => ({ kind: 'topic', title: p.title, sub: enOf(p), href: p.href, meta: { k: 'meta.entities', n: fwdEnt(p.href) }, glyph: '❋' })),
   ...sources.map((s) => ({ kind: 'source', title: s.title, sub: s.origin_ref || s.origin_type, href: s.href, meta: s.origin_type, glyph: '▤' })),
 ].map((it) => ({ ...it, hay: (it.title + ' ' + it.sub).toLowerCase() }));
 const cmdJson = JSON.stringify(cmdItems).replace(/</g, '\\u003c');
@@ -33,13 +35,13 @@ const syncWhen = sync?.synced_at ? sync.synced_at.replace('T', ' ').replace('Z',
 const navActive = active === 'entities' || active === 'topics' ? 'entities-topics' : active;
 const cls = (k: string) => (navActive === k ? 'active' : '');
 const browse = [
-  { icon: '◈', label: 'Entities & Topics', href: '/entities', count: entities.length + topics.length, key: 'entities-topics' },
-  { icon: '▤', label: 'Sources', href: '/sources', count: sources.length, key: 'sources' },
-  ...(mapHref ? [{ icon: '⬡', label: 'Argument map', href: mapHref, count: '', key: 'map' }] : []),
+  { icon: '◈', i18n: 'nav.entitiesTopics', href: '/entities', count: entities.length + topics.length, key: 'entities-topics' },
+  { icon: '▤', i18n: 'kind.sources', href: '/sources', count: sources.length, key: 'sources' },
+  ...(mapHref ? [{ icon: '⬡', i18n: 'nav.map', href: mapHref, count: '', key: 'map' }] : []),
 ];
 const study = [
-  { icon: '文', label: 'Language reader', href: '/reader', key: 'reader' },
-  { icon: '↻', label: 'Review (SRS)', href: '/reader/review', key: 'review' },
+  { icon: '文', i18n: 'nav.reader', href: '/reader', key: 'reader' },
+  { icon: '↻', i18n: 'nav.review', href: '/reader/review', key: 'review' },
 ];
 const csp = [
   "default-src 'self'",
@@ -59,7 +61,7 @@ const csp = [
 ].join('; ');
 ---
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -75,36 +77,41 @@ const csp = [
         <div class="brand-logo"></div>
         <div style="min-width:0">
           <div class="brand-title"><a href="/">Personal Wiki</a></div>
-          <div class="brand-sub">Local wiki folder</div>
+          <div class="brand-sub" data-i18n="brand.sub">{t('brand.sub')}</div>
         </div>
       </div>
 
-      <button class="side-search" id="open-search"><span>⌕</span><span>Search the vault</span><kbd>⌘K</kbd></button>
+      <button class="side-search" id="open-search"><span>⌕</span><span data-i18n="side.search">{t('side.search')}</span><kbd>⌘K</kbd></button>
 
       <nav class="nav">
-        <a href="/" class={cls('home')}><span class="ico">◆</span>Dashboard</a>
+        <a href="/" class={cls('home')}><span class="ico">◆</span><span data-i18n="nav.dashboard">{t('nav.dashboard')}</span></a>
 
-        <div class="nav-label">Browse</div>
+        <div class="nav-label" data-i18n="nav.browse">{t('nav.browse')}</div>
         {browse.map((n) => (
-          <a href={n.href} class={cls(n.key)}><span class="ico">{n.icon}</span><span>{n.label}</span>{n.count !== '' && <span class="count">{n.count}</span>}</a>
+          <a href={n.href} class={cls(n.key)}><span class="ico">{n.icon}</span><span data-i18n={n.i18n}>{t(n.i18n)}</span>{n.count !== '' && <span class="count">{n.count}</span>}</a>
         ))}
 
-        <div class="nav-label">Study</div>
+        <div class="nav-label" data-i18n="nav.study">{t('nav.study')}</div>
         {study.map((n) => (
-          <a href={n.href} class={cls(n.key)}><span class="ico">{n.icon}</span><span>{n.label}</span></a>
+          <a href={n.href} class={cls(n.key)}><span class="ico">{n.icon}</span><span data-i18n={n.i18n}>{t(n.i18n)}</span></a>
         ))}
       </nav>
 
+      <div class="seg" style="margin-top:12px;flex:none" aria-label="Language">
+        <button type="button" data-set-lang="en">EN</button>
+        <button type="button" data-set-lang="zh">中文</button>
+      </div>
+
       {sync && (
-        <div class="side-foot"><span class="dot"></span>synced · {sync.commit}<br /><span style="opacity:.7">{syncWhen}</span></div>
+        <div class="side-foot"><span class="dot"></span><span data-i18n="side.synced">{t('side.synced')}</span> · {sync.commit}<br /><span style="opacity:.7">{syncWhen}</span></div>
       )}
     </aside>
 
     <div class="main">
       <div class="topbar">
         <div class="breadcrumb">
-          <a href="/">Home</a>
-          {crumbs.map((c) => (<><span class="sep">/</span>{c.href ? <a href={c.href}>{c.label}</a> : <span class="cur">{c.label}</span>}</>))}
+          <a href="/" data-i18n="crumb.home">{t('crumb.home')}</a>
+          {crumbs.map((c) => (<><span class="sep">/</span>{c.href ? <a href={c.href} data-i18n={c.i18n}>{c.i18n ? t(c.i18n) : c.label}</a> : <span class="cur" data-i18n={c.i18n}>{c.i18n ? t(c.i18n) : c.label}</span>}</>))}
         </div>
         <div class="topbar-right"><slot name="topright" /></div>
       </div>
@@ -123,21 +130,21 @@ const csp = [
     <div class="cmdk-panel" role="dialog" aria-modal="true" aria-label="Search the vault">
       <div class="cmdk-input">
         <span class="i">⌕</span>
-        <input id="cmdk-q" placeholder="搜索实体、主题、来源…" autocomplete="off" spellcheck="false" aria-label="Search" />
+        <input id="cmdk-q" placeholder={t('cmdk.ph')} data-i18n-ph="cmdk.ph" autocomplete="off" spellcheck="false" aria-label="Search" />
         <span class="esc">ESC</span>
       </div>
       <div class="cmdk-scopes" id="cmdk-scopes">
-        <button data-scope="all" class="on">全部 <span class="c"></span></button>
-        <button data-scope="entity">实体 <span class="c"></span></button>
-        <button data-scope="topic">主题 <span class="c"></span></button>
-        <button data-scope="source">来源 <span class="c"></span></button>
+        <button data-scope="all" class="on"><span data-i18n="word.all">{t('word.all')}</span> <span class="c"></span></button>
+        <button data-scope="entity"><span data-i18n="kind.entity">{t('kind.entity')}</span> <span class="c"></span></button>
+        <button data-scope="topic"><span data-i18n="kind.topic">{t('kind.topic')}</span> <span class="c"></span></button>
+        <button data-scope="source"><span data-i18n="kind.source">{t('kind.source')}</span> <span class="c"></span></button>
         <span class="cmdk-count" id="cmdk-count"></span>
       </div>
       <div class="cmdk-results" id="cmdk-results"></div>
       <div class="cmdk-foot">
-        <span><kbd>↑</kbd> <kbd>↓</kbd> 导航</span>
-        <span><kbd>↵</kbd> 打开</span>
-        <span><kbd>tab</kbd> 切换范围</span>
+        <span><kbd>↑</kbd> <kbd>↓</kbd> <span data-i18n="cmdk.nav">{t('cmdk.nav')}</span></span>
+        <span><kbd>↵</kbd> <span data-i18n="cmdk.open">{t('cmdk.open')}</span></span>
+        <span><kbd>tab</kbd> <span data-i18n="cmdk.scope">{t('cmdk.scope')}</span></span>
         <span class="brand">Personal Wiki</span>
       </div>
     </div>
@@ -145,6 +152,11 @@ const csp = [
   <script type="application/json" id="cmdk-data" set:html={cmdJson}></script>
   <script>
     import { esc, hl } from '../scripts/list-filter.js';
+    import { t } from '../lib/i18n.mjs';
+    import { applyI18n, mountLangToggle } from '../scripts/i18n-dom.js';
+
+    applyI18n();
+    mountLangToggle();
 
     const data = JSON.parse(document.getElementById('cmdk-data')?.textContent || '[]');
     const overlay = document.getElementById('cmdk') as HTMLElement | null;
@@ -153,9 +165,9 @@ const csp = [
     const countEl = document.getElementById('cmdk-count');
     const scopesEl = document.getElementById('cmdk-scopes');
     const kindStyle: Record<string, { c: string; bd: string; bg: string; label: string }> = {
-      entity: { c: 'var(--terra)', bd: 'color-mix(in srgb,var(--terra) 40%,transparent)', bg: 'color-mix(in srgb,var(--terra) 14%,var(--bg-3))', label: '实体' },
-      topic: { c: 'var(--amber)', bd: 'color-mix(in srgb,var(--amber) 40%,transparent)', bg: 'color-mix(in srgb,var(--amber) 14%,var(--bg-3))', label: '主题' },
-      source: { c: 'var(--sage)', bd: 'color-mix(in srgb,var(--sage) 40%,transparent)', bg: 'color-mix(in srgb,var(--sage) 14%,var(--bg-3))', label: '来源' },
+      entity: { c: 'var(--terra)', bd: 'color-mix(in srgb,var(--terra) 40%,transparent)', bg: 'color-mix(in srgb,var(--terra) 14%,var(--bg-3))', label: t('kind.entity') },
+      topic: { c: 'var(--amber)', bd: 'color-mix(in srgb,var(--amber) 40%,transparent)', bg: 'color-mix(in srgb,var(--amber) 14%,var(--bg-3))', label: t('kind.topic') },
+      source: { c: 'var(--sage)', bd: 'color-mix(in srgb,var(--sage) 40%,transparent)', bg: 'color-mix(in srgb,var(--sage) 14%,var(--bg-3))', label: t('kind.source') },
     };
     let scope = 'all', sel = 0, cur: any[] = [];
 
@@ -172,12 +184,13 @@ const csp = [
         b.classList.toggle('on', sc === scope);
         const c = b.querySelector('.c'); if (c) c.textContent = String(counts[sc]);
       });
-      countEl.textContent = cur.length + ' 结果';
-      if (!cur.length) { resultsEl.innerHTML = '<div class="cmdk-empty">没有匹配 · 试试其它关键词</div>'; return; }
+      countEl.textContent = t('count.results', { n: cur.length });
+      if (!cur.length) { resultsEl.innerHTML = `<div class="cmdk-empty">${esc(t('cmdk.empty'))}</div>`; return; }
       resultsEl.innerHTML = cur.map((d, i) => {
         const k = kindStyle[d.kind];
         const sub = d.sub ? `<span class="s">${hl(d.sub, q)}</span>` : '';
-        return `<a class="cmdk-row${i === sel ? ' sel' : ''}" href="${d.href}" data-i="${i}"><span class="g" style="color:${k.c};background:${k.bg}">${d.glyph}</span><span style="min-width:0"><span class="t">${hl(d.title, q)}</span>${sub}</span><span class="rt"><span class="m">${esc(d.meta || '')}</span><span class="k" style="color:${k.c};border-color:${k.bd}">${k.label}</span></span></a>`;
+        const meta = typeof d.meta === 'object' && d.meta ? t(d.meta.k, { n: d.meta.n }) : (d.meta || '');
+        return `<a class="cmdk-row${i === sel ? ' sel' : ''}" href="${d.href}" data-i="${i}"><span class="g" style="color:${k.c};background:${k.bg}">${d.glyph}</span><span style="min-width:0"><span class="t">${hl(d.title, q)}</span>${sub}</span><span class="rt"><span class="m">${esc(meta)}</span><span class="k" style="color:${k.c};border-color:${k.bd}">${k.label}</span></span></a>`;
       }).join('');
     }
     function scrollSel() { resultsEl?.querySelector('.cmdk-row.sel')?.scrollIntoView({ block: 'nearest' }); }

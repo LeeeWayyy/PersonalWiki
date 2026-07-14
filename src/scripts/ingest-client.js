@@ -1,9 +1,11 @@
 import { headersFor, streamJob } from './backend-client.js';
+import { t } from '../lib/i18n.mjs';
 
+// t() is safe at module load: the language is fixed per page load (toggle reloads).
 const STATUS = {
-  online: ['● backend online', 'var(--sage)'],
-  error: ['○ backend error', 'var(--text-3)'],
-  offline: ['○ backend offline', 'var(--text-3)'],
+  online: [t('be.online'), 'var(--sage)'],
+  error: [t('be.error'), 'var(--text-3)'],
+  offline: [t('be.offline'), 'var(--text-3)'],
 };
 
 function el(id) {
@@ -97,14 +99,14 @@ export function mount(config) {
   function sourcePayload(H, opts) {
     if (mode === 'file') {
       const file = el(config.fileInputId).files[0];
-      if (!file) return { error: 'Choose a file first.' };
+      if (!file) return { error: t('ingest.err.file') };
       const fd = new FormData();
       fd.append('file', file);
       if (opts) fd.append('options', JSON.stringify(opts));
       return { headers: H, body: fd };
     }
     const target = el(config.urlInputId).value.trim();
-    if (!target) return { error: 'Enter a URL first.' };
+    if (!target) return { error: t('ingest.err.url') };
     return {
       headers: { ...H, 'Content-Type': 'application/json' },
       body: JSON.stringify(opts ? { url: target, options: opts } : { url: target }),
@@ -132,10 +134,10 @@ export function mount(config) {
         sectionList.replaceChildren(
           ...sections.map((s) => Object.assign(document.createElement('option'), { value: s })),
         );
-        append(sections.length + ' section heading(s) loaded — pick one in the section field');
+        append(t('ingest.sectionsLoaded', { n: sections.length }));
         sectionHeadingInput.focus();
       } catch (e) {
-        append('sections error: ' + e.message);
+        append(t('ingest.sectionsErr') + e.message);
       } finally {
         syncSectionSupport();
       }
@@ -166,9 +168,9 @@ export function mount(config) {
         headers: activeHeaders,
       });
       if (!r.ok) throw new Error(await r.text());
-      append('cancel requested');
+      append(t('ingest.cancelReq'));
     } catch (e) {
-      append('cancel error: ' + e.message);
+      append(t('ingest.cancelErr') + e.message);
       cancelBtn.disabled = false;
     }
   };
@@ -187,7 +189,7 @@ export function mount(config) {
       const res = await fetch(url + '/ingest', { method: 'POST', ...payload });
       if (!res.ok) throw new Error(await res.text());
       const { job_id: jobId } = await res.json();
-      append('job ' + jobId + ' started');
+      append(t('ingest.jobStarted', { id: jobId }));
       activeJob = jobId;
       activeHeaders = H;
       cancelBtn.style.display = '';
@@ -201,7 +203,7 @@ export function mount(config) {
         cancelBtn.disabled = false;
       }
     } catch (e) {
-      append('error: ' + e.message);
+      append(t('ingest.err') + e.message);
     }
   };
 

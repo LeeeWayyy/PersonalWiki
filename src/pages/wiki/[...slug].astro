@@ -2,6 +2,7 @@
 import { getCollection, render } from 'astro:content';
 import Base from '../../layouts/Base.astro';
 import { loadVault, pageNeighbors, cleanTitle as clean } from '../../lib/vault.mjs';
+import { t } from '../../lib/i18n.mjs';
 
 export async function getStaticPaths() {
   const entries = await getCollection('wiki');
@@ -18,8 +19,8 @@ const kind = page?.kind ?? 'other';
 const backHrefs = page ? [...(backlinks.get(page.href) ?? [])] : [];
 const backPages = backHrefs.map((h) => pages.find((p) => p.href === h)).filter(Boolean);
 const pageSources = (page?.sources ?? []).map((id) => sourceMap.get(id)).filter(Boolean);
-const kindLabels: Record<string, string> = { entity: 'Entity', topic: 'Topic', index: 'Tag index', map: 'Argument map', taxonomy: 'Taxonomy', home: 'Overview' };
-const kindLabel = kindLabels[kind] ?? 'Page';
+const kindKeys: Record<string, string> = { entity: 'kind.entity', topic: 'kind.topic', index: 'kind.index', map: 'kind.map', taxonomy: 'kind.taxonomy', home: 'kind.home' };
+const kindKey = kindKeys[kind] ?? 'kind.page';
 const activeKey = kind === 'entity' ? 'entities' : kind === 'topic' ? 'topics' : kind === 'map' ? 'map' : '';
 const isArticle = kind === 'entity' || kind === 'topic';
 const needsMermaid = kind === 'map';
@@ -34,19 +35,20 @@ const gNodes = neigh.map((nb, i) => {
 });
 const colorOf = (d: string) => d === 'out' ? '#d3835a' : d === 'in' ? '#8faa7e' : '#e0ab5f';
 const isBio = (t: string) => t.startsWith('biology/');
+const distilled = pageSources.map((s: any) => clean(s.title)).join(', ');
 ---
-<Base title={title} crumbs={[{ label: kindLabel }, { label: title }]} active={activeKey} rail={true}>
-  <button slot="topright" class="btn-quiet">✎ Edit</button>
+<Base title={title} crumbs={[{ i18n: kindKey }, { label: title }]} active={activeKey} rail={true}>
+  <button slot="topright" class="btn-quiet" data-i18n="act.edit">{t('act.edit')}</button>
 
   <article>
     <div class="title-row">
       <div style="display:flex;align-items:center;gap:9px;margin-bottom:12px">
-        <span class={`kind-tag ${kind === 'topic' ? 'topic' : ''}`}>{kindLabel}</span>
-        {page?.last_ingested && <span class="metaline">updated {page.last_ingested}</span>}
+        <span class={`kind-tag ${kind === 'topic' ? 'topic' : ''}`} data-i18n={kindKey}>{t(kindKey)}</span>
+        {page?.last_ingested && <span class="metaline" data-i18n="wiki.updated" data-i18n-args={JSON.stringify({ d: page.last_ingested })}>{t('wiki.updated', { d: page.last_ingested })}</span>}
       </div>
       <h1 style="font-family:var(--serifcjk);font-size:42px;font-weight:600;line-height:1.08;margin:0 0 10px;letter-spacing:-.01em">{title}</h1>
       {page?.aliases?.length ? (
-        <div style="color:var(--text-3);font-size:14px;margin-bottom:14px">aliases · <span style="color:var(--text-2)">{page.aliases.join(' · ')}</span></div>
+        <div style="color:var(--text-3);font-size:14px;margin-bottom:14px"><span data-i18n="wiki.aliases">{t('wiki.aliases')}</span> · <span style="color:var(--text-2)">{page.aliases.join(' · ')}</span></div>
       ) : null}
       {page?.tags?.length ? (
         <div style="display:flex;flex-wrap:wrap;gap:7px">
@@ -56,13 +58,13 @@ const isBio = (t: string) => t.startsWith('biology/');
     </div>
 
     {isArticle && (
-      <div class="humannote"><span class="plus">＋</span><span>Add a personal note — your own zone, kept separate from the synthesis.</span></div>
+      <div class="humannote"><span class="plus">＋</span><span data-i18n="wiki.humannote">{t('wiki.humannote')}</span></div>
     )}
     {isArticle && pageSources.length ? (
       <div class="syn-banner">
         <span class="mark">✦</span>
-        <span class="lbl">LLM Synthesis</span>
-        <span class="src">· distilled from {pageSources.map((s: any) => clean(s.title)).join(', ')}</span>
+        <span class="lbl" data-i18n="wiki.synth">{t('wiki.synth')}</span>
+        <span class="src" data-i18n="wiki.distilled" data-i18n-args={JSON.stringify({ s: distilled })}>{t('wiki.distilled', { s: distilled })}</span>
       </div>
     ) : null}
 
@@ -72,7 +74,7 @@ const isBio = (t: string) => t.startsWith('biology/');
   <Fragment slot="rail">
     {pageSources.length ? (
       <div>
-        <h4>Source</h4>
+        <h4 data-i18n="rail.source">{t('rail.source')}</h4>
         {pageSources.map((s: any) => (
           <a href={s.href} style="display:flex;gap:11px;align-items:center;background:var(--bg-1);border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:8px">
             <div style="width:34px;height:48px;border-radius:3px 5px 5px 3px;background:linear-gradient(155deg,#3a2c1f,#241a12);border:1px solid var(--border-strong);flex:none"></div>
@@ -87,7 +89,7 @@ const isBio = (t: string) => t.startsWith('biology/');
 
     {backPages.length ? (
       <div>
-        <h4>Linked from <span style="color:var(--text-2)">({backPages.length})</span></h4>
+        <h4 data-i18n="rail.linkedFrom" data-i18n-args={JSON.stringify({ n: backPages.length })}>{t('rail.linkedFrom', { n: backPages.length })}</h4>
         <div style="display:flex;flex-direction:column">
           {backPages.slice(0, 40).map((p: any) => (
             <a href={p.href} class="rail-link"><span class="serifcjk">{p.title}</span><span class="k">{p.kind}</span></a>
@@ -98,7 +100,7 @@ const isBio = (t: string) => t.startsWith('biology/');
 
     {neigh.length ? (
       <div>
-        <h4>Graph</h4>
+        <h4 data-i18n="rail.graph">{t('rail.graph')}</h4>
         <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:12px;padding:8px">
           <svg viewBox="0 0 232 216" style="width:100%;height:auto" role="img" aria-label={`Link graph for ${title}`}>
             {gNodes.map((n) => <line x1={GCX} y1={GCY} x2={n.x} y2={n.y} stroke="#3d352a" stroke-width="1" />)}
@@ -113,7 +115,7 @@ const isBio = (t: string) => t.startsWith('biology/');
             <text x={GCX} y={GCY + 22} text-anchor="middle" font-size="9" fill="#efe7da" font-family="Noto Serif SC, serif">{[...title].slice(0, 8).join('')}</text>
           </svg>
           <div style="display:flex;gap:12px;margin-top:6px;flex-wrap:wrap;font-size:11px;font-family:var(--mono);padding:0 4px 2px">
-            <span style="color:var(--terra)">● out</span><span style="color:var(--sage)">● in</span><span style="color:var(--amber)">● both</span>
+            <span style="color:var(--terra)" data-i18n="graph.out">{t('graph.out')}</span><span style="color:var(--sage)" data-i18n="graph.in">{t('graph.in')}</span><span style="color:var(--amber)" data-i18n="graph.both">{t('graph.both')}</span>
           </div>
         </div>
       </div>

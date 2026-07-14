@@ -3,6 +3,7 @@
 // dataset; the segmented control flips between them client-side (no navigation).
 import Base from '../layouts/Base.astro';
 import { loadVault, enOf, taxonomyTags } from '../lib/vault.mjs';
+import { t } from '../lib/i18n.mjs';
 
 interface Props { initialTab?: 'entity' | 'topic'; }
 const { initialTab = 'entity' } = Astro.props;
@@ -32,6 +33,9 @@ function synthOf(body: string) {
   return '';
 }
 
+// '未分类' stays the canonical group id in data-group; only its display text translates.
+const groupI18n = (name: string) => (name === '未分类' ? 'group.uncat' : undefined);
+
 function build(list: any[], tab: 'entity' | 'topic') {
   const items = list.map((p) => {
     const group = (p.tags || []).find((t: string) => domains.has(t)) || '未分类';
@@ -43,11 +47,12 @@ function build(list: any[], tab: 'entity' | 'topic') {
       ? { g: '☺', c: 'var(--amber)', bg: 'color-mix(in srgb,var(--amber) 14%,var(--bg-3))' }
       : { g: '◈', c: 'var(--terra)', bg: 'color-mix(in srgb,var(--terra) 14%,var(--bg-3))' };
     const nsrc = (p.sources || []).length;
-    const meta = tab === 'entity'
-      ? `↳ ${backlinks.get(p.href)?.size || 0} 链接 · ▤ ${nsrc} 来源`
-      : `❋ ${fwdEntities(p.href)} 实体 · ▤ ${nsrc} 来源`;
+    const metaKey = tab === 'entity' ? 'et.meta.entity' : 'et.meta.topic';
+    const metaArgs = tab === 'entity'
+      ? { a: backlinks.get(p.href)?.size || 0, b: nsrc }
+      : { a: fwdEntities(p.href), b: nsrc };
     return {
-      href: p.href, title: p.title, en, group, glyph, meta, snip: synthOf(p.body),
+      href: p.href, title: p.title, en, group, glyph, metaKey, metaArgs, snip: synthOf(p.body),
       search: (p.title + ' ' + en + ' ' + (p.tags || []).join(' ')).toLowerCase(),
     };
   });
@@ -62,43 +67,44 @@ function build(list: any[], tab: 'entity' | 'topic') {
 
 const data = { entity: build(entities, 'entity'), topic: build(topics, 'topic') };
 const meta = {
-  entity: { title: 'Entities', kicker: `Browse · ${entities.length} pages`, ph: `在 ${entities.length} 个实体中快速筛选…` },
-  topic: { title: 'Topics', kicker: `Synthesis · ${topics.length} pages`, ph: `在 ${topics.length} 个主题中快速筛选…` },
+  entity: { title: t('kind.entities'), kicker: t('et.kicker.entity', { n: entities.length }), ph: t('et.ph.entity', { n: entities.length }) },
+  topic: { title: t('kind.topics'), kicker: t('et.kicker.topic', { n: topics.length }), ph: t('et.ph.topic', { n: topics.length }) },
 };
 const tabs: Array<'entity' | 'topic'> = ['entity', 'topic'];
 const init = meta[initialTab];
+const initTotal = data[initialTab].total;
 ---
-<Base title={init.title} active="entities" crumbs={[{ label: init.title }]}>
-  <div id="et" data-tab={initialTab} data-ent-title={meta.entity.title} data-ent-kicker={meta.entity.kicker} data-ent-ph={meta.entity.ph} data-top-title={meta.topic.title} data-top-kicker={meta.topic.kicker} data-top-ph={meta.topic.ph}>
+<Base title={init.title} active="entities" crumbs={[{ i18n: initialTab === 'entity' ? 'kind.entities' : 'kind.topics' }]}>
+  <div id="et" data-tab={initialTab} data-ent-n={entities.length} data-top-n={topics.length}>
     <div class="et-head">
       <div>
-        <div class="et-kicker" id="et-kicker">{init.kicker}</div>
-        <h1 id="et-title">{init.title}</h1>
+        <div class="et-kicker" id="et-kicker" data-i18n={`et.kicker.${initialTab}`} data-i18n-args={JSON.stringify({ n: initialTab === 'entity' ? entities.length : topics.length })}>{init.kicker}</div>
+        <h1 id="et-title" data-i18n={initialTab === 'entity' ? 'kind.entities' : 'kind.topics'}>{init.title}</h1>
       </div>
       <div class="et-seg">
-        <button data-seg="entity" class={initialTab === 'entity' ? 'on' : ''}>Entities</button>
-        <button data-seg="topic" class={initialTab === 'topic' ? 'on' : ''}>Topics</button>
+        <button data-seg="entity" class={initialTab === 'entity' ? 'on' : ''} data-i18n="kind.entities">{t('kind.entities')}</button>
+        <button data-seg="topic" class={initialTab === 'topic' ? 'on' : ''} data-i18n="kind.topics">{t('kind.topics')}</button>
       </div>
     </div>
 
     <div class="et-filter">
       <span style="color:var(--terra);font-size:15px;flex:none">⌕</span>
-      <input id="et-search" placeholder={init.ph} autocomplete="off" spellcheck="false" />
-      <button id="et-clear" style="display:none;background:var(--bg-3);border:1px solid var(--border);color:var(--text-3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--sans);flex:none">清除 ✕</button>
-      <span class="et-count" id="et-count">{init.title === 'Entities' ? data.entity.total : data.topic.total} 结果</span>
+      <input id="et-search" placeholder={init.ph} data-i18n-ph={`et.ph.${initialTab}`} data-i18n-args={JSON.stringify({ n: initialTab === 'entity' ? entities.length : topics.length })} autocomplete="off" spellcheck="false" />
+      <button id="et-clear" style="display:none;background:var(--bg-3);border:1px solid var(--border);color:var(--text-3);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;font-family:var(--sans);flex:none" data-i18n="act.clear">{t('act.clear')}</button>
+      <span class="et-count" id="et-count" data-i18n="count.results" data-i18n-args={JSON.stringify({ n: initTotal })}>{t('count.results', { n: initTotal })}</span>
       <div class="viewtog">
-        <button id="et-view-cards" class="on" title="卡片视图">▦</button>
-        <button id="et-view-list" title="列表视图">☰</button>
+        <button id="et-view-cards" class="on" title={t('view.cards')} data-i18n-title="view.cards">▦</button>
+        <button id="et-view-list" title={t('view.list')} data-i18n-title="view.list">☰</button>
       </div>
     </div>
 
     <div class="et-grid et-view" id="et-view">
       {tabs.map((tab) => (
         <nav class="et-rail" data-tab={tab} style={tab === initialTab ? '' : 'display:none'}>
-          <h4>索引</h4>
-          <button class="et-gbtn on" data-group="all">全部 <span class="c">{data[tab].total}</span></button>
+          <h4 data-i18n="word.index">{t('word.index')}</h4>
+          <button class="et-gbtn on" data-group="all"><span data-i18n="word.all">{t('word.all')}</span> <span class="c">{data[tab].total}</span></button>
           {data[tab].groups.map((g) => (
-            <button class="et-gbtn" data-group={g.name}>{g.name} <span class="c">{g.count}</span></button>
+            <button class="et-gbtn" data-group={g.name}><span data-i18n={groupI18n(g.name)}>{g.name}</span> <span class="c">{g.count}</span></button>
           ))}
         </nav>
       ))}
@@ -108,15 +114,15 @@ const init = meta[initialTab];
           <div class="et-tab" data-tab={tab} style={tab === initialTab ? '' : 'display:none'}>
             {data[tab].sections.map((sec) => (
               <section class="et-section" data-tab={tab} data-group={sec.name}>
-                <div class="et-shead"><span class="nm">{sec.name}</span><span class="c">{sec.items.length}</span><span class="rule"></span></div>
+                <div class="et-shead"><span class="nm" data-i18n={groupI18n(sec.name)}>{sec.name}</span><span class="c">{sec.items.length}</span><span class="rule"></span></div>
                 <div class="et-cards">
                   {sec.items.map((it) => (
                     <a href={it.href} class="et-card" data-tab={tab} data-group={it.group} data-t={it.title} data-search={it.search}>
                       <span class="et-glyph" style={`color:${it.glyph.c};background:${it.glyph.bg}`}>{it.glyph.g}</span>
                       <span class="et-main"><span class="t">{it.title}</span><span class="al">{it.en}</span></span>
-                      <span class="et-tag">{it.group}</span>
+                      <span class="et-tag" data-i18n={groupI18n(it.group)}>{it.group}</span>
                       <span class="et-snip">{it.snip}</span>
-                      <span class="et-meta">{it.meta}</span>
+                      <span class="et-meta" data-i18n={it.metaKey} data-i18n-args={JSON.stringify(it.metaArgs)}>{t(it.metaKey, it.metaArgs)}</span>
                     </a>
                   ))}
                 </div>
@@ -131,6 +137,7 @@ const init = meta[initialTab];
 
   <script>
     import { mountListFilter } from '../scripts/list-filter.js';
+    import { t } from '../lib/i18n.mjs';
 
     const root = document.getElementById('et')!;
     const search = document.getElementById('et-search') as HTMLInputElement;
@@ -138,6 +145,7 @@ const init = meta[initialTab];
     const titleEl = document.getElementById('et-title')!;
     const rails = [...root.querySelectorAll<HTMLElement>('.et-rail')];
     const tabBlocks = [...root.querySelectorAll<HTMLElement>('.et-tab')];
+    const countOf = (tab: string) => Number(root.dataset[tab === 'entity' ? 'entN' : 'topN'] || 0);
 
     const lf = mountListFilter({
       root, search,
@@ -148,9 +156,9 @@ const init = meta[initialTab];
       viewCards: document.getElementById('et-view-cards')!,
       viewList: document.getElementById('et-view-list')!,
       tab: root.dataset.tab || 'entity',
-      emptyText: (q: string, raw: string) => (q ? `没有匹配 “${raw}” 的条目 · 试试其它关键词` : '暂无条目'),
+      emptyText: (q: string, raw: string) => (q ? t('list.empty.q', { q: raw }) : t('list.empty')),
       onApplied: (state: { tab: string }) => {
-        tabBlocks.forEach((t) => (t.style.display = t.dataset.tab === state.tab ? '' : 'none'));
+        tabBlocks.forEach((tb) => (tb.style.display = tb.dataset.tab === state.tab ? '' : 'none'));
         rails.forEach((r) => (r.style.display = r.dataset.tab === state.tab ? '' : 'none'));
       },
     });
@@ -159,9 +167,9 @@ const init = meta[initialTab];
       const tab = (lf.state.tab = b.dataset.seg!);
       lf.state.group = 'all'; lf.state.query = ''; search.value = '';
       root.querySelectorAll('.et-seg button').forEach((x) => x.classList.toggle('on', x === b));
-      kickerEl.textContent = root.dataset[tab === 'entity' ? 'entKicker' : 'topKicker'] || '';
-      titleEl.textContent = root.dataset[tab === 'entity' ? 'entTitle' : 'topTitle'] || '';
-      search.placeholder = root.dataset[tab === 'entity' ? 'entPh' : 'topPh'] || '';
+      kickerEl.textContent = t(`et.kicker.${tab}`, { n: countOf(tab) });
+      titleEl.textContent = t(tab === 'entity' ? 'kind.entities' : 'kind.topics');
+      search.placeholder = t(`et.ph.${tab}`, { n: countOf(tab) });
       lf.syncClear(); lf.syncGroup(); lf.apply();
     }));
   </script>

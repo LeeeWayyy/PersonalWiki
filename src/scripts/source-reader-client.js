@@ -1,5 +1,6 @@
 import { installSourceReaderAnchors } from './source-reader-anchors-dom.js';
 import { esc } from './list-filter.js';
+import { t } from '../lib/i18n.mjs';
 
 const ANNO_COLORS = new Set(['note', 'question', 'important']);
 const DEFAULT_PREFS = { fontSize: 18, lineHeight: 1.9, width: '42rem', theme: 'night', font: 'serif', mode: 'scroll', focus: false };
@@ -125,13 +126,13 @@ function bootSourceReader(options = {}) {
   }
 
   function annotationStatus(fuzzy = 0, orphanCount = 0) {
-    return `${annotations.length} note(s)`
-      + (fuzzy ? ` · ${fuzzy} re-anchored` : '')
-      + (orphanCount ? ` · ${orphanCount} orphaned` : '')
-      + (otherChapterNoteCount ? ` · ${otherChapterNoteCount} in other chapters` : '');
+    return t('sr.notesCount', { n: annotations.length })
+      + (fuzzy ? t('sr.reanchored', { n: fuzzy }) : '')
+      + (orphanCount ? t('sr.orphanedN', { n: orphanCount }) : '')
+      + (otherChapterNoteCount ? t('sr.otherCh', { n: otherChapterNoteCount }) : '');
   }
 
-  function showOfflineStatus(message = 'Study backend offline — start it to load/save notes.') {
+  function showOfflineStatus(message = t('sr.offlineNotes')) {
     statusEl.textContent = message;
   }
 
@@ -322,7 +323,7 @@ function bootSourceReader(options = {}) {
     try {
       const r = await fetch(`${BACKEND}/annotations?source_id=${encodeURIComponent(sourceId)}`, { headers: H });
       if (r.status === 503) {
-        statusEl.textContent = 'Set PW_AUTH_TOKEN on the backend to use annotations.';
+        statusEl.textContent = t('sr.tokenNeeded');
         return;
       }
       if (!r.ok) throw new Error();
@@ -461,7 +462,7 @@ function bootSourceReader(options = {}) {
         const rng = charRange(hit.el, hit.start, hit.end);
         if (rng) {
           const cls = `anno ${safeColor(a.color)}${isFuzzy ? ' fuzzy' : ''}`;
-          const title = isFuzzy ? 'Re-anchored — the source text changed slightly since this note' : '';
+          const title = isFuzzy ? t('sr.fuzzyT') : '';
           try {
             if (!wrapTextSegments(rng, cls, a.id, title)) throw new Error();
             placed = true;
@@ -485,19 +486,19 @@ function bootSourceReader(options = {}) {
     const show = annotations.filter((a) => filter === 'all' || safeColor(a.color) === filter);
     list.innerHTML = show.map((a) => {
       let q = a.target?.selector?.quote || '';
-      if (!q && (a.target?.block_id || '').startsWith('i-')) q = a.target?.selector?.region ? '🖼 figure region' : '🖼 figure';
+      if (!q && (a.target?.block_id || '').startsWith('i-')) q = a.target?.selector?.region ? t('sr.figRegion') : t('sr.fig');
       const promo = (a.links || []).find((l) => l && l.type === 'human-zone');
       const href = promo ? safeWikiHref(promo.href) : '';
-      const promoted = href ? `<a class="promoted" href="${attr(href)}" title="In ${attr(promo.wiki_rel)}">⇪ ${esc((promo.wiki_rel || '').split('/').pop())}</a>` : '';
+      const promoted = href ? `<a class="promoted" href="${attr(href)}" title="${attr(t('sr.inOther', { rel: promo.wiki_rel }))}">⇪ ${esc((promo.wiki_rel || '').split('/').pop())}</a>` : '';
       const aid = attr(a.id);
       return `<div class="anno-card ${safeColor(a.color)}" data-aid="${aid}">
         <div class="q">“${esc(q.slice(0, 60))}”</div>
         <div class="b" contenteditable="true" data-aid="${aid}">${esc(a.body || '')}</div>
-        <div class="meta"><span>${esc((a.updated || '').slice(5, 10))}</span>${promoted}<button class="promote-btn" data-promote="${aid}" title="Promote into a wiki page's human-zone">⇪</button><button data-del="${aid}" title="Delete">✕</button></div>
+        <div class="meta"><span>${esc((a.updated || '').slice(5, 10))}</span>${promoted}<button class="promote-btn" data-promote="${aid}" title="${attr(t('sr.promoteT'))}">⇪</button><button data-del="${aid}" title="${attr(t('act.delete'))}">✕</button></div>
       </div>`;
-    }).join('') || `<p class="small muted">${chapterScoped ? 'Select text in this chapter' : 'Select text in the source'} to highlight or comment.</p>`;
+    }).join('') || `<p class="small muted">${esc(t(chapterScoped ? 'sr.selectHintCh' : 'sr.selectHint'))}</p>`;
     orphans.innerHTML = orphan.length
-      ? `<div style="margin-top:12px"><h4 style="color:var(--amber)">Orphaned (${orphan.length})</h4>${orphan.map((a) => `<div class="anno-card ${safeColor(a.color)}"><div class="q">“${esc((a.target?.selector?.quote || '').slice(0, 50))}”</div><div class="b">${esc(a.body || '')}</div><div class="meta"><span>text moved</span><button data-del="${attr(a.id)}">✕</button></div></div>`).join('')}</div>`
+      ? `<div style="margin-top:12px"><h4 style="color:var(--amber)">${esc(t('sr.orphaned', { n: orphan.length }))}</h4>${orphan.map((a) => `<div class="anno-card ${safeColor(a.color)}"><div class="q">“${esc((a.target?.selector?.quote || '').slice(0, 50))}”</div><div class="b">${esc(a.body || '')}</div><div class="meta"><span>${esc(t('sr.textMoved'))}</span><button data-del="${attr(a.id)}">✕</button></div></div>`).join('')}</div>`
       : '';
   }
 
@@ -560,7 +561,7 @@ function bootSourceReader(options = {}) {
         if (b) b.focus();
       }
     } catch (e) {
-      alert('Could not save (backend offline or no token?).\n' + e.message);
+      alert(t('sr.saveFail') + '\n' + e.message);
     }
   }
 
@@ -679,8 +680,8 @@ function bootSourceReader(options = {}) {
     } catch {
       a.body = body;
       pendingAnnotationBodies.set(aid, body);
-      b.title = 'Not saved — backend offline. Blur again to retry.';
-      showOfflineStatus('Study backend offline — note edit kept locally; start it to save notes.');
+      b.title = t('sr.editKept');
+      showOfflineStatus(t('sr.editOffline'));
     }
   }, true);
 
@@ -696,9 +697,9 @@ function bootSourceReader(options = {}) {
     const menu = document.createElement('div');
     menu.id = 'sr-pmenu';
     menu.popover = 'auto';
-    menu.innerHTML = '<div class="ph">Promote to human-zone</div>'
-      + (promoteTargets || []).map((t) => `<button data-rel="${attr(t.rel)}">${esc(t.title || t.rel)}</button>`).join('')
-      + '<button data-rel="__custom__" class="custom">Other page…</button>';
+    menu.innerHTML = `<div class="ph">${esc(t('sr.promoteHd'))}</div>`
+      + (promoteTargets || []).map((tg) => `<button data-rel="${attr(tg.rel)}">${esc(tg.title || tg.rel)}</button>`).join('')
+      + `<button data-rel="__custom__" class="custom">${esc(t('sr.otherPage'))}</button>`;
     menu.style.visibility = 'hidden';
     menu.addEventListener('toggle', () => {
       if (!isPopoverOpen(menu)) menu.remove();
@@ -714,7 +715,7 @@ function bootSourceReader(options = {}) {
       if (!b) return;
       let rel = b.dataset.rel;
       if (rel === '__custom__') {
-        rel = prompt('Wiki page path (e.g. entities/ATP):', '');
+        rel = prompt(t('sr.promptRel'), '');
         if (!rel) {
           closePromoteMenu();
           return;
@@ -733,10 +734,10 @@ function bootSourceReader(options = {}) {
       const res = await r.json();
       const a = annotations.find((x) => x.id === aid);
       if (a && res.annotation) a.links = res.annotation.links;
-      statusEl.textContent = res.committed ? `promoted → ${rel} ✓` : `promoted → ${rel} (already up to date)`;
+      statusEl.textContent = t(res.committed ? 'sr.promoted' : 'sr.promotedUp', { rel });
       render();
     } catch (e) {
-      alert('Promote failed (backend offline or bad page path?).\n' + e.message);
+      alert(t('sr.promoteFail') + '\n' + e.message);
     }
   }
 
@@ -758,7 +759,7 @@ function bootSourceReader(options = {}) {
         const r = await fetch(`${BACKEND}/annotations/${aid}`, { method: 'DELETE', headers: H });
         if (!r.ok) throw new Error();
       } catch {
-        showOfflineStatus('Study backend offline — delete not saved; note kept locally.');
+        showOfflineStatus(t('sr.delOffline'));
         return;
       }
       annotations = annotations.filter((x) => x.id !== aid);
@@ -858,13 +859,13 @@ function bootSourceReader(options = {}) {
   async function runAssist(mode) {
     assist.querySelectorAll('.modes button').forEach((b) => b.classList.toggle('on', b.dataset.m === mode));
     const out = assist.querySelector('.out');
-    out.textContent = '…thinking';
+    out.textContent = t('ai.thinking');
     try {
       const r = await fetch(`${BACKEND}/assist`, { method: 'POST', headers: H, body: JSON.stringify({ text: assistText, mode }) });
       const j = await r.json();
-      out.textContent = j.result || '(no result)';
+      out.textContent = j.result || t('ai.noResult');
     } catch {
-      out.textContent = 'AI assist unavailable — is the backend running?';
+      out.textContent = t('ai.unavailable');
     }
   }
 
@@ -887,19 +888,19 @@ function bootSourceReader(options = {}) {
 
   function buildCommands() {
     const c = [];
-    c.push({ label: 'Reader · resume position', run: () => restoreProgress(true) });
-    c.push({ label: 'Reader · previous page', run: () => pageStep(-1) });
-    c.push({ label: 'Reader · next page', run: () => pageStep(1) });
-    c.push({ label: prefs.focus ? 'Reader · exit focus mode' : 'Reader · focus mode', run: () => setFocusMode(!prefs.focus) });
-    c.push({ label: 'Reader · preferences', run: () => setPrefsOpen(true) });
-    if (chapterCommands?.length) chapterCommands.forEach((chapter) => c.push({ label: 'Chapter · ' + chapter.title, run: () => { location.href = chapter.href; } }));
-    else [...doc.querySelectorAll('.sec-h')].forEach((s) => c.push({ label: 'Chapter · ' + s.textContent, run: () => locate(s.textContent) }));
-    [['all', 'All notes'], ['note', 'Notes'], ['question', 'Questions'], ['important', 'Important']].forEach(([f, l]) => c.push({ label: 'Filter · ' + l, run: () => setFilter(f) }));
-    c.push({ label: 'Toggle · expand all citation groups', run: () => document.querySelectorAll('#sr-cited details').forEach((d) => d.open = true) });
-    if (lastSel && lastSel.quote) c.push({ label: '✦ Ask AI about the selection', run: () => openAssist(lastSel.quote) });
+    c.push({ label: t('cmd.resume'), run: () => restoreProgress(true) });
+    c.push({ label: t('cmd.prev'), run: () => pageStep(-1) });
+    c.push({ label: t('cmd.next'), run: () => pageStep(1) });
+    c.push({ label: t(prefs.focus ? 'cmd.focusOff' : 'cmd.focusOn'), run: () => setFocusMode(!prefs.focus) });
+    c.push({ label: t('cmd.prefs'), run: () => setPrefsOpen(true) });
+    if (chapterCommands?.length) chapterCommands.forEach((chapter) => c.push({ label: t('cmd.chapter', { t: chapter.title }), run: () => { location.href = chapter.href; } }));
+    else [...doc.querySelectorAll('.sec-h')].forEach((s) => c.push({ label: t('cmd.chapter', { t: s.textContent }), run: () => locate(s.textContent) }));
+    [['all', t('cmd.fAll')], ['note', t('sr.fNotes')], ['question', t('sr.fQuestions')], ['important', t('sr.fImportant')]].forEach(([f, l]) => c.push({ label: t('cmd.filter', { t: l }), run: () => setFilter(f) }));
+    c.push({ label: t('cmd.expand'), run: () => document.querySelectorAll('#sr-cited details').forEach((d) => d.open = true) });
+    if (lastSel && lastSel.quote) c.push({ label: t('cmd.ask'), run: () => openAssist(lastSel.quote) });
     annotations.forEach((a) => {
-      const q = a.target?.selector?.quote || ((a.target?.block_id || '').startsWith('i-') ? '🖼 figure' : '');
-      c.push({ label: 'Note · ' + (q || '(note)').slice(0, 44), run: () => focusNote(a.id) });
+      const q = a.target?.selector?.quote || ((a.target?.block_id || '').startsWith('i-') ? t('sr.fig') : '');
+      c.push({ label: t('cmd.note', { t: (q || '·').slice(0, 44) }), run: () => focusNote(a.id) });
     });
     return c;
   }
@@ -908,7 +909,7 @@ function bootSourceReader(options = {}) {
     const needle = q.toLowerCase();
     cmdItems = needle ? cmdCatalog.filter((c) => c.label.toLowerCase().includes(needle)) : cmdCatalog;
     cmdSel = 0;
-    cmdList.innerHTML = cmdItems.slice(0, 60).map((c, i) => `<div class="cmd-item${i === 0 ? ' sel' : ''}" data-i="${i}">${esc(c.label)}</div>`).join('') || '<div class="cmd-empty">No matches</div>';
+    cmdList.innerHTML = cmdItems.slice(0, 60).map((c, i) => `<div class="cmd-item${i === 0 ? ' sel' : ''}" data-i="${i}">${esc(c.label)}</div>`).join('') || `<div class="cmd-empty">${esc(t('cmd.noMatch'))}</div>`;
   }
 
   function openCmd() {

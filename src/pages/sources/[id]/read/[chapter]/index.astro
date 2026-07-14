@@ -62,11 +62,12 @@ const readerProps = {
   currentChapterId: currentChapter.id,
   chapterTitle: currentChapter.title,
   nav: { prevHref, nextHref, index: chapterIndex + 1, count: chapters.length },
-  detail: `${source.origin_type} · chapter ${chapterIndex + 1}/${chapters.length} · ${blocks.length}/${fullBlockCount} blocks`,
+  detailKey: 'sr.detail.ch',
+  detailArgs: { type: source.origin_type, i: chapterIndex + 1, n: chapters.length, b: blocks.length, fb: fullBlockCount },
   configExtras: { chapterCommands, chapterScoped: true },
 };
 ---
-<Base title={clean(source.title)} active="sources" crumbs={[{ label: 'Sources', href: '/sources' }, { label: clean(source.title), href: `/sources/${source.id}` }, { label: 'Read' }]}>
+<Base title={clean(source.title)} active="sources" crumbs={[{ i18n: 'kind.sources', href: '/sources' }, { label: clean(source.title), href: `/sources/${source.id}` }, { i18n: 'crumb.read' }]}>
   {prevHref && <link slot="head" rel="prefetch" href={prevHref} />}
   {nextHref && <link slot="head" rel="prefetch" href={nextHref} />}
   <SourceReader {...readerProps} />

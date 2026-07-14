@@ -1,6 +1,7 @@
 ---
 import Base from '../../layouts/Base.astro';
 import { loadLang, readingStats } from '../../lib/vault.mjs';
+import { t } from '../../lib/i18n.mjs';
 import type { LangEntry } from '../../lib/vault.mjs';
 
 export async function getStaticPaths() {
@@ -9,14 +10,14 @@ export async function getStaticPaths() {
 const { lang } = Astro.props as { lang: LangEntry };
 const reading = lang.reading;
 const stats = readingStats(reading);
-const metricLine = [
-  'immersion reader',
-  Number.isFinite(stats.word_count) ? `${stats.word_count} words` : '',
-  Number.isFinite(stats.grammar_count) ? `${stats.grammar_count} grammar points` : '',
-].filter(Boolean).join(' · ');
+const metrics = [
+  { k: 'reader.immersion', n: null },
+  Number.isFinite(stats.word_count) ? { k: 'n.words', n: stats.word_count } : null,
+  Number.isFinite(stats.grammar_count) ? { k: 'n.grammar', n: stats.grammar_count } : null,
+].filter(Boolean) as Array<{ k: string; n: number | null }>;
 const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).replace(/</g, '\\u003c') : '';
 ---
-<Base title={lang.title} active="reader" crumbs={[{ label: 'Reader', href: '/reader' }, { label: lang.title }]}>
+<Base title={lang.title} active="reader" crumbs={[{ i18n: 'crumb.reader', href: '/reader' }, { label: lang.title }]}>
   <style is:global>
     #rd .jp { font-family: var(--jp); line-height: 2.05; color: #ece2d1; }
     #rd ruby rt { font-size: .5em; color: var(--text-3); font-family: var(--sans); font-weight: 400; transition: opacity .15s; }
@@ -35,7 +36,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
     <div style="margin-bottom:22px">
       <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
         <span style="font-size:10.5px;font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--amber);border:1px solid color-mix(in srgb,var(--amber) 42%,transparent);border-radius:5px;padding:2px 7px">JA · 日本語</span>
-        <span style="font-size:12px;color:var(--text-3);font-family:var(--mono)">{metricLine}</span>
+        <span style="font-size:12px;color:var(--text-3);font-family:var(--mono)">{metrics.map((m, i) => (<>{i ? ' · ' : ''}<span data-i18n={m.k} data-i18n-args={m.n == null ? undefined : JSON.stringify({ n: m.n })}>{m.n == null ? t(m.k) : t(m.k, { n: m.n })}</span></>))}</span>
       </div>
       <h1 style="font-family:var(--jp);font-size:32px;font-weight:600;line-height:1.2;margin:0">{lang.title}</h1>
     </div>
@@ -57,8 +58,8 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             <button id="t-bigger" style="flex:none;font-family:var(--serif);font-size:17px">A+</button>
           </div>
           <div style="margin-left:auto;display:flex;align-items:center;gap:9px">
-            <span style="font-size:12px;font-family:var(--mono);color:var(--amber)"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:color-mix(in srgb,var(--amber) 60%,transparent);border:1px solid var(--amber);margin-right:5px;vertical-align:middle"></span><span id="c-new">0</span> new</span>
-            <span style="font-size:12px;font-family:var(--mono);color:var(--sage)">★ <span id="c-saved">0</span> saved</span>
+            <span style="font-size:12px;font-family:var(--mono);color:var(--amber)"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:color-mix(in srgb,var(--amber) 60%,transparent);border:1px solid var(--amber);margin-right:5px;vertical-align:middle"></span><span id="c-new">0</span> <span data-i18n="reader.new">{t('reader.new')}</span></span>
+            <span style="font-size:12px;font-family:var(--mono);color:var(--sage)">★ <span id="c-saved">0</span> <span data-i18n="reader.saved">{t('reader.saved')}</span></span>
           </div>
         </div>
 
@@ -77,6 +78,10 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
         <script is:inline id="reading-data" type="application/json" set:html={readingPayload}></script>
         <script is:inline>
           const { reading, sourceId } = JSON.parse(document.getElementById('reading-data').textContent);
+          // ponytail: is:inline script can't import lib/i18n.mjs — the JP immersion labels
+          // (ふりがな/表示/文法…) are part of the reader's design; only these few
+          // status messages are language-switched, via a local EN flag.
+          const EN = (localStorage.getItem('pw:lang') || 'zh') === 'en';
           const BACKEND = localStorage.getItem('backendUrl') || 'http://localhost:8787';
           const TOKEN = localStorage.getItem('backendToken') || '';
           const H = TOKEN ? { 'X-Auth-Token': TOKEN } : {};
@@ -172,8 +177,10 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             if (!en.textContent) {
               en.textContent = '…';
               try { const r = await fetch(`${BACKEND}/translate`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ text: en.dataset.jp, lang: 'ja' }) });
-                en.textContent = r.ok ? (await r.json()).translation : '(translation unavailable)'; }
-              catch { en.textContent = `(study backend offline — start it: cd backend && bash run.sh · expected at ${BACKEND})`; }
+                en.textContent = r.ok ? (await r.json()).translation : (EN ? '(translation unavailable)' : '（翻译不可用）'); }
+              catch { en.textContent = EN
+                ? `(study backend offline — start it: cd backend && bash run.sh · expected at ${BACKEND})`
+                : `（学习后端离线 — 启动方式：cd backend && bash run.sh · 预期地址 ${BACKEND}）`; }
             }
           }
 
@@ -197,7 +204,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
                 if (status) await fetch(`${BACKEND}/vocab/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status }) });
                 saved.add(d.w); document.getElementById('c-saved').textContent = saved.size;
                 sheet.style.transform = 'translateY(115%)'; render();
-              } catch { alert('Could not reach study backend (' + BACKEND + ').'); }
+              } catch { alert(EN ? 'Could not reach study backend (' + BACKEND + ').' : '无法连接学习后端（' + BACKEND + '）。'); }
             };
             document.getElementById('sv').onclick = () => doSave(null);
             document.getElementById('sv-known').onclick = () => doSave('known');
@@ -218,7 +225,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
         </script>
       </>
     ) : (
-      <div class="card"><p class="muted">Structured reading data is unavailable for this source. Re-ingest it with the language profile.</p></div>
+      <div class="card"><p class="muted" data-i18n="reader.noData">{t('reader.noData')}</p></div>
     )}
   </div>
 </Base>

@@ -1,5 +1,6 @@
 // Shared client helpers: HTML escape + query highlight, and the filter/view
 // logic behind the .et-* list pages (Entities & Topics, Sources).
+import { t } from '../lib/i18n.mjs';
 
 export const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
@@ -24,7 +25,6 @@ export function mountListFilter(cfg) {
   const groupButtonSelector = cfg.groupButtonSelector || '.et-gbtn';
   const titleSelector = cfg.titleSelector || '.t';
   const groupActiveClass = cfg.groupActiveClass || 'on';
-  const resultLabel = cfg.resultLabel || '结果';
   const cards = [...root.querySelectorAll(cardSelector)];
   const sections = [...root.querySelectorAll(sectionSelector)];
   const rails = [...root.querySelectorAll(railSelector)];
@@ -61,7 +61,7 @@ export function mountListFilter(cfg) {
       const g = b.dataset.group, c = b.querySelector('.c, .n');
       if (c) c.textContent = String(g === 'all' ? queryMatched : (gcount[g] || 0));
     });
-    if (countEl) countEl.textContent = shown + ' ' + resultLabel;
+    if (countEl) countEl.textContent = t('count.results', { n: shown });
     emptyEl.style.display = shown ? 'none' : '';
     if (emptyText) emptyEl.textContent = emptyText(state.query, search.value.trim());
     if (onApplied) onApplied(state);

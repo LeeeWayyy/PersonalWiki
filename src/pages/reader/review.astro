@@ -1,22 +1,23 @@
 ---
 import Base from '../../layouts/Base.astro';
+import { t } from '../../lib/i18n.mjs';
 ---
-<Base title="Review" active="review" crumbs={[{ label: 'Reader', href: '/reader' }, { label: 'Review' }]}>
+<Base title={t('rv.title')} active="review" crumbs={[{ i18n: 'crumb.reader', href: '/reader' }, { i18n: 'rv.title' }]}>
   <div slot="topright" class="et-seg" id="rv-mode">
-    <button data-mode="focus">◎ 专注</button>
-    <button data-mode="info" class="on">☰ 信息</button>
+    <button data-mode="focus" data-i18n="rv.focus">{t('rv.focus')}</button>
+    <button data-mode="info" class="on" data-i18n="rv.info">{t('rv.info')}</button>
   </div>
 
   <div class="rv-grid" id="rv-grid">
     <!-- left rail: today + this-week forecast -->
     <div class="rv-rail" id="rv-left">
       <div class="rv-panel">
-        <h4>今天</h4>
+        <h4 data-i18n="rv.today">{t('rv.today')}</h4>
         <div id="rv-today"></div>
-        <div class="rv-today-foot"><span class="k">合计到期</span><span class="v" id="rv-duecount">·</span></div>
+        <div class="rv-today-foot"><span class="k" data-i18n="rv.dueTotal">{t('rv.dueTotal')}</span><span class="v" id="rv-duecount">·</span></div>
       </div>
       <div class="rv-panel">
-        <h4>本周预测</h4>
+        <h4 data-i18n="rv.week">{t('rv.week')}</h4>
         <div class="rv-fc" id="rv-fc"></div>
         <div class="rv-fc-labels" id="rv-fc-labels"></div>
       </div>
@@ -25,61 +26,63 @@ import Base from '../../layouts/Base.astro';
     <!-- center: card -->
     <div class="rv-center" id="rv-center">
       <div class="rv-stat-strip" id="rv-strip">
-        <div class="rv-kicker">Study · FSRS 间隔重复</div>
-        <h1>Review</h1>
+        <div class="rv-kicker" data-i18n="rv.kicker">{t('rv.kicker')}</div>
+        <h1 data-i18n="rv.title">{t('rv.title')}</h1>
       </div>
       <div class="rv-progress">
         <div class="track"><span class="fill" id="rv-fill" style="width:0%"></span></div>
-        <span class="lb" id="rv-prog">本次 0 / 0</span>
+        <span class="lb" id="rv-prog" data-i18n="rv.progress" data-i18n-args={JSON.stringify({ a: 0, b: 0 })}>{t('rv.progress', { a: 0, b: 0 })}</span>
       </div>
-      <div id="rv-cardwrap" tabindex="0" style="outline:none"><p class="muted" style="text-align:center;padding:40px 0">Loading…</p></div>
+      <div id="rv-cardwrap" tabindex="0" style="outline:none"><p class="muted" style="text-align:center;padding:40px 0" data-i18n="rv.loading">{t('rv.loading')}</p></div>
     </div>
 
     <!-- right rail: editable card + FSRS schedule -->
     <div class="rv-rail" id="rv-right">
       <div class="rv-panel rv-edit">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-          <h4 style="margin:0">卡片信息</h4>
-          <span id="rv-saved" style="font-family:var(--mono);font-size:9.5px;color:var(--sage);opacity:0">· 自动保存</span>
+          <h4 style="margin:0" data-i18n="rv.cardInfo">{t('rv.cardInfo')}</h4>
+          <span id="rv-saved" style="font-family:var(--mono);font-size:9.5px;color:var(--sage);opacity:0" data-i18n="rv.autosave">{t('rv.autosave')}</span>
         </div>
         <div id="rv-editfields"></div>
       </div>
     </div>
   </div>
 
-  <script is:inline>
+  <script>
+    import { t } from '../../lib/i18n.mjs';
+
     const BACKEND = localStorage.getItem('backendUrl') || 'http://localhost:8787';
     const TOKEN = localStorage.getItem('backendToken') || '';
     const H = { 'Content-Type': 'application/json', ...(TOKEN ? { 'X-Auth-Token': TOKEN } : {}) };
-    const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    const $ = (id) => document.getElementById(id);
+    const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const $ = (id: string) => document.getElementById(id)!;
 
-    let queue = [], cur = null, revealed = false, reviewed = 0;
+    let queue: any[] = [], cur: any = null, revealed = false, reviewed = 0;
     let offlineDetail = '', grading = false;
     const wrap = $('rv-cardwrap');
 
     // grade defs: color + generic FSRS-ish interval hint (real interval comes back from the API)
     const GRADES = [
-      { g: 1, label: '重来', iv: '<1分', col: 'var(--danger)' },
-      { g: 2, label: '困难', iv: '1天', col: 'var(--amber)' },
-      { g: 3, label: '良好', iv: '3天', col: 'var(--sage)' },
-      { g: 4, label: '简单', iv: '7天', col: 'var(--terra)' },
+      { g: 1, label: t('rv.g1'), iv: t('rv.iv1'), col: 'var(--danger)' },
+      { g: 2, label: t('rv.g2'), iv: t('rv.iv2'), col: 'var(--amber)' },
+      { g: 3, label: t('rv.g3'), iv: t('rv.iv3'), col: 'var(--sage)' },
+      { g: 4, label: t('rv.g4'), iv: t('rv.iv4'), col: 'var(--terra)' },
     ];
-    const stateLabel = (c) => ({ new: '新词', learning: '学习中', known: '已掌握' }[c.status] || (c.state === 0 ? '新词' : '复习中'));
-    function dueLabel(due) {
-      if (!due) return '今天';
-      const d = Math.round((new Date(due + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
-      return d <= 0 ? '今天' : d + ' 天后';
+    const stateLabel = (c: any) => ({ new: t('rv.stNew'), learning: t('rv.stLearning'), known: t('rv.stKnown') } as Record<string, string>)[c.status] || (c.state === 0 ? t('rv.stNew') : t('rv.stReview'));
+    function dueLabel(due: string) {
+      if (!due) return t('rv.dueToday');
+      const d = Math.round((+new Date(due + 'T00:00:00') - +new Date(new Date().toDateString())) / 86400000);
+      return d <= 0 ? t('rv.dueToday') : t('rv.dueIn', { n: d });
     }
-    function offlineHtml(detail = 'Start it to review.', padding = '12px 0 18px') {
-      return `<p class="muted" style="text-align:center;padding:${padding}">Study backend offline (${esc(BACKEND)}). ${esc(detail)}</p>`;
+    function offlineHtml(detail = t('rv.offlineStart'), padding = '12px 0 18px') {
+      return `<p class="muted" style="text-align:center;padding:${padding}">${esc(t('rv.offline', { url: BACKEND, detail }))}</p>`;
     }
 
     function renderProgress() {
       const total = reviewed + queue.length;
       const pct = total ? Math.round((reviewed / total) * 100) : (reviewed ? 100 : 0);
       $('rv-fill').style.width = pct + '%';
-      $('rv-prog').textContent = `本次 ${reviewed} / ${total}`;
+      $('rv-prog').textContent = t('rv.progress', { a: reviewed, b: total });
     }
 
     function renderCard() {
@@ -87,9 +90,9 @@ import Base from '../../layouts/Base.astro';
       renderEdit();
       cur = queue[0] || null;
       if (!cur) {
-        wrap.innerHTML = `<div class="rv-done"><div class="em">🎉</div><div class="h">本轮复习完成</div>
-          <div class="sub">已复习 ${reviewed} 张卡片 · 明天再见。</div>
-          <button id="rv-restart">再来一轮</button></div>`;
+        wrap.innerHTML = `<div class="rv-done"><div class="em">🎉</div><div class="h">${esc(t('rv.done'))}</div>
+          <div class="sub">${esc(t('rv.doneSub', { n: reviewed }))}</div>
+          <button id="rv-restart">${esc(t('rv.again'))}</button></div>`;
         $('rv-restart').onclick = restart;
         return;
       }
@@ -99,46 +102,46 @@ import Base from '../../layouts/Base.astro';
           <div class="reading">${esc(cur.reading || '')}</div>
           <div class="gloss">${esc(cur.gloss || '')}</div>
           ${cur.example ? `<div class="example">${esc(cur.example)}</div>` : ''}
-        </div>` : `<div class="hint">点击卡片显示答案 · 或按 空格</div>`;
+        </div>` : `<div class="hint">${esc(t('rv.hint'))}</div>`;
       const foot = revealed
         ? `<div class="rv-grades" style="grid-template-columns:repeat(4,1fr)">${GRADES.map((d, i) =>
             `<button data-g="${d.g}" style="background:color-mix(in srgb,${d.col} 15%,var(--bg-2));border:1px solid color-mix(in srgb,${d.col} 40%,var(--border));color:${d.col}">
               <span class="g-l">${d.label}</span><span class="g-i">${d.iv}</span><span class="g-k">${i + 1}</span></button>`).join('')}</div>`
-        : `<button class="rv-reveal" id="rv-revealbtn">显示答案 <span class="k">空格</span></button>`;
+        : `<button class="rv-reveal" id="rv-revealbtn">${esc(t('rv.reveal'))} <span class="k">${esc(t('rv.space'))}</span></button>`;
       wrap.innerHTML = `${offlineDetail ? offlineHtml(offlineDetail) : ''}<div class="rv-card" id="rv-cardface">
           <div class="meta">${pos ? `<span class="pos">${esc(pos)}</span>` : ''}${src}</div>
           <div class="lemma">${esc(cur.lemma || '')}</div>${answer}
         </div>${foot}`;
       $('rv-cardface').onclick = reveal;
       if (!revealed) $('rv-revealbtn').onclick = reveal;
-      else wrap.querySelectorAll('[data-g]').forEach((b) => (b.onclick = () => grade(+b.dataset.g)));
+      else wrap.querySelectorAll<HTMLElement>('[data-g]').forEach((b) => (b.onclick = () => grade(+b.dataset.g!)));
     }
 
     function renderEdit() {
       const box = $('rv-editfields');
       const c = queue[0];
-      if (!c) { box.innerHTML = '<p class="muted small">没有正在复习的卡片。</p>'; return; }
-      const f = (label, field, val, style, ro) =>
-        `<label>${label}</label><input data-field="${field}" value="${esc(val || '')}" style="${style}"${ro ? ' readonly' : ''} />`;
+      if (!c) { box.innerHTML = `<p class="muted small">${esc(t('rv.noCard'))}</p>`; return; }
+      const f = (label: string, field: string, val: string, style: string, ro?: boolean) =>
+        `<label>${esc(label)}</label><input data-field="${field}" value="${esc(val || '')}" style="${style}"${ro ? ' readonly' : ''} />`;
       box.innerHTML =
-        f('正面（词）', 'lemma', c.lemma, 'font-family:var(--jp);font-size:16px', true) +
-        f('读音', 'reading', c.reading, 'font-family:var(--mono);font-size:13px;color:var(--sage)') +
-        f('释义', 'gloss', c.gloss, 'font-family:var(--serifcjk);font-size:14px') +
-        `<label>例句</label><textarea data-field="example" rows="2" style="font-family:var(--jp);font-size:13px">${esc(c.example || '')}</textarea>` +
-        f('词性', 'pos', c.pos, 'font-family:var(--mono);font-size:12px;color:var(--terra)') +
-        `<div class="rv-sched"><div class="t">FSRS 调度</div><div class="rv-sched-grid">
-          <div><div class="k">状态</div><div class="v" style="font-family:var(--sans);color:var(--text)">${esc(stateLabel(c))}</div></div>
-          <div><div class="k">到期</div><div class="v" style="color:var(--amber)">${esc(dueLabel(c.due))}</div></div>
-          <div><div class="k">稳定性</div><div class="v">${(c.stability ?? 0).toFixed(1)} 天</div></div>
-          <div><div class="k">难度</div><div class="v">${(c.difficulty ?? 0).toFixed(1)}</div></div>
-          <div><div class="k">复习次数</div><div class="v">${c.reps ?? 0}</div></div>
-          <div><div class="k">遗忘次数</div><div class="v">${c.lapses ?? 0}</div></div>
+        f(t('rv.front'), 'lemma', c.lemma, 'font-family:var(--jp);font-size:16px', true) +
+        f(t('rv.reading'), 'reading', c.reading, 'font-family:var(--mono);font-size:13px;color:var(--sage)') +
+        f(t('rv.gloss'), 'gloss', c.gloss, 'font-family:var(--serifcjk);font-size:14px') +
+        `<label>${esc(t('rv.example'))}</label><textarea data-field="example" rows="2" style="font-family:var(--jp);font-size:13px">${esc(c.example || '')}</textarea>` +
+        f(t('rv.pos'), 'pos', c.pos, 'font-family:var(--mono);font-size:12px;color:var(--terra)') +
+        `<div class="rv-sched"><div class="t">${esc(t('rv.sched'))}</div><div class="rv-sched-grid">
+          <div><div class="k">${esc(t('rv.state'))}</div><div class="v" style="font-family:var(--sans);color:var(--text)">${esc(stateLabel(c))}</div></div>
+          <div><div class="k">${esc(t('rv.due'))}</div><div class="v" style="color:var(--amber)">${esc(dueLabel(c.due))}</div></div>
+          <div><div class="k">${esc(t('rv.stability'))}</div><div class="v">${esc(t('rv.days', { n: (c.stability ?? 0).toFixed(1) }))}</div></div>
+          <div><div class="k">${esc(t('rv.difficulty'))}</div><div class="v">${(c.difficulty ?? 0).toFixed(1)}</div></div>
+          <div><div class="k">${esc(t('rv.reps'))}</div><div class="v">${c.reps ?? 0}</div></div>
+          <div><div class="k">${esc(t('rv.lapses'))}</div><div class="v">${c.lapses ?? 0}</div></div>
         </div></div>`;
     }
 
     function reveal() { if (!cur || revealed) return; revealed = true; renderCard(); }
 
-    async function grade(g) {
+    async function grade(g: number) {
       if (!cur || grading) return;
       const card = cur;
       grading = true;
@@ -146,13 +149,13 @@ import Base from '../../layouts/Base.astro';
         const r = await fetch(`${BACKEND}/review/${card.id}/grade`, { method: 'POST', headers: H, body: JSON.stringify({ grade: g }) });
         if (!r.ok) throw new Error();
       } catch {
-        offlineDetail = 'Grade not saved; card kept in the queue.';
+        offlineDetail = t('rv.gradeNotSaved');
         grading = false;
         renderCard();
         return;
       }
       queue.shift();
-      if (g === 1) queue.push({ ...card }); // "重来" re-queues at the end
+      if (g === 1) queue.push({ ...card }); // grade 1 ("again") re-queues at the end
       reviewed++;
       offlineDetail = '';
       grading = false;
@@ -169,26 +172,26 @@ import Base from '../../layouts/Base.astro';
         if (!r.ok) throw new Error();
         queue = await r.json();
       } catch {
-        wrap.innerHTML = offlineHtml('Start it to review.', '40px 0');
+        wrap.innerHTML = offlineHtml(t('rv.offlineStart'), '40px 0');
         return;
       }
       offlineDetail = '';
       revealed = false; renderCard();
     }
 
-    // Left rail — today counts +合计到期 from /review/stats
+    // Left rail — today counts + total-due from /review/stats
     async function fetchStats() {
       try {
         const r = await fetch(`${BACKEND}/review/stats`, { headers: H }); if (!r.ok) return;
         const s = await r.json();
         const due = Number(s.due ?? 0), nw = Number(s.new ?? 0);
         const rows = [
-          { label: '复习', n: Math.max(0, due - nw), color: 'var(--amber)' },
-          { label: '新词', n: nw, color: 'var(--sage)' },
-          { label: '总卡片', n: Number(s.total ?? 0), color: 'var(--terra)' },
+          { label: t('rv.rowReview'), n: Math.max(0, due - nw), color: 'var(--amber)' },
+          { label: t('rv.rowNew'), n: nw, color: 'var(--sage)' },
+          { label: t('rv.rowTotal'), n: Number(s.total ?? 0), color: 'var(--terra)' },
         ];
-        $('rv-today').innerHTML = rows.map((t) =>
-          `<div class="rv-today-row"><span class="dot" style="background:${t.color}"></span><span class="lb">${t.label}</span><span class="n">${t.n}</span></div>`).join('');
+        $('rv-today').innerHTML = rows.map((r2) =>
+          `<div class="rv-today-row"><span class="dot" style="background:${r2.color}"></span><span class="lb">${esc(r2.label)}</span><span class="n">${r2.n}</span></div>`).join('');
         $('rv-duecount').textContent = String(due);
       } catch {}
     }
@@ -197,61 +200,62 @@ import Base from '../../layouts/Base.astro';
     async function fetchForecast() {
       let items = [];
       try { const r = await fetch(`${BACKEND}/vocab`, { headers: H }); if (r.ok) items = await r.json(); } catch { return; }
-      const wd = ['日', '一', '二', '三', '四', '五', '六'];
+      const wd = t('rv.wd').split(',');
       const start = new Date(new Date().toDateString());
       const buckets = new Array(7).fill(0);
-      for (const it of items) {
+      for (const it of items as any[]) {
         let d = 0;
-        if (it.due) d = Math.round((new Date(it.due + 'T00:00:00') - start) / 86400000);
+        if (it.due) d = Math.round((+new Date(it.due + 'T00:00:00') - +start) / 86400000);
         if (d < 0) d = 0; // overdue → due today
         if (d >= 0 && d < 7) buckets[d]++;
       }
       const max = Math.max(1, ...buckets);
       const bars = buckets.map((n, i) => {
         const dt = new Date(start.getTime() + i * 86400000);
-        return { n, h: Math.round((n / max) * 58) + 6, label: i === 0 ? '今' : wd[dt.getDay()], today: i === 0 };
+        return { n, h: Math.round((n / max) * 58) + 6, label: i === 0 ? t('rv.todayShort') : wd[dt.getDay()], today: i === 0 };
       });
       $('rv-fc').innerHTML = bars.map((b) =>
         `<div class="rv-fc-col"><span class="n">${b.n}</span><span class="bar" style="height:${b.h}px;background:${b.today ? 'linear-gradient(180deg,var(--terra),var(--amber))' : 'var(--bg-3)'}"></span></div>`).join('');
       $('rv-fc-labels').innerHTML = bars.map((b) =>
-        `<span style="color:${b.today ? 'var(--terra)' : 'var(--text-3)'}">${b.label}</span>`).join('');
+        `<span style="color:${b.today ? 'var(--terra)' : 'var(--text-3)'}">${esc(b.label)}</span>`).join('');
     }
     function refreshStats() { fetchStats(); fetchForecast(); }
 
     // Editable panel — debounced explicit update so cleared fields persist.
-    let saveTimer = null;
+    let saveTimer: ReturnType<typeof setTimeout> | null = null;
     function scheduleSave() {
       const c = queue[0]; if (!c) return;
-      const saved = $('rv-saved'); saved.style.opacity = '1'; saved.textContent = '· 保存中…';
-      clearTimeout(saveTimer);
+      const saved = $('rv-saved'); saved.style.opacity = '1'; saved.textContent = t('rv.saving');
+      if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(async () => {
         try {
           const r = await fetch(`${BACKEND}/vocab/${c.id}`, { method: 'PATCH', headers: H, body: JSON.stringify({
             reading: c.reading, gloss: c.gloss, example: c.example, pos: c.pos,
           }) });
           if (!r.ok) throw new Error('save failed');
-          saved.textContent = '· 已保存';
-        } catch { saved.textContent = '· 离线'; }
+          saved.textContent = t('rv.savedOk');
+        } catch { saved.textContent = t('rv.offline2'); }
       }, 600);
     }
     $('rv-editfields').addEventListener('input', (e) => {
-      const el = e.target; const field = el.dataset && el.dataset.field; if (!field) return;
+      const el = e.target as HTMLInputElement; const field = el.dataset && el.dataset.field; if (!field) return;
       const c = queue[0]; if (!c) return;
       c[field] = el.value;
       if (revealed && field !== 'lemma') renderCard(); // reflect edits on the revealed face
       scheduleSave();
     });
 
-    // Mode toggle (专注 / 信息)
+    // Mode toggle (focus / info)
     $('rv-mode').addEventListener('click', (e) => {
-      const b = e.target.closest('button[data-mode]'); if (!b) return;
+      const b = (e.target as Element).closest<HTMLElement>('button[data-mode]'); if (!b) return;
       $('rv-grid').classList.toggle('focus', b.dataset.mode === 'focus');
       $('rv-mode').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
     });
 
     // Keyboard: Space/Enter reveal, 1–4 grade
     document.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); reveal(); }
       else if (revealed && /^[1-4]$/.test(e.key)) { e.preventDefault(); grade(+e.key); }
     });

@@ -1,16 +1,17 @@
 ---
 import Base from '../../layouts/Base.astro';
 import { loadLang } from '../../lib/vault.mjs';
+import { t } from '../../lib/i18n.mjs';
 const langs = loadLang();
-const metricLine = (l: any) => [
-  Number.isFinite(l.word_count) ? `${l.word_count} words` : '',
-  Number.isFinite(l.grammar_count) ? `${l.grammar_count} grammar points` : '',
-  `${l.chapters.length} chapter(s)`,
-].filter(Boolean).join(' · ');
+const metrics = (l: any) => [
+  Number.isFinite(l.word_count) ? { k: 'n.words', n: l.word_count } : null,
+  Number.isFinite(l.grammar_count) ? { k: 'n.grammar', n: l.grammar_count } : null,
+  { k: 'n.chapters', n: l.chapters.length },
+].filter(Boolean) as Array<{ k: string; n: number }>;
 ---
-<Base title="Language reader" active="reader" crumbs={[{ label: 'Language reader' }]}>
-  <div class="title-row"><h1>Language reader</h1>
-    <div class="metaline">Immersion reading from structured <code>_reading</code> sidecars · Japanese</div>
+<Base title={t('nav.reader')} active="reader" crumbs={[{ i18n: 'nav.reader' }]}>
+  <div class="title-row"><h1 data-i18n="nav.reader">{t('nav.reader')}</h1>
+    <div class="metaline" data-i18n="reader.sub">{t('reader.sub')}</div>
   </div>
   {langs.length ? (
     <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">
@@ -18,12 +19,12 @@ const metricLine = (l: any) => [
         <a class="card" href={`/reader/${l.slug}`} style="text-decoration:none;color:inherit">
           <div class="chip">JA</div>
           <div style="font-weight:600;margin:8px 0 4px">{l.title}</div>
-          <div class="muted small">{metricLine(l)}</div>
+          <div class="muted small">{metrics(l).map((m, i) => (<>{i ? ' · ' : ''}<span data-i18n={m.k} data-i18n-args={JSON.stringify({ n: m.n })}>{t(m.k, { n: m.n })}</span></>))}</div>
         </a>
       ))}
     </div>
   ) : (
-    <div class="card"><p class="muted">No language sources yet. Ingest one with <code>--profile lang</code> from the ingest console.</p></div>
+    <div class="card"><p class="muted" data-i18n="reader.none">{t('reader.none')}</p></div>
   )}
-  <p class="muted small" style="margin-top:20px">Reader uses the pipeline's structured <code>_reading</code> sidecar; re-ingest old language sources with the language profile to generate current data.</p>
+  <p class="muted small" style="margin-top:20px" data-i18n="reader.note">{t('reader.note')}</p>
 </Base>

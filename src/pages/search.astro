@@ -1,19 +1,35 @@
 ---
 import Base from '../layouts/Base.astro';
+import { t } from '../lib/i18n.mjs';
 ---
-<Base title="Search" crumbs={[{ label: 'Search' }]}>
-  <div class="title-row"><h1>Search</h1><div class="metaline">Full-text search across the vault (Pagefind)</div></div>
+<Base title={t('search.title')} crumbs={[{ i18n: 'search.title' }]}>
+  <div class="title-row"><h1 data-i18n="search.title">{t('search.title')}</h1><div class="metaline" data-i18n="search.sub">{t('search.sub')}</div></div>
   <link href="/pagefind/pagefind-ui.css" rel="stylesheet" />
   <div id="search"></div>
-  <p class="muted small" id="pf-note" style="margin-top:16px">
-    Search index is generated at build time (<code>npm run build</code>). In dev, run a production build + <code>npm run preview</code>.
+  <p class="muted small" id="pf-note" style="margin-top:16px" data-i18n="search.note">
+    {t('search.note')}
   </p>
   <script is:inline src="/pagefind/pagefind-ui.js"></script>
   <script is:inline>
     window.addEventListener('DOMContentLoaded', () => {
       if (typeof PagefindUI === 'undefined') return;
       document.getElementById('pf-note')?.remove();
-      new PagefindUI({ element: '#search', showSubResults: true, showImages: false });
+      // ponytail: Pagefind UI ships English strings; override them when the saved language is zh
+      const zh = (localStorage.getItem('pw:lang') || 'zh') !== 'en';
+      new PagefindUI({
+        element: '#search', showSubResults: true, showImages: false,
+        ...(zh ? { translations: {
+          placeholder: '搜索知识库',
+          clear_search: '清除',
+          load_more: '加载更多结果',
+          zero_results: '没有找到 “[SEARCH_TERM]”',
+          many_results: '找到 [COUNT] 条 “[SEARCH_TERM]” 的结果',
+          one_result: '找到 [COUNT] 条 “[SEARCH_TERM]” 的结果',
+          alt_search: '没有找到 “[SEARCH_TERM]”，改为显示 “[DIFFERENT_TERM]” 的结果',
+          search_suggestion: '没有找到 “[SEARCH_TERM]”，试试以下搜索。',
+          searching: '正在搜索 “[SEARCH_TERM]”…',
+        } } : {}),
+      });
     });
   </script>
 </Base>
