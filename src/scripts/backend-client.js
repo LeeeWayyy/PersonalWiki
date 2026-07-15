@@ -18,7 +18,7 @@ export async function streamJob(jobId, append) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
-  let sawDone = false;
+  let terminalStatus = '';
 
   function handle(raw) {
     let event = 'message';
@@ -30,7 +30,7 @@ export async function streamJob(jobId, append) {
     const text = data.join('\n');
     if (!text) return;
     if (event === 'done') {
-      sawDone = true;
+      terminalStatus = text;
       append('done: ' + text);
     } else {
       append(text);
@@ -49,5 +49,6 @@ export async function streamJob(jobId, append) {
   }
   buf += decoder.decode();
   if (buf.trim()) handle(buf);
-  if (!sawDone) append('-- stream closed --');
+  if (!terminalStatus) throw new Error('job stream closed before terminal status');
+  if (terminalStatus !== 'done') throw new Error(`job ${terminalStatus}`);
 }

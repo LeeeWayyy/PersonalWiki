@@ -1197,6 +1197,26 @@ def test_lang_merge_endpoint_validates(client, auth):
     assert r.status_code == 400
 
 
+def test_lang_merge_endpoint_requires_boolean_options(client, auth, monkeypatch):
+    from app import ingest_runner as ir
+
+    seen = []
+    monkeypatch.setattr(ir, "start_job", lambda target, opts: seen.append((target, opts)) or "job")
+    base = {"book_id": "01BOOK", "audio_id": "01AUDIO"}
+    for bad in ({"refresh": 1}, {"refresh": "false"}, {"calibrate": None}, {"calibrate": []}):
+        r = client.post("/lang/merge", headers=auth, json={**base, **bad})
+        assert r.status_code == 400
+        assert "must be booleans" in r.json()["detail"]
+
+    assert client.post("/lang/merge", headers=auth, json=base).status_code == 200
+    assert seen[-1] == ("", {"kind": "lang-merge", **base, "refresh": False, "calibrate": True})
+    assert client.post(
+        "/lang/merge", headers=auth, json={**base, "refresh": True, "calibrate": False},
+    ).status_code == 200
+    assert seen[-1][1]["refresh"] is True
+    assert seen[-1][1]["calibrate"] is False
+
+
 def test_lang_source_remove_requires_matching_confirmation(client, auth):
     r = client.post("/lang/source/remove", headers=auth,
                     json={"source_id": "01ABC", "confirmation": "nope"})
@@ -1204,3 +1224,32 @@ def test_lang_source_remove_requires_matching_confirmation(client, auth):
     r = client.post("/lang/source/remove", headers=auth,
                     json={"source_id": "bad space", "confirmation": "bad space"})
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "rebuild_error",
+    [OSError("builder missing"), subprocess.TimeoutExpired("build", 1)],
+)
+def test_lang_source_remove_keeps_committed_delete_when_rebuild_errors(
+    client, auth, monkeypatch, rebuild_error,
+):
+    from app import ingest_runner as ir
+    from app.routers import ingest as ingest_router
+
+    monkeypatch.setattr(ir, "REBUILD_CMD", "build")
+
+    def fake_run(cmd, **kwargs):
+        if isinstance(cmd, list):
+            return subprocess.CompletedProcess(cmd, 0, "deleted", "")
+        raise rebuild_error
+
+    monkeypatch.setattr(ingest_router.subprocess, "run", fake_run)
+    r = client.post(
+        "/lang/source/remove", headers=auth,
+        json={"source_id": "01ABC", "confirmation": "01ABC"},
+    )
+
+    assert r.status_code == 200
+    assert r.json()["removed"] == "01ABC"
+    assert r.json()["rebuilt"] is False
+    assert r.json()["rebuild_warning"].startswith("site rebuild failed:")

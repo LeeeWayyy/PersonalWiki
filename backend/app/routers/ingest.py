@@ -105,11 +105,14 @@ async def lang_merge(request: Request):
         raise HTTPException(400, "book_id and audio_id must be valid source ids")
     if book_id == audio_id:
         raise HTTPException(400, "book_id and audio_id must differ")
+    refresh = body.get("refresh", False)
+    calibrate = body.get("calibrate", True)
+    if not isinstance(refresh, bool) or not isinstance(calibrate, bool):
+        raise HTTPException(400, "refresh and calibrate must be booleans")
     # calibrate=False → the "book" is a hand-calibrated transcript (already natural
     # kanji): align to the audio timeline only, skip the kana→kanji LLM pass.
     opts = {"kind": "lang-merge", "book_id": book_id, "audio_id": audio_id,
-            "refresh": bool(body.get("refresh")),
-            "calibrate": body.get("calibrate") is not False}
+            "refresh": refresh, "calibrate": calibrate}
     return {"job_id": ir.start_job("", opts)}
 
 
@@ -146,16 +149,19 @@ async def lang_source_remove(request: Request):
         rebuilt = False
         rebuild_warning = None
         if ir.REBUILD_CMD:
-            rebuild = await asyncio.to_thread(
-                subprocess.run, ir.REBUILD_CMD, shell=True,
-                capture_output=True, text=True, timeout=ir.JOB_TIMEOUT_S,
-            )
-            rebuilt = rebuild.returncode == 0
-            if not rebuilt:
-                lines = (rebuild.stderr or rebuild.stdout or "site rebuild failed").strip().splitlines()
-                rebuild_warning = lines[-1] if lines else "site rebuild failed"
+            try:
+                rebuild = await asyncio.to_thread(
+                    subprocess.run, ir.REBUILD_CMD, shell=True,
+                    capture_output=True, text=True, timeout=ir.JOB_TIMEOUT_S,
+                )
+                rebuilt = rebuild.returncode == 0
+                if not rebuilt:
+                    lines = (rebuild.stderr or rebuild.stdout or "site rebuild failed").strip().splitlines()
+                    rebuild_warning = lines[-1] if lines else "site rebuild failed"
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                rebuild_warning = f"site rebuild failed: {exc}"
     return {"removed": source_id, "rebuilt": rebuilt,
-            **({"rebuild_warning": rebuild_warning} if rebuild_warning else {})}
+            "rebuild_warning": rebuild_warning}
 
 
 _EXTRACT_SCRIPT = ir.REPO / "pipeline" / "scripts" / "extract.py"

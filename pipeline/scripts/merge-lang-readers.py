@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyyaml>=6.0", "fugashi", "unidic-lite"]
 # ///
-"""PROTOTYPE — merge a BOOK lang reader with an AUDIO lang reader into ONE.
+"""Merge a BOOK lang reader with an AUDIO lang reader into ONE.
 
 Book gives clean structure + grammar/vocab/translations (but kid-friendly kana);
 audio gives natural kanji orthography + a real timeline. We:
@@ -12,15 +12,17 @@ audio gives natural kanji orthography + a real timeline. We:
      alignment on hiragana → per-sentence [t0,t1]).
   2. Per chapter, LLM-calibrate the book's kana sentences into natural kanji,
      using the aligned audio ASR span as a spelling reference (cached). A reading-
-     similarity guard rejects any sentence whose pronunciation drifted.
+     exact-reading guard rejects any sentence whose pronunciation drifted.
+     (--no-calibrate skips this: text already natural kanji, align for timing only.)
   3. Emit ONE reading page: calibrated kanji text (furigana now renders) + the
      book's grammar/vocab/translations (lemma-keyed, so they still resolve) +
      audio timestamps inherited 1:1 from the book alignment.
 
-Prototype: reads the real content repo (PW_CONTENT_DIR) but writes the merged
-page to --out-dir (scratchpad) so nothing in the vault is touched.
+--out-dir writes a demo page to scratchpad (nothing in the vault touched).
+--commit writes the merged reader into the real lang vault (_reading/) under the
+ingest lock, re-checks the lang preflight, lints, and git-commits those two files.
 """
-import argparse, importlib.util, json, os, re, subprocess, sys
+import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, signal, subprocess, sys, time
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -39,32 +41,68 @@ import derived_lib as dl
 
 CAL_VERSION = "merge-v1"
 CAL_TIMEOUT = 900
-READING_GUARD = 0.80  # min reading similarity to accept a calibrated sentence
+MIN_ALIGNED_RATIO = 0.80
 
 
 def reading_of(text: str) -> str:
     return "".join(glp.kata2hira(w.feature.kana or w.surface) for w in glp.tagger()(text))
 
 
+def _reading_doc(source_id: str) -> dict:
+    """Load the durable reader emitted and committed by the normal lang ingest."""
+    for path in sorted(glp.READING_DIR.glob("*.reading.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if doc.get("source_id") == source_id:
+            return doc
+    sys.exit(f"no generated reading.json for book {source_id} in {glp.READING_DIR}")
+
+
+def _token_key(token: dict) -> str:
+    if token.get("key"):
+        return str(token["key"])
+    for word in glp.tagger()(str(token.get("t") or "")):
+        if (not token.get("pos") or word.feature.pos1 == token["pos"]):
+            return glp.token_key(word.feature, word.surface)
+    return ""
+
+
 def load_book(source_id: str):
-    """Book per_chapter from cache (dry-run) + its meanings map."""
+    """Rebuild glp's render inputs from the committed structured reader."""
     sources = dl.find_sources(glp.SOURCES_DIR)
     if source_id not in sources:
         sys.exit(f"no book sidecar {source_id} in {glp.SOURCES_DIR}")
     meta = {**sources[source_id], "source_id": source_id}
-    groups: dict[str, list[str]] = {}
-    for t in dl.list_sections(glp.EXTRACT, meta["asset"]):
-        groups.setdefault(glp.chapter_key(t), []).append(t)
-    chapters = [(raws[0], "^(?:" + "|".join(re.escape(r) for r in raws) + ")$")
-                for raws in groups.values()]
-    per_chapter = []
-    for idx, (label, section) in enumerate(chapters, 1):
-        data = glp.chapter_data(meta, idx, label, section, refresh=False, dry_run=True)
-        per_chapter.append((glp.chapter_key(label), data))
+    doc = _reading_doc(source_id)
+    per_chapter: list[tuple[str, dict]] = []
     meanings: dict[str, dict] = {}
-    for _c, d in per_chapter:
-        for w in d["words"]:
-            meanings.setdefault(w["key"], w)
+    for chapter in doc.get("chapters") or []:
+        sentences, chapter_words = [], {}
+        for para_idx, para in enumerate(chapter.get("paragraphs") or []):
+            for raw in para.get("sentences") or []:
+                tokens = [dict(t) for t in raw.get("tokens") or []]
+                for token in tokens:
+                    key = _token_key(token)
+                    meaning = "" if token.get("m") in (None, "—") else str(token["m"])
+                    notes = str(token.get("n") or "")
+                    if not key or not token.get("w") or not (meaning or notes):
+                        continue
+                    token["key"] = key
+                    word = {"key": key, "lemma": str(token["w"]),
+                            "reading": str(token.get("rt") or ""),
+                            "pos": str(token.get("pos") or ""),
+                            "meaning_en": meaning, "notes": notes}
+                    chapter_words.setdefault(key, word)
+                    meanings.setdefault(key, word)
+                sentence = {"jp": str(raw.get("jp") or ""),
+                            "en": str(raw.get("en") or ""), "para": para_idx,
+                            "_tokens": tokens}
+                sentences.append(sentence)
+        per_chapter.append((glp.chapter_key(str(chapter.get("chapter") or glp.WHOLE_LABEL)),
+                            {"sentences": sentences, "words": list(chapter_words.values()),
+                             "grammar_points": list(chapter.get("grammar") or [])}))
     return meta, per_chapter, meanings
 
 
@@ -119,6 +157,78 @@ def align_book_to_audio(per_chapter, stream) -> int:
 def asr_reference(segs, t0, t1) -> str:
     """Segment texts overlapping [t0,t1] — the spelling reference for a chapter."""
     return "".join(text for text, s0, s1 in segs if s1 >= t0 and s0 <= t1)
+
+
+def require_meaningful_alignment(timed: int, total: int) -> float:
+    if total <= 0:
+        sys.exit("book reader has no sentences")
+    ratio = timed / total
+    if ratio < MIN_ALIGNED_RATIO:
+        sys.exit(f"alignment rejected: only {timed}/{total} sentences timed "
+                 f"({ratio * 100:.1f}%; need at least {MIN_ALIGNED_RATIO * 100:.0f}%)")
+    return ratio
+
+
+def calibration_sha(book_sha: str, audio_id: str, audio_sha: str) -> str:
+    """Cache identity includes both source contents, including the ASR text."""
+    return hashlib.sha256(f"{book_sha}\0{audio_id}\0{audio_sha}".encode()).hexdigest()
+
+
+def _reading_spans(readings: list[str]) -> list[tuple[int, int]]:
+    spans, pos = [], 0
+    for reading in readings:
+        size = len(re.sub(r"\s+", "", glp.kata2hira(reading)))
+        spans.append((pos, pos + size))
+        pos += size
+    return spans
+
+
+def _original_token_readings(original_jp: str, tokens: list[dict]) -> list[str]:
+    """Analyze the exact source sentence; whitespace can affect token context."""
+    words = list(glp.tagger()(original_jp))
+    surfaces = [word.surface for word in words]
+    stored = [str(token.get("t") or "") for token in tokens]
+    if surfaces != stored:
+        raise RuntimeError("stored reader tokens no longer match the original sentence")
+    return [str(word.feature.kana or word.surface) for word in words]
+
+
+def preserve_meanings(original_jp: str, original_tokens: list[dict], calibrated: str,
+                      meanings: dict[str, dict]) -> None:
+    """Alias original glosses onto calibrated tokens by identical reading span."""
+    new_tokens = list(glp.tagger()(calibrated))
+    old_spans = _reading_spans(_original_token_readings(original_jp, original_tokens))
+    new_spans = _reading_spans([
+        str(word.feature.kana or word.surface) for word in new_tokens
+    ])
+    pairs = []
+    for old_i, (token, (o0, o1)) in enumerate(zip(original_tokens, old_spans)):
+        if not meanings.get(str(token.get("key") or "")) or o0 == o1:
+            continue
+        for new_i, (n0, n1) in enumerate(new_spans):
+            overlap = min(o1, n1) - max(o0, n0)
+            if overlap > 0:
+                pairs.append((overlap, old_i, new_i))
+    used_old, used_new = set(), set()
+    for _overlap, old_i, new_i in sorted(pairs, reverse=True):
+        if old_i in used_old or new_i in used_new:
+            continue
+        meaning = meanings[str(original_tokens[old_i]["key"])]
+        word = new_tokens[new_i]
+        key = glp.token_key(word.feature, word.surface)
+        meanings.setdefault(key, {**meaning, "key": key})
+        used_old.add(old_i)
+        used_new.add(new_i)
+
+
+def require_visible_tokens(reading: dict) -> None:
+    """Never publish zero-width study tokens."""
+    tokens = [token for chapter in reading.get("chapters") or []
+              for para in chapter.get("paragraphs") or []
+              for sentence in para.get("sentences") or []
+              for token in sentence.get("tokens") or []]
+    if any(not str(token.get("t") or "") for token in tokens):
+        raise RuntimeError("merged reader contains an empty token surface")
 
 
 CAL_PROMPT = """You refine a children's-book Japanese passage (written mostly in
@@ -205,7 +315,7 @@ def calibrate_chapter(idx, chap, sentences, asr, sha, source_id, refresh):
     """LLM kana→kanji for a chapter, batched at BATCH_SENTS. Any sentence no
     batch produced (malformed JSON) is recovered in a tiny retry call; anything
     still missing keeps the original kana AND is logged — never silent. Guard:
-    keep the original whenever the calibrated reading drifts. Returns
+    keep the original unless the calibrated reading is identical. Returns
     (list[str], kept_missing, drift)."""
     slug = dl.fs_safe_slug(chap, fallback="chap")
     N = len(sentences)
@@ -240,8 +350,9 @@ def calibrate_chapter(idx, chap, sentences, asr, sha, source_id, refresh):
         cal = by_s.get(i, "")
         if not cal:
             out.append(orig); kept += 1; continue      # logged above
-        sim = SequenceMatcher(None, reading_of(orig), reading_of(cal)).ratio()
-        if sim < READING_GUARD:
+        orig_reading = re.sub(r"\s+", "", reading_of(orig))
+        cal_reading = re.sub(r"\s+", "", reading_of(cal))
+        if orig_reading != cal_reading:
             out.append(orig); drift += 1               # reject: pronunciation moved
         else:
             out.append(cal)
@@ -266,6 +377,12 @@ def merged_id(book_id: str, audio_id: str) -> str:
     return f"merge-{book_id[-8:]}-{audio_id[-8:]}".lower()
 
 
+def render_merged_html(display, per_chapter, meanings, audio_src, book_id, audio_id) -> str:
+    """Book chapters cite the book; the top-level page also cites its audio."""
+    html = glp.render_reading_html(display, book_id, per_chapter, meanings, audio_src)
+    return html.replace("</head>", f"<!-- {glp.source_cite(audio_id)} -->\n</head>", 1)
+
+
 def write_and_commit(per_chapter, meanings, audio_src, meta, book_id, audio_id) -> None:
     """Write the merged reading page+json into the real lang vault (_reading/) and
     commit ONLY those two files under the content git repo. Byte-stable + a
@@ -273,28 +390,92 @@ def write_and_commit(per_chapter, meanings, audio_src, meta, book_id, audio_id) 
     mid = merged_id(book_id, audio_id)
     display = dl.clean_title(meta["title"]) + " (merged)"
     reading = glp.build_reading_json(display, mid, per_chapter, meanings, audio_src)
+    require_visible_tokens(reading)
     reading["merged"] = True                     # flag so the UI never re-merges it
     reading["merged_from"] = [book_id, audio_id]
-    html = glp.render_reading_html(display, mid, per_chapter, meanings, audio_src)
+    # The merged id has no source sidecar. Cite the real book source so the
+    # generated HTML cannot introduce orphan [src:merge-*] citations.
+    html = render_merged_html(display, per_chapter, meanings, audio_src, book_id, audio_id)
 
     glp.READING_DIR.mkdir(parents=True, exist_ok=True)
     hp = glp.READING_DIR / f"{mid}.html"
     jp = glp.READING_DIR / f"{mid}.reading.json"
-    dl.atomic_write(hp, html, False)
-    dl.atomic_write(jp, json.dumps(reading, ensure_ascii=False) + "\n", False)
-
     repo = subprocess.check_output(
         ["git", "-C", str(glp.READING_DIR), "rev-parse", "--show-toplevel"], text=True).strip()
-    subprocess.run(["git", "-C", repo, "add", "--", str(hp), str(jp)], check=True)
-    if subprocess.run(["git", "-C", repo, "diff", "--cached", "--quiet",
-                       "--", str(hp), str(jp)]).returncode == 0:
-        print(f"nothing to commit (merged reader {mid} already up to date)")
-        return
-    subprocess.run(
-        ["git", "-C", repo, "-c", "user.email=merge@personal-wiki.local",
-         "-c", "user.name=lang-merge", "commit", "-m",
-         f"lang: merge {book_id} + {audio_id} → {mid}", "--", str(hp), str(jp)], check=True)
+    before = {p: p.read_text(encoding="utf-8") if p.exists() else None for p in (hp, jp)}
+    def cancel(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, cancel)
+    try:
+        dl.atomic_write(hp, html, False)
+        dl.atomic_write(jp, json.dumps(reading, ensure_ascii=False) + "\n", False)
+        if subprocess.run([sys.executable, str(SCRIPTS / "lint.py"), "--profile", "lang"]).returncode:
+            raise RuntimeError("lang lint rejected merged reader")
+        subprocess.run(["git", "-C", repo, "add", "--", str(hp), str(jp)], check=True)
+        if subprocess.run(["git", "-C", repo, "diff", "--cached", "--quiet",
+                           "--", str(hp), str(jp)]).returncode == 0:
+            print(f"nothing to commit (merged reader {mid} already up to date)")
+            return
+        subprocess.run(
+            ["git", "-C", repo, "-c", "user.email=merge@personal-wiki.local",
+             "-c", "user.name=lang-merge", "commit", "-m",
+             f"lang: merge {book_id} + {audio_id} → {mid}", "--", str(hp), str(jp)], check=True)
+    except BaseException:
+        for path in (hp, jp):
+            path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
+        path_status = subprocess.run(
+            ["git", "-C", repo, "status", "--porcelain", "--untracked-files=all",
+             "--", str(hp), str(jp)], capture_output=True, text=True)
+        if path_status.returncode or (path_status.stdout or "").strip():
+            subprocess.run(["git", "-C", repo, "restore", "--staged", "--",
+                            str(hp), str(jp)], capture_output=True)
+            for path, old in before.items():
+                if old is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    dl.atomic_write(path, old, False)
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
     print(f"committed merged reader {mid}")
+
+
+@contextlib.contextmanager
+def content_ingest_lock():
+    """Use the same repo-level advisory lock as pipeline/ingest.py."""
+    lock_path = glp.VAULT_ROOT / ".wiki" / "ingest.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"waiting for ingest lock: {lock_path}")
+    with lock_path.open("a+", encoding="utf-8") as lock_fh:
+        while True:
+            try:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(30)
+                print(f"still waiting for ingest lock: {lock_path}")
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+
+def require_clean_lang_tree() -> None:
+    """Repeat ingest's preflight after locking, closing the web preflight race."""
+    repo = Path(subprocess.check_output(
+        ["git", "-C", str(glp.VAULT_ROOT), "rev-parse", "--show-toplevel"],
+        text=True).strip())
+    env = {**os.environ, "PW_CONTENT_DIR": str(repo), "VAULT_CONTENT_DIR": str(repo)}
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS.parent / "ingest.py"), "--preflight", "--profile", "lang"],
+        cwd=repo, env=env, capture_output=True, text=True, check=True)
+    report = json.loads(result.stdout)
+    if not report.get("ok"):
+        detail = ", ".join(report.get("offending") or [])
+        sys.exit(f"{report.get('message') or 'lang preflight failed'}"
+                 + (f" Offending: {detail}" if detail else ""))
 
 
 def main() -> int:
@@ -315,19 +496,33 @@ def main() -> int:
     if args.commit and args.limit:
         ap.error("--limit is prototype-only; drop it for --commit")
 
+    with content_ingest_lock() if args.commit else contextlib.nullcontext():
+        if args.commit:
+            require_clean_lang_tree()
+        return run(args)
+
+
+def run(args) -> int:
+
     meta, per_chapter, meanings = load_book(args.book_id)
     nsent = sum(len(d["sentences"]) for _c, d in per_chapter)
     print(f"book {args.book_id}: {len(per_chapter)} chapters, {nsent} sentences")
 
     sources = dl.find_sources(glp.SOURCES_DIR)
-    audio_asset = Path(sources[args.audio_id]["asset"])
+    if args.audio_id not in sources:
+        sys.exit(f"no audio sidecar {args.audio_id} in {glp.SOURCES_DIR}")
+    audio_meta = sources[args.audio_id]
+    audio_asset = Path(audio_meta["asset"])
     stream, segs, doc = audio_streams(audio_asset)
     print(f"audio {args.audio_id}: {len(segs)} segments, {len(stream)} reading chars")
 
     timed = align_book_to_audio(per_chapter, stream)
-    print(f"aligned: {timed}/{nsent} sentences timed ({timed/nsent*100:.1f}%)")
+    aligned_ratio = require_meaningful_alignment(timed, nsent)
+    print(f"aligned: {timed}/{nsent} sentences timed ({aligned_ratio*100:.1f}%)")
 
-    sha = meta["sha256"]
+    if not meta["sha256"] or not audio_meta["sha256"]:
+        sys.exit("book and audio sidecars must carry sha256 metadata")
+    sha = calibration_sha(meta["sha256"], args.audio_id, audio_meta["sha256"])
     total_up = total_kept = total_drift = 0
     samples = []
     # --no-calibrate: the text is already a hand-calibrated transcript (natural
@@ -335,6 +530,10 @@ def main() -> int:
     # kana→kanji LLM to add, so keep the sentences verbatim and skip the ~30-min pass.
     if args.no_calibrate:
         print("calibration skipped (--no-calibrate): text kept verbatim, timing from audio")
+        for _chap, data in per_chapter:
+            for sentence in data["sentences"]:
+                preserve_meanings(sentence["jp"], sentence.get("_tokens") or [],
+                                  sentence["jp"], meanings)
     else:
         for idx, (chap, d) in enumerate(per_chapter, 1):
             if args.limit and idx > args.limit:
@@ -350,6 +549,7 @@ def main() -> int:
                 total_up += up
                 if up and len(samples) < 10 and s["jp"] != new:
                     samples.append((s["jp"], new))
+                preserve_meanings(s["jp"], s.get("_tokens") or [], new, meanings)
                 s["jp"] = new                           # <-- swap in calibrated kanji
             total_kept += kept; total_drift += drift
             print(f"  ch{idx:02d} {chap[:24]:24} sents={len(sents):3} kept={kept} drift-rejected={drift}")
@@ -365,13 +565,15 @@ def main() -> int:
         display = dl.clean_title(meta["title"]) + " (merged)"
         out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
         slug = "merged-" + args.book_id[:8]
-        html = glp.render_reading_html(display, args.book_id, per_chapter, meanings, audio_src)
+        html = render_merged_html(display, per_chapter, meanings, audio_src,
+                                  args.book_id, args.audio_id)
         (out_dir / f"{slug}.html").write_text(html, encoding="utf-8")
         reading = glp.build_reading_json(display, args.book_id, per_chapter, meanings, audio_src)
+        require_visible_tokens(reading)
         (out_dir / f"{slug}.reading.json").write_text(json.dumps(reading, ensure_ascii=False) + "\n", encoding="utf-8")
 
     print(f"\n=== RESULT ===")
-    print(f"timed sentences : {timed}/{nsent} ({timed/nsent*100:.1f}%)")
+    print(f"timed sentences : {timed}/{nsent} ({aligned_ratio*100:.1f}%)")
     print(f"kanji upgrades  : {total_up} tokens gained kanji")
     print(f"guard rejects   : {total_drift} sentences kept original (reading drift)")
     if args.commit:

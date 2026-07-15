@@ -20,7 +20,7 @@ const kindOf = (l: any) => (l.reading?.merged ? 'merged' : l.reading?.audio ? 'a
     <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">
       {langs.map((l) => (
         <div class="reader-card" data-id={l.id} data-kind={kindOf(l)} data-title={l.title}>
-          <label class="reader-pick" title="Select for merge"><input type="checkbox" /></label>
+          <label class="reader-pick" title="Select for merge or deletion"><input type="checkbox" aria-label={`Select ${l.title} for merge or deletion`} /></label>
           <a class="card" href={`/reader/${l.slug}`} style="text-decoration:none;color:inherit;display:block">
             <div class="chip">{kindOf(l) === 'audio' ? '🔊 JA' : kindOf(l) === 'merged' ? '★ JA' : 'JA'}</div>
             <div style="font-weight:600;margin:8px 0 4px">{l.title}</div>
@@ -41,10 +41,10 @@ const kindOf = (l: any) => (l.reading?.merged ? 'merged' : l.reading?.audio ? 'a
     <button id="lang-delete-btn" class="btn danger">Delete</button>
   </div>
 
-  <dialog id="lang-op-dialog">
+  <dialog id="lang-op-dialog" aria-labelledby="lang-op-title">
     <h3 id="lang-op-title" style="margin:0 0 8px">Working…</h3>
     <p id="lang-op-hint" class="muted small" style="margin:0 0 8px">Book text &amp; grammar, upgraded to natural kanji, on the audio timeline. This runs the LLM and can take a while.</p>
-    <pre class="log"></pre>
+    <pre class="log" role="log" aria-live="polite"></pre>
     <form method="dialog" style="text-align:right;margin-top:8px"><button class="btn">Close</button></form>
   </dialog>
 </Base>

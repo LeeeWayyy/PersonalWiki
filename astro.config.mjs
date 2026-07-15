@@ -33,7 +33,7 @@ export default defineConfig({
     server: {
       proxy: Object.fromEntries([
         '/health', '/ingest', '/jobs', '/preflight', '/vocab', '/review', '/export',
-        '/translate', '/assist', '/annotations', '/media',
+        '/translate', '/assist', '/annotations', '/media', '/lang',
         '/wiki/human-zone', '/wiki/page/remove',
       ].map((path) => [path, backend])),
     },
