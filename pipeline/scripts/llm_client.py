@@ -764,8 +764,8 @@ def complete(prompt: str, timeout: int = 60, *, model: str | None = None) -> str
     `PW_LLM_PROVIDER=codex`, `claude-cli`, or `agy-cli` selects a built-in local
     CLI. `PW_LLM_PROVIDER=api` or `openai` is non-agentic: one chat completion
     over the OpenAI-compatible API. For compatibility,
-    `PW_LLM_API_ENABLED=1` still acts as an API fallback when no local provider
-    is configured, and `LLM_CMD` remains an advanced local command override.
+    `PW_LLM_API_ENABLED=1` still selects the API when no local provider is
+    configured, and `LLM_CMD` remains an advanced local command override.
     """
     err = _provider_error()
     if err:
@@ -773,15 +773,7 @@ def complete(prompt: str, timeout: int = 60, *, model: str | None = None) -> str
     if _api_requested():
         return _twice(lambda: _complete_api(prompt, timeout, model=model))
     if command_configured():
-        try:
-            result = _twice(lambda: complete_command(prompt, timeout=timeout, model=model))
-        except Exception:
-            if _api_enabled() and _api_key():
-                return _twice(lambda: _complete_api(prompt, timeout, model=model))
-            raise
-        if result is not None or not (_api_enabled() and _api_key()):
-            return result
-        return _twice(lambda: _complete_api(prompt, timeout, model=model))
+        return _twice(lambda: complete_command(prompt, timeout=timeout, model=model))
     if _api_enabled() and _api_key():
         return _twice(lambda: _complete_api(prompt, timeout, model=model))
     return None

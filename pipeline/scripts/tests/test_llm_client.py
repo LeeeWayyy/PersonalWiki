@@ -744,7 +744,7 @@ class LlmClientTests(unittest.TestCase):
             self.assertEqual(llm_client.complete("hello"), "ok")
         self.assertEqual(complete.call_count, 2)
 
-    def test_failed_local_provider_falls_back_to_enabled_api(self):
+    def test_failed_local_provider_does_not_silently_switch_identity(self):
         env = {
             "LLM_CMD": "stub",
             "PW_LLM_API_ENABLED": "1",
@@ -755,9 +755,25 @@ class LlmClientTests(unittest.TestCase):
         ) as local, patch.object(
             llm_client, "_complete_api", return_value="api answer"
         ) as api:
-            self.assertEqual(llm_client.complete("hello"), "api answer")
+            with self.assertRaisesRegex(RuntimeError, "down"):
+                llm_client.complete("hello")
         self.assertEqual(local.call_count, 2)
-        api.assert_called_once()
+        api.assert_not_called()
+
+    def test_empty_local_provider_does_not_silently_switch_identity(self):
+        env = {
+            "LLM_CMD": "stub",
+            "PW_LLM_API_ENABLED": "1",
+            "PW_LLM_API_KEY": "key",
+        }
+        with patch.dict(os.environ, env, clear=True), patch.object(
+            llm_client, "complete_command", return_value=None
+        ) as local, patch.object(
+            llm_client, "_complete_api", return_value="api answer"
+        ) as api:
+            self.assertIsNone(llm_client.complete("hello"))
+        self.assertEqual(local.call_count, 2)
+        api.assert_not_called()
 
     def test_unknown_provider_errors(self):
         with patch.dict(os.environ, {"PW_LLM_PROVIDER": "banana"}, clear=True):
