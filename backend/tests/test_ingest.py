@@ -1139,3 +1139,45 @@ def test_json_routes_reject_bad_field_shapes(client, auth, tmp_path, monkeypatch
     )
     assert upload.status_code == 400
     assert list(tmp_path.iterdir()) == []
+
+
+def test_build_argv_lang_merge_routes_to_merge_script():
+    from app import ingest_runner as ir
+
+    argv = ir._build_argv("", {"kind": "lang-merge", "book_id": "01BOOK", "audio_id": "01AUD"})
+    assert argv[:2] == ["uv", "run"]
+    assert argv[2].endswith("merge-lang-readers.py")
+    assert argv[-5:] == ["--book-id", "01BOOK", "--audio-id", "01AUD", "--commit"]
+    assert "--refresh" not in argv
+    assert "--refresh" in ir._build_argv(
+        "", {"kind": "lang-merge", "book_id": "a", "audio_id": "b", "refresh": True})
+
+
+def test_lang_merge_preflight_uses_lang_profile(monkeypatch):
+    from app import ingest_runner as ir
+
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["profile"] = cmd[cmd.index("--profile") + 1]
+
+        class R:
+            returncode = 0
+            stdout = '{"ok": true, "message": "clean", "offending": []}'
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(ir.subprocess, "run", fake_run)
+    ir.preflight({"kind": "lang-merge"})
+    assert seen["profile"] == "lang"
+
+
+def test_source_id_validation_rejects_bad_ids():
+    from app.routers.ingest import _SOURCE_ID_RX
+
+    assert _SOURCE_ID_RX.fullmatch("merge-01ab-02cd")
+    assert _SOURCE_ID_RX.fullmatch("01HXABCDEF")
+    assert not _SOURCE_ID_RX.fullmatch("../etc")
+    assert not _SOURCE_ID_RX.fullmatch("has space")
+    assert not _SOURCE_ID_RX.fullmatch("")

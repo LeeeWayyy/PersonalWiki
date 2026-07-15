@@ -261,7 +261,7 @@ def ensure_content_git(content: Path) -> tuple[bool, str]:
 
 def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
     """Return ingest.py's authoritative (ok, message, offending_paths) report."""
-    profile = "lang" if (options or {}).get("kind") == "lang" else "wiki"
+    profile = "lang" if (options or {}).get("kind") in ("lang", "lang-merge") else "wiki"
     try:
         result = subprocess.run(
             [sys.executable, str(DEFAULT_INGEST_SCRIPT), "--preflight", "--profile", profile],
@@ -281,8 +281,21 @@ def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
         return False, f"ingest preflight returned invalid JSON: {exc}", []
 
 
+MERGE_SCRIPT = REPO / "pipeline" / "scripts" / "merge-lang-readers.py"
+
+
 def _build_argv(target: str, options: dict, transcript_out: str | None = None) -> list[str]:
     kind = (options or {}).get("kind", "auto")
+    # Merge a book lang reader with an audio one into a new committed reader.
+    # No `target` — the two source_ids come from options; the script writes into
+    # the lang vault and commits, so run_job's rebuild step publishes it.
+    if kind == "lang-merge":
+        argv = ["uv", "run", str(MERGE_SCRIPT),
+                "--book-id", str(options["book_id"]),
+                "--audio-id", str(options["audio_id"]), "--commit"]
+        if (options or {}).get("refresh"):
+            argv.append("--refresh")
+        return argv
     # A media URL under lang must be transcribed, not web-scraped. Route it
     # through fetch-transcript.py (ASR → .transcript.json → ingest.py). It writes
     # its intermediates to a temp dir so nothing lands in the content repo; the

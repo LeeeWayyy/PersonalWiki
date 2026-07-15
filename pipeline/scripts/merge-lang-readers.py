@@ -20,12 +20,19 @@ audio gives natural kanji orthography + a real timeline. We:
 Prototype: reads the real content repo (PW_CONTENT_DIR) but writes the merged
 page to --out-dir (scratchpad) so nothing in the vault is touched.
 """
-import argparse, importlib.util, json, os, re, sys
+import argparse, importlib.util, json, os, re, subprocess, sys
 from difflib import SequenceMatcher
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
+# glp reads PW_CONTENT_DIR at import to fix VAULT_ROOT (the lang vault, content/lang).
+# The backend job passes the git repo root (content/); the lang vault is its lang/
+# subdir. Descend so READING_DIR/SOURCES_DIR resolve — but leave a dir that already
+# points at the lang vault (has sources/) untouched, so the prototype CLI still works.
+_cd = Path(os.environ.get("PW_CONTENT_DIR") or os.environ.get("VAULT_CONTENT_DIR") or ".").resolve()
+if (_cd / "lang" / "sources").is_dir():
+    os.environ["PW_CONTENT_DIR"] = str(_cd / "lang")
 spec = importlib.util.spec_from_file_location("glp", SCRIPTS / "generate-language-pages.py")
 glp = importlib.util.module_from_spec(spec); spec.loader.exec_module(glp)
 import derived_lib as dl
@@ -254,14 +261,56 @@ def kanji_upgrades(orig: str, cal: str) -> int:
     return n
 
 
+def merged_id(book_id: str, audio_id: str) -> str:
+    """Deterministic, unique, fs/URL-safe id for the book+audio merge."""
+    return f"merge-{book_id[-8:]}-{audio_id[-8:]}".lower()
+
+
+def write_and_commit(per_chapter, meanings, audio_src, meta, book_id, audio_id) -> None:
+    """Write the merged reading page+json into the real lang vault (_reading/) and
+    commit ONLY those two files under the content git repo. Byte-stable + a
+    no-op commit when nothing changed, so a re-run is idempotent."""
+    mid = merged_id(book_id, audio_id)
+    display = dl.clean_title(meta["title"]) + " (merged)"
+    reading = glp.build_reading_json(display, mid, per_chapter, meanings, audio_src)
+    reading["merged"] = True                     # flag so the UI never re-merges it
+    reading["merged_from"] = [book_id, audio_id]
+    html = glp.render_reading_html(display, mid, per_chapter, meanings, audio_src)
+
+    glp.READING_DIR.mkdir(parents=True, exist_ok=True)
+    hp = glp.READING_DIR / f"{mid}.html"
+    jp = glp.READING_DIR / f"{mid}.reading.json"
+    dl.atomic_write(hp, html, False)
+    dl.atomic_write(jp, json.dumps(reading, ensure_ascii=False) + "\n", False)
+
+    repo = subprocess.check_output(
+        ["git", "-C", str(glp.READING_DIR), "rev-parse", "--show-toplevel"], text=True).strip()
+    subprocess.run(["git", "-C", repo, "add", "--", str(hp), str(jp)], check=True)
+    if subprocess.run(["git", "-C", repo, "diff", "--cached", "--quiet",
+                       "--", str(hp), str(jp)]).returncode == 0:
+        print(f"nothing to commit (merged reader {mid} already up to date)")
+        return
+    subprocess.run(
+        ["git", "-C", repo, "-c", "user.email=merge@personal-wiki.local",
+         "-c", "user.name=lang-merge", "commit", "-m",
+         f"lang: merge {book_id} + {audio_id} → {mid}", "--", str(hp), str(jp)], check=True)
+    print(f"committed merged reader {mid}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--book-id", required=True)
     ap.add_argument("--audio-id", required=True)
-    ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--out-dir", help="prototype: write demo page here (no vault write)")
+    ap.add_argument("--commit", action="store_true",
+                    help="write into the real lang vault (_reading/) and git-commit")
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="calibrate only first N chapters (debug)")
     args = ap.parse_args()
+    if not args.commit and not args.out_dir:
+        ap.error("provide --out-dir (prototype) or --commit (write to vault)")
+    if args.commit and args.limit:
+        ap.error("--limit is prototype-only; drop it for --commit")
 
     meta, per_chapter, meanings = load_book(args.book_id)
     nsent = sum(len(d["sentences"]) for _c, d in per_chapter)
@@ -301,19 +350,25 @@ def main() -> int:
         per_chapter = per_chapter[:args.limit]
 
     audio_src = glp.audio_src_for(audio_asset, doc)
-    display = dl.clean_title(meta["title"]) + " (merged)"
-    out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    slug = "merged-" + args.book_id[:8]
-    html = glp.render_reading_html(display, args.book_id, per_chapter, meanings, audio_src)
-    (out_dir / f"{slug}.html").write_text(html, encoding="utf-8")
-    reading = glp.build_reading_json(display, args.book_id, per_chapter, meanings, audio_src)
-    (out_dir / f"{slug}.reading.json").write_text(json.dumps(reading, ensure_ascii=False) + "\n", encoding="utf-8")
+    if args.commit:
+        write_and_commit(per_chapter, meanings, audio_src, meta, args.book_id, args.audio_id)
+    else:
+        display = dl.clean_title(meta["title"]) + " (merged)"
+        out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+        slug = "merged-" + args.book_id[:8]
+        html = glp.render_reading_html(display, args.book_id, per_chapter, meanings, audio_src)
+        (out_dir / f"{slug}.html").write_text(html, encoding="utf-8")
+        reading = glp.build_reading_json(display, args.book_id, per_chapter, meanings, audio_src)
+        (out_dir / f"{slug}.reading.json").write_text(json.dumps(reading, ensure_ascii=False) + "\n", encoding="utf-8")
 
     print(f"\n=== RESULT ===")
     print(f"timed sentences : {timed}/{nsent} ({timed/nsent*100:.1f}%)")
     print(f"kanji upgrades  : {total_up} tokens gained kanji")
     print(f"guard rejects   : {total_drift} sentences kept original (reading drift)")
-    print(f"wrote           : {out_dir / (slug + '.html')}")
+    if args.commit:
+        print(f"wrote           : {glp.READING_DIR / (merged_id(args.book_id, args.audio_id) + '.html')}")
+    else:
+        print(f"wrote           : {out_dir / (slug + '.html')}")
     print(f"\nsample upgrades (book → merged):")
     for o, n in samples:
         print(f"  - {o[:38]}\n    {n[:38]}")

@@ -8,6 +8,9 @@ const metrics = (l: any) => [
   Number.isFinite(l.grammar_count) ? { k: 'n.grammar', n: l.grammar_count } : null,
   { k: 'n.chapters', n: l.chapters.length },
 ].filter(Boolean) as Array<{ k: string; n: number }>;
+// A transcript-sourced reader carries an audio blob; a merged reader is flagged so
+// it's never itself re-merged. Merge pairs exactly one book (no audio) + one audio.
+const kindOf = (l: any) => (l.reading?.merged ? 'merged' : l.reading?.audio ? 'audio' : 'book');
 ---
 <Base title={t('nav.reader')} active="reader" crumbs={[{ i18n: 'nav.reader' }]}>
   <div class="title-row"><h1 data-i18n="nav.reader">{t('nav.reader')}</h1>
@@ -16,15 +19,53 @@ const metrics = (l: any) => [
   {langs.length ? (
     <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(280px,1fr))">
       {langs.map((l) => (
-        <a class="card" href={`/reader/${l.slug}`} style="text-decoration:none;color:inherit">
-          <div class="chip">JA</div>
-          <div style="font-weight:600;margin:8px 0 4px">{l.title}</div>
-          <div class="muted small">{metrics(l).map((m, i) => (<>{i ? ' · ' : ''}<span data-i18n={m.k} data-i18n-args={JSON.stringify({ n: m.n })}>{t(m.k, { n: m.n })}</span></>))}</div>
-        </a>
+        <div class="reader-card" data-id={l.id} data-kind={kindOf(l)} data-title={l.title}>
+          <label class="reader-pick" title="Select for merge"><input type="checkbox" /></label>
+          <a class="card" href={`/reader/${l.slug}`} style="text-decoration:none;color:inherit;display:block">
+            <div class="chip">{kindOf(l) === 'audio' ? '🔊 JA' : kindOf(l) === 'merged' ? '★ JA' : 'JA'}</div>
+            <div style="font-weight:600;margin:8px 0 4px">{l.title}</div>
+            <div class="muted small">{metrics(l).map((m, i) => (<>{i ? ' · ' : ''}<span data-i18n={m.k} data-i18n-args={JSON.stringify({ n: m.n })}>{t(m.k, { n: m.n })}</span></>))}</div>
+          </a>
+        </div>
       ))}
     </div>
   ) : (
     <div class="card"><p class="muted" data-i18n="reader.none">{t('reader.none')}</p></div>
   )}
   <p class="muted small" style="margin-top:20px" data-i18n="reader.note">{t('reader.note')}</p>
+
+  <div id="lang-actions" hidden>
+    <span><b id="lang-sel-count">0</b> selected</span>
+    <button id="lang-merge-btn" class="btn" disabled title="Select one book reader and one audio reader">Merge → new reader</button>
+  </div>
+
+  <dialog id="lang-merge-dialog">
+    <h3 style="margin:0 0 8px">Merging readers</h3>
+    <p class="muted small" style="margin:0 0 8px">Book text &amp; grammar, upgraded to natural kanji, on the audio timeline. This runs the LLM and can take a while.</p>
+    <pre class="log"></pre>
+    <form method="dialog" style="text-align:right;margin-top:8px"><button class="btn">Close</button></form>
+  </dialog>
 </Base>
+
+<style>
+  .reader-card { position: relative; }
+  .reader-pick { position: absolute; top: 8px; right: 8px; z-index: 2; cursor: pointer; }
+  .reader-pick input { width: 18px; height: 18px; cursor: pointer; }
+  #lang-actions {
+    position: sticky; bottom: 16px; margin-top: 20px; display: flex; gap: 12px;
+    align-items: center; justify-content: flex-end; padding: 10px 14px;
+    border: 1px solid var(--border, #ccc); border-radius: 10px;
+    background: var(--bg-elev, rgba(127,127,127,0.08)); backdrop-filter: blur(4px);
+  }
+  #lang-merge-dialog { max-width: 640px; width: 90vw; border-radius: 12px; border: 1px solid var(--border, #ccc); }
+  #lang-merge-dialog .log {
+    max-height: 50vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    font: 12px/1.5 ui-monospace, monospace; margin: 0; padding: 10px;
+    background: rgba(127,127,127,0.1); border-radius: 8px;
+  }
+</style>
+
+<script>
+  import { installLangOps } from '../../scripts/lang-ops-client.js';
+  installLangOps();
+</script>

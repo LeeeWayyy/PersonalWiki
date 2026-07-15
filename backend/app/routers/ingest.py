@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import os
+import re
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -83,6 +84,29 @@ async def ingest(
         target = _validated_url(optional_string(body.get("url"), "url").strip())
     job_id = ir.start_job(target, opts)
     return {"job_id": job_id}
+
+
+_SOURCE_ID_RX = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+@router.post("/lang/merge")
+async def lang_merge(request: Request):
+    """Merge a book lang reader with an audio one into a NEW committed reader.
+
+    Long (LLM calibration ~30 min), so it runs as a background job like ingest —
+    stream progress over GET /jobs/{id}/events. The book supplies text/grammar/
+    vocab (upgraded to natural kanji), the audio supplies the timeline.
+    """
+    body = await json_object(request)
+    book_id = optional_string(body.get("book_id"), "book_id").strip()
+    audio_id = optional_string(body.get("audio_id"), "audio_id").strip()
+    if not _SOURCE_ID_RX.fullmatch(book_id) or not _SOURCE_ID_RX.fullmatch(audio_id):
+        raise HTTPException(400, "book_id and audio_id must be valid source ids")
+    if book_id == audio_id:
+        raise HTTPException(400, "book_id and audio_id must differ")
+    opts = {"kind": "lang-merge", "book_id": book_id, "audio_id": audio_id,
+            "refresh": bool(body.get("refresh"))}
+    return {"job_id": ir.start_job("", opts)}
 
 
 _EXTRACT_SCRIPT = ir.REPO / "pipeline" / "scripts" / "extract.py"
