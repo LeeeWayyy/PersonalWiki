@@ -105,15 +105,15 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
         </div>
 
         <script is:inline id="reading-data" type="application/json" set:html={readingPayload}></script>
-        <script is:inline>
+        <script>
+          // @ts-nocheck
+          import { api } from '../../scripts/backend-client.js';
+
           const { reading, sourceId } = JSON.parse(document.getElementById('reading-data').textContent);
-          // ponytail: is:inline script can't import lib/i18n.mjs — the JP immersion labels
-          // (ふりがな/表示/文法…) are part of the reader's design; only these few
-          // status messages are language-switched, via a local EN flag.
+          // The JP immersion labels (ふりがな/表示/文法…) are part of the reader's
+          // design; only these few status messages use the local language flag.
           const EN = (localStorage.getItem('pw:lang') || 'zh') === 'en';
           const BACKEND = '';
-          const TOKEN = localStorage.getItem('backendToken') || '';
-          const H = TOKEN ? { 'X-Auth-Token': TOKEN } : {};
           const saved = new Set();
           let fontSize = 24, furi = true, trans = 'show';
           const POSKEY = 'pw:read:' + sourceId;
@@ -180,7 +180,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           }
 
           async function loadKnown() {
-            try { const r = await fetch(`${BACKEND}/vocab?kind=word`, { headers: H }); if (r.ok) (await r.json()).forEach((i) => saved.add(i.lemma)); } catch {}
+            try { const r = await api('/vocab?kind=word'); if (r.ok) (await r.json()).forEach((i) => saved.add(i.lemma)); } catch {}
             document.getElementById('c-saved').textContent = saved.size;
           }
 
@@ -188,7 +188,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           let gbank = null;
           async function grammarBank() {
             if (!gbank) {
-              try { const r = await fetch(`${BACKEND}/vocab?kind=grammar`, { headers: H }); if (r.ok) gbank = new Map((await r.json()).map((i) => [i.lemma, i])); } catch {}
+              try { const r = await api('/vocab?kind=grammar'); if (r.ok) gbank = new Map((await r.json()).map((i) => [i.lemma, i])); } catch {}
               gbank = gbank || new Map();
             }
             return gbank;
@@ -271,7 +271,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             if (trans === 'tap') el.classList.toggle('reveal');
             if (!en.textContent) {
               en.textContent = '…';
-              try { const r = await fetch(`${BACKEND}/translate`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ text: en.dataset.jp, lang: 'ja' }) });
+              try { const r = await api('/translate', { method: 'POST', json: { text: en.dataset.jp, lang: 'ja' } });
                 en.textContent = r.ok ? (await r.json()).translation : (EN ? '(translation unavailable)' : '（翻译不可用）'); }
               catch { en.textContent = EN
                 ? `(study backend offline — start it: cd backend && bash run.sh · expected at ${BACKEND})`
@@ -315,7 +315,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             root.querySelectorAll('.gadd').forEach((b) => b.onclick = async (ev) => { ev.stopPropagation();
               const it = bank.get(b.dataset.lemma); if (!it) return;
               try {
-                const r = await fetch(`${BACKEND}/vocab/${it.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status: 'new' }) });
+                const r = await api(`/vocab/${it.id}`, { method: 'PATCH', json: { status: 'new' } });
                 if (!r.ok) throw new Error();
                 it.status = 'new'; b.textContent = EN ? 'in review' : '复习中'; b.disabled = true;
               } catch { alert(EN ? 'Could not reach study backend (' + BACKEND + ').' : '无法连接学习后端（' + BACKEND + '）。'); }
@@ -346,11 +346,11 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
 
           async function saveWord(d, status) {
             try {
-              const r = await fetch(`${BACKEND}/vocab`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...H },
-                body: JSON.stringify({ kind: 'word', source_id: sourceId, lemma: d.w, reading: d.r, pos: d.p, gloss: d.m }) });
+              const r = await api('/vocab', { method: 'POST',
+                json: { kind: 'word', source_id: sourceId, lemma: d.w, reading: d.r, pos: d.p, gloss: d.m } });
               if (!r.ok) throw new Error();
               const id = (await r.json()).id;
-              if (status) await fetch(`${BACKEND}/vocab/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...H }, body: JSON.stringify({ status }) });
+              if (status) await api(`/vocab/${id}`, { method: 'PATCH', json: { status } });
               saved.add(d.w); document.getElementById('c-saved').textContent = saved.size;
               // ponytail: restyle just the matching tokens instead of rebuilding the whole document
               rd.querySelectorAll('.word').forEach((w) => { if (w.dataset.w === d.w) w.setAttribute('style', posStyle(w.dataset.p, false)); });

@@ -41,6 +41,24 @@ def _init_content_repo() -> None:
 
 
 _init_content_repo()
+_BASE_COMMIT = subprocess.check_output(
+    ["git", "-C", str(_CONTENT), "rev-parse", "HEAD"], text=True
+).strip()
+
+
+@pytest.fixture(autouse=True)
+def reset_content_repo():
+    """Keep per-domain test files independent of mutations to the shared temp repo."""
+    subprocess.run(
+        ["git", "-C", str(_CONTENT), "reset", "--hard", _BASE_COMMIT],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "-C", str(_CONTENT), "clean", "-fd"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
 
 
 @pytest.fixture(scope="session")

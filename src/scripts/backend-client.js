@@ -1,9 +1,18 @@
-export function headersFor(token) {
+export function authHeaders(token = localStorage.getItem('backendToken') || '') {
   return token ? { 'X-Auth-Token': token } : {};
 }
 
-export async function streamJob(baseUrl, jobId, headers, append) {
-  const res = await fetch(baseUrl + '/jobs/' + jobId + '/events', { headers });
+export function api(path, { json, headers, ...options } = {}) {
+  const hasJson = json !== undefined;
+  return fetch(path, {
+    ...options,
+    headers: { ...authHeaders(), ...(hasJson ? { 'Content-Type': 'application/json' } : {}), ...headers },
+    ...(hasJson ? { body: JSON.stringify(json) } : {}),
+  });
+}
+
+export async function streamJob(jobId, append) {
+  const res = await api('/jobs/' + jobId + '/events');
   if (!res.ok) throw new Error(await res.text());
   if (!res.body) throw new Error('stream unavailable');
   const reader = res.body.getReader();

@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from .. import ingest_runner as ir
@@ -16,7 +16,7 @@ from .. import settings
 from ..auth import require_auth
 from ..validation import json_object, normalize_ingest_options, optional_string, parse_json_object
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 def _sse_data(line: str) -> str:
@@ -73,9 +73,7 @@ async def ingest(
     request: Request,
     file: UploadFile | None = File(None),
     options: str | None = Form(None),
-    x_auth_token: str | None = Header(None),
 ):
-    require_auth(x_auth_token)
     if file is not None:
         opts = normalize_ingest_options(parse_json_object(options, "options"))
         target = str(await _stage_upload(file))
@@ -140,10 +138,8 @@ async def _list_sections(target: str) -> list[str]:
 async def ingest_sections(
     request: Request,
     file: UploadFile | None = File(None),
-    x_auth_token: str | None = Header(None),
 ):
     """List a source's `## ` section headings so the UI can offer a chapter picker."""
-    require_auth(x_auth_token)
     staged: Path | None = None
     if file is not None:
         staged = await _stage_upload(file)
@@ -161,8 +157,7 @@ async def ingest_sections(
 
 
 @router.get("/jobs/{job_id}")
-async def job_status(job_id: str, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def job_status(job_id: str):
     job = ir.get_job(job_id)
     if not job:
         raise HTTPException(404, "unknown job")
@@ -179,9 +174,7 @@ async def job_status(job_id: str, x_auth_token: str | None = Header(None)):
 async def job_events(
     job_id: str,
     request: Request,
-    x_auth_token: str | None = Header(None),
 ):
-    require_auth(x_auth_token)
     job = ir.get_job(job_id)
     if not job:
         raise HTTPException(404, "unknown job")
@@ -203,8 +196,7 @@ async def job_events(
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_job(job_id: str, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def cancel_job(job_id: str):
     job = await ir.cancel_job(job_id)
     if not job:
         raise HTTPException(404, "unknown job")
@@ -212,8 +204,7 @@ async def cancel_job(job_id: str, x_auth_token: str | None = Header(None)):
 
 
 @router.get("/preflight")
-def preflight(kind: str = "auto", x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+def preflight(kind: str = "auto"):
     kind = normalize_ingest_options({"kind": kind})["kind"]
     ok, msg, offending = ir.preflight({"kind": kind})
     return {"ok": ok, "message": msg, "offending": offending}

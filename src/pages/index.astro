@@ -204,6 +204,7 @@ const idxArgs = JSON.stringify({ n: content.length, m: tagPills.length });
     import { mount } from '../scripts/ingest-client.js';
     import { installPageOps } from '../scripts/wiki-page-client.js';
     import { mountListFilter } from '../scripts/list-filter.js';
+    import { api } from '../scripts/backend-client.js';
     import { t } from '../lib/i18n.mjs';
 
     // ---- Knowledge index filtering ----
@@ -296,8 +297,7 @@ const idxArgs = JSON.stringify({ n: content.length, m: tagPills.length });
     // 待复习 count from the study backend (best-effort; leaves '·' if offline)
     (async () => {
       try {
-        const token = localStorage.getItem('backendToken') || '';
-        const r = await fetch('/review/stats', { headers: token ? { 'X-Auth-Token': token } : {} });
+        const r = await api('/review/stats');
         if (!r.ok) return;
         const s = await r.json();
         const el = document.getElementById('due-count'); if (el) el.textContent = String(Number(s.due ?? 0));

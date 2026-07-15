@@ -1,4 +1,4 @@
-import { headersFor, streamJob } from './backend-client.js';
+import { api, streamJob } from './backend-client.js';
 import { t } from '../lib/i18n.mjs';
 
 // t() is safe at module load: the language is fixed per page load (toggle reloads).
@@ -39,7 +39,6 @@ export function mount(config) {
   const sectionsLoadBtn = config.sectionsLoadId ? el(config.sectionsLoadId) : null;
   const fileNameEl = config.fileNameId ? el(config.fileNameId) : null;
   let activeJob = null;
-  let activeHeaders = {};
   let mode = 'url';
   let backendOnline = false;
 
@@ -59,17 +58,13 @@ export function mount(config) {
   kindInput.addEventListener('change', syncSectionSupport);
   syncSectionSupport();
 
-  function authHeaders() {
-    return headersFor(localStorage.getItem('backendToken') || tokenInput.value);
-  }
-
   function append(text) {
     appendTo(log, text, true);
   }
 
   async function ping() {
     try {
-      const r = await fetch('/health');
+      const r = await api('/health');
       backendOnline = r.ok;
       const [text, color] = r.ok ? STATUS.online : STATUS.error;
       status.textContent = text;
@@ -96,20 +91,19 @@ export function mount(config) {
   }
 
   // Build fetch args for a file-or-url POST; returns {error} when input is missing.
-  function sourcePayload(H, opts) {
+  function sourcePayload(opts) {
     if (mode === 'file') {
       const file = el(config.fileInputId).files[0];
       if (!file) return { error: t('ingest.err.file') };
       const fd = new FormData();
       fd.append('file', file);
       if (opts) fd.append('options', JSON.stringify(opts));
-      return { headers: H, body: fd };
+      return { body: fd };
     }
     const target = el(config.urlInputId).value.trim();
     if (!target) return { error: t('ingest.err.url') };
     return {
-      headers: { ...H, 'Content-Type': 'application/json' },
-      body: JSON.stringify(opts ? { url: target, options: opts } : { url: target }),
+      json: opts ? { url: target, options: opts } : { url: target },
     };
   }
 
@@ -124,11 +118,11 @@ export function mount(config) {
 
   if (sectionsLoadBtn && sectionList) {
     sectionsLoadBtn.onclick = async () => {
-      const payload = sourcePayload(authHeaders());
+      const payload = sourcePayload();
       if (payload.error) return append(payload.error);
       sectionsLoadBtn.disabled = true;
       try {
-        const res = await fetch('/ingest/sections', { method: 'POST', ...payload });
+        const res = await api('/ingest/sections', { method: 'POST', ...payload });
         if (!res.ok) throw new Error(await res.text());
         const { sections } = await res.json();
         sectionList.replaceChildren(
@@ -163,10 +157,7 @@ export function mount(config) {
     if (!activeJob) return;
     cancelBtn.disabled = true;
     try {
-      const r = await fetch('/jobs/' + activeJob + '/cancel', {
-        method: 'POST',
-        headers: activeHeaders,
-      });
+      const r = await api('/jobs/' + activeJob + '/cancel', { method: 'POST' });
       if (!r.ok) throw new Error(await r.text());
       append(t('ingest.cancelReq'));
     } catch (e) {
@@ -176,28 +167,25 @@ export function mount(config) {
   };
 
   el(config.runId).onclick = async () => {
-    const H = authHeaders();
     const opts = ingestOptions(
       kindInput.value,
       sectionHeadingInput.value,
     );
     log.textContent = '';
     try {
-      const payload = sourcePayload(H, opts);
+      const payload = sourcePayload(opts);
       if (payload.error) return append(payload.error);
-      const res = await fetch('/ingest', { method: 'POST', ...payload });
+      const res = await api('/ingest', { method: 'POST', ...payload });
       if (!res.ok) throw new Error(await res.text());
       const { job_id: jobId } = await res.json();
       append(t('ingest.jobStarted', { id: jobId }));
       activeJob = jobId;
-      activeHeaders = H;
       cancelBtn.style.display = '';
       cancelBtn.disabled = false;
       try {
-        await streamJob('', jobId, H, append);
+        await streamJob(jobId, append);
       } finally {
         activeJob = null;
-        activeHeaders = {};
         cancelBtn.style.display = 'none';
         cancelBtn.disabled = false;
       }

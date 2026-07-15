@@ -716,45 +716,6 @@ def _safe_image_basename(ref: str) -> str:
     return base
 
 
-def _evidence_path_ok(path) -> bool:
-    """An evidence/audit path must be lexically under sources/ (no `..`) AND resolve —
-    following symlinks — to a location still under sources/. The lexical check alone lets
-    a committed symlink (`sources/link.jpg -> /outside`) make reuse fingerprint a file
-    outside the vault, defeating no-silent-drift. (cwd-relative, like the rest of this
-    module — ingest runs from the vault root.)"""
-    if not path or ".." in str(path).split("/") or not str(path).startswith("sources/"):
-        return False
-    try:
-        Path(path).resolve().relative_to(Path("sources").resolve())
-    except (ValueError, OSError):
-        return False
-    return True
-
-
-def _recompute_evidence_bundle(art: dict) -> str | None:
-    """Reuse-time recompute of an `image_sha256_index_join` bundle from its committed
-    `.cards.json`/`frames.json` (`from:`). Mirrors lint's _recompute_bundle (and the
-    same sources/ + no-`..` + no-symlink-escape path constraint). None = unverifiable
-    (caller dies)."""
-    if art.get("bundle_recipe") != "image_sha256_index_join":
-        return None
-    src = art.get("from")
-    if not _evidence_path_ok(src):
-        return None
-    if not Path(src).is_file():
-        return None
-    try:
-        rows = json.loads(Path(src).read_text(encoding="utf-8"))  # NOT _load_json (it die()s on bad JSON)
-    except (OSError, ValueError):
-        return None
-    if not isinstance(rows, list):
-        return None
-    try:
-        return _image_bundle_sha256(rows)
-    except (KeyError, TypeError):
-        return None
-
-
 def _verify_evidence_or_die(fm: dict, sidecar) -> None:
     """No-silent-drift guard for the reuse path: re-hash EVERY media.evidence_artifacts[]
     entry (file → sha256_of; image_sha256_index_join bundle → recompute from its source
@@ -774,13 +735,13 @@ def _verify_evidence_or_die(fm: dict, sidecar) -> None:
         want = art["sha256"]
         role = art.get("role", "?")
         if "bundle_recipe" in art:
-            got = _recompute_evidence_bundle(art)
+            got = media_resolver.recompute_evidence_bundle(Path("."), art)
             if got is None:
                 die(f"evidence bundle '{role}' is unverifiable for reuse "
                     f"(recipe={art.get('bundle_recipe')!r}): {sidecar}")
         else:
             path = art.get("path")
-            if not _evidence_path_ok(path):
+            if not media_resolver.evidence_path_ok(Path("."), path):
                 die(f"evidence artifact '{role}' has an unsafe path {path!r} in {sidecar}")
             if not Path(path).is_file():
                 die(f"evidence artifact '{role}' missing for reuse: {path}")

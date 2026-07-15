@@ -5,14 +5,12 @@
 // renders it as markdown.
 import { t } from '../lib/i18n.mjs';
 import { esc } from './list-filter.js';
+import { api } from './backend-client.js';
 
 export function installWikiNote() {
   const art = document.querySelector('article[data-wiki-rel]');
   if (!art) return;
   const rel = art.dataset.wikiRel;
-  const BACKEND = '';
-  const TOKEN = localStorage.getItem('backendToken') || '';
-  const H = { 'Content-Type': 'application/json', ...(TOKEN ? { 'X-Auth-Token': TOKEN } : {}) };
   const prose = art.querySelector('.prose');
   let editor = null;
 
@@ -61,7 +59,7 @@ export function installWikiNote() {
     async function save() {
       status.textContent = t('rv.saving');
       try {
-        const r = await fetch(`${BACKEND}/wiki/human-zone`, { method: 'PUT', headers: H, body: JSON.stringify({ rel, text: ta.value }) });
+        const r = await api('/wiki/human-zone', { method: 'PUT', json: { rel, text: ta.value } });
         if (r.status === 401 || r.status === 403) { status.textContent = t('sr.tokenNeeded'); return; }
         if (!r.ok) { status.textContent = await r.text(); return; }
         showSaved(ta.value);
@@ -75,7 +73,7 @@ export function installWikiNote() {
     // can never be saved back as an empty note.
     ta.disabled = true;
     try {
-      const r = await fetch(`${BACKEND}/wiki/human-zone?rel=${encodeURIComponent(rel)}`, { headers: H });
+      const r = await api(`/wiki/human-zone?rel=${encodeURIComponent(rel)}`);
       if (r.status === 401 || r.status === 403) { status.textContent = t('sr.tokenNeeded'); return; }
       if (!r.ok) { status.textContent = await r.text(); return; }
       ta.value = (await r.json()).text || '';

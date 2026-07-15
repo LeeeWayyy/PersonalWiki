@@ -50,10 +50,9 @@ import { t } from '../../lib/i18n.mjs';
 
   <script>
     import { t } from '../../lib/i18n.mjs';
+    import { api } from '../../scripts/backend-client.js';
 
     const BACKEND = '';
-    const TOKEN = localStorage.getItem('backendToken') || '';
-    const H = { 'Content-Type': 'application/json', ...(TOKEN ? { 'X-Auth-Token': TOKEN } : {}) };
     const esc = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     const $ = (id: string) => document.getElementById(id)!;
 
@@ -146,7 +145,7 @@ import { t } from '../../lib/i18n.mjs';
       const card = cur;
       grading = true;
       try {
-        const r = await fetch(`${BACKEND}/review/${card.id}/grade`, { method: 'POST', headers: H, body: JSON.stringify({ grade: g }) });
+        const r = await api(`/review/${card.id}/grade`, { method: 'POST', json: { grade: g } });
         if (!r.ok) throw new Error();
       } catch {
         offlineDetail = t('rv.gradeNotSaved');
@@ -168,7 +167,7 @@ import { t } from '../../lib/i18n.mjs';
 
     async function load() {
       try {
-        const r = await fetch(`${BACKEND}/review/queue`, { headers: H });
+        const r = await api('/review/queue');
         if (!r.ok) throw new Error();
         queue = await r.json();
       } catch {
@@ -182,7 +181,7 @@ import { t } from '../../lib/i18n.mjs';
     // Left rail — today counts + total-due from /review/stats
     async function fetchStats() {
       try {
-        const r = await fetch(`${BACKEND}/review/stats`, { headers: H }); if (!r.ok) return;
+        const r = await api('/review/stats'); if (!r.ok) return;
         const s = await r.json();
         const due = Number(s.due ?? 0), nw = Number(s.new ?? 0);
         const rows = [
@@ -199,7 +198,7 @@ import { t } from '../../lib/i18n.mjs';
     // This-week forecast — bucket every card's due date from /vocab into today..+6
     async function fetchForecast() {
       let items = [];
-      try { const r = await fetch(`${BACKEND}/vocab`, { headers: H }); if (r.ok) items = await r.json(); } catch { return; }
+      try { const r = await api('/vocab'); if (r.ok) items = await r.json(); } catch { return; }
       const wd = t('rv.wd').split(',');
       const start = new Date(new Date().toDateString());
       const buckets = new Array(7).fill(0);
@@ -229,9 +228,9 @@ import { t } from '../../lib/i18n.mjs';
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(async () => {
         try {
-          const r = await fetch(`${BACKEND}/vocab/${c.id}`, { method: 'PATCH', headers: H, body: JSON.stringify({
+          const r = await api(`/vocab/${c.id}`, { method: 'PATCH', json: {
             reading: c.reading, gloss: c.gloss, example: c.example, pos: c.pos,
-          }) });
+          } });
           if (!r.ok) throw new Error('save failed');
           saved.textContent = t('rv.savedOk');
         } catch { saved.textContent = t('rv.offline2'); }

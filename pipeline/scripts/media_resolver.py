@@ -12,6 +12,7 @@ This module is *imported*, not run, so it carries no PEP-723 block; it uses
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -266,6 +267,35 @@ def render_image_note_md(items: list[dict]) -> str:
                 for ln in body.split("\n")))
         out.append("")
     return "\n".join(out).rstrip("\n") + "\n"
+
+
+def evidence_path_ok(root: Path, path: object) -> bool:
+    """Return whether a repo-relative evidence path stays under sources/."""
+    if not path or ".." in str(path).split("/") or not str(path).startswith("sources/"):
+        return False
+    try:
+        (root / str(path)).resolve().relative_to((root / "sources").resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def recompute_evidence_bundle(root: Path, artifact: dict) -> str | None:
+    """Recompute the supported evidence bundle, or return None if unverifiable."""
+    if artifact.get("bundle_recipe") != "image_sha256_index_join":
+        return None
+    source = artifact.get("from")
+    if not evidence_path_ok(root, source):
+        return None
+    try:
+        rows = json.loads((root / source).read_text(encoding="utf-8"))
+        joined = "\n".join(
+            str(row["image_sha256"])
+            for row in sorted(rows, key=lambda row: row["index"])
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 def evidence_completeness_notes(sidecar: Path, fm: dict, root: Path) -> list[str]:

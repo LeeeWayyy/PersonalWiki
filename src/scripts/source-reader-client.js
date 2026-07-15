@@ -1,35 +1,15 @@
 import { installSourceReaderAnchors } from './source-reader-anchors-dom.js';
 import { esc } from './list-filter.js';
+import { api } from './backend-client.js';
+import { charRange, wrapTextSegments } from './source-reader-marks.js';
+import { clamp, installReaderState } from './source-reader-state.js';
 import { t } from '../lib/i18n.mjs';
 
 const ANNO_COLORS = new Set(['note', 'question', 'important']);
-const DEFAULT_PREFS = { fontSize: 18, lineHeight: 1.9, width: '42rem', theme: 'night', font: 'serif', mode: 'scroll', focus: false };
-const WIDTHS = new Set(['34rem', '42rem', '50rem']);
-const THEMES = new Set(['night', 'paper', 'sepia']);
-const FONTS = new Set(['serif', 'sans']);
-const MODES = new Set(['scroll', 'page']);
-
-const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 
 function attr(s) { return esc(s).replace(/"/g, '&quot;'); }
 function safeColor(c) { return ANNO_COLORS.has(c) ? c : 'note'; }
 function safeWikiHref(href) { return typeof href === 'string' && href.startsWith('/wiki/') ? href : ''; }
-function readJson(key, fallback) { try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; } }
-function writeJson(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
-
-function cleanPrefs(raw) {
-  const p = { ...DEFAULT_PREFS, ...(raw || {}) };
-  return {
-    fontSize: clamp(Number(p.fontSize) || DEFAULT_PREFS.fontSize, 16, 24),
-    lineHeight: clamp(Number(p.lineHeight) || DEFAULT_PREFS.lineHeight, 1.65, 2.25),
-    width: WIDTHS.has(p.width) ? p.width : DEFAULT_PREFS.width,
-    theme: THEMES.has(p.theme) ? p.theme : DEFAULT_PREFS.theme,
-    font: FONTS.has(p.font) ? p.font : DEFAULT_PREFS.font,
-    mode: MODES.has(p.mode) ? p.mode : DEFAULT_PREFS.mode,
-    focus: !!p.focus,
-  };
-}
-
 function parseReaderConfig(root) {
   try {
     return JSON.parse(root?.dataset?.sourceReader || '{}') || {};
@@ -66,17 +46,8 @@ function bootSourceReader(options = {}) {
   const list = document.getElementById('sr-list');
   const orphans = document.getElementById('sr-orphans');
   const statusEl = document.getElementById('sr-status');
-  const prefsPanel = document.getElementById('sr-prefs');
-  const progressFill = document.querySelector('#sr-progress span');
-  const progressText = document.getElementById('sr-progress-text');
   const notesEl = document.getElementById('sr-notes');
   if (!anchors || !doc || !pop || !list || !orphans || !statusEl) return;
-
-  const BACKEND = '';
-  const TOKEN = localStorage.getItem('backendToken') || '';
-  const H = { 'Content-Type': 'application/json', ...(TOKEN ? { 'X-Auth-Token': TOKEN } : {}) };
-  const PREFS_KEY = 'sourceReaderPrefs:v1';
-  const PROGRESS_KEY = `sourceReaderProgress:${sourceId}`;
 
   let annotations = [];
   let allAnnotationCount = 0;
@@ -84,15 +55,11 @@ function bootSourceReader(options = {}) {
   let filter = 'all';
   let lastSel = null;
   let pendingRegion = null;
-  let activeBlock = null;
-  let saveProgressTimer = 0;
-  let progressRaf = 0;
   let figDraw = null;
   let assistText = '';
   let cmdItems = [];
   let cmdCatalog = [];
   let cmdSel = 0;
-  let prefs = cleanPrefs(readJson(PREFS_KEY, DEFAULT_PREFS));
   const pendingAnnotationBodies = new Map();
 
   const renderedBlockIds = new Set([...doc.querySelectorAll('[data-block]')].map((el) => el.dataset.block).filter(Boolean));
@@ -136,53 +103,12 @@ function bootSourceReader(options = {}) {
     statusEl.textContent = message;
   }
 
-  function syncPrefsControls() {
-    if (!prefsPanel) return;
-    const fs = prefsPanel.querySelector('[data-pref="fontSize"]');
-    const lh = prefsPanel.querySelector('[data-pref="lineHeight"]');
-    if (fs) fs.value = prefs.fontSize;
-    if (lh) lh.value = prefs.lineHeight;
-    prefsPanel.querySelector('[data-out="fontSize"]').textContent = `${prefs.fontSize}px`;
-    prefsPanel.querySelector('[data-out="lineHeight"]').textContent = prefs.lineHeight.toFixed(2);
-    prefsPanel.querySelectorAll('[data-width]').forEach((b) => b.classList.toggle('on', b.dataset.width === prefs.width));
-    prefsPanel.querySelectorAll('[data-theme]').forEach((b) => b.classList.toggle('on', b.dataset.theme === prefs.theme));
-    prefsPanel.querySelectorAll('[data-font]').forEach((b) => b.classList.toggle('on', b.dataset.font === prefs.font));
-    prefsPanel.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === prefs.mode));
-    document.querySelector('[data-act="focus"]')?.setAttribute('aria-pressed', String(prefs.focus));
-  }
-
-  function savePrefs() { writeJson(PREFS_KEY, prefs); }
-
-  function applyPrefs() {
-    root.style.setProperty('--reader-font-size', `${prefs.fontSize}px`);
-    root.style.setProperty('--reader-line-height', String(prefs.lineHeight));
-    root.style.setProperty('--reader-width', prefs.width);
-    root.dataset.theme = prefs.theme;
-    root.dataset.font = prefs.font;
-    root.dataset.mode = prefs.mode;
-    document.body.classList.toggle('sr-reader-page', prefs.mode === 'page');
-    document.body.classList.toggle('sr-reader-focus', prefs.focus);
-    syncPrefsControls();
-  }
-
-  function setPrefsOpen(open) {
-    const btn = document.querySelector('[data-act="prefs"]');
-    if (!prefsPanel) return;
-    if (open) showPopover(prefsPanel);
-    else hidePopover(prefsPanel);
-    btn?.setAttribute('aria-expanded', String(!!open));
-  }
-
-  function setFocusMode(on) {
-    prefs.focus = !!on;
-    applyPrefs();
-    savePrefs();
-  }
-
-  function pageStep(direction) {
-    const distance = Math.max(320, Math.round(window.innerHeight * 0.82));
-    window.scrollBy({ top: direction * distance, behavior: 'smooth' });
-  }
+  const readerState = installReaderState(root, doc, sourceId, {
+    isOpen: isPopoverOpen,
+    show: showPopover,
+    hide: hidePopover,
+  });
+  const { prefs } = readerState;
 
   function isDrawerViewport() { return window.matchMedia('(max-width: 900px)').matches; }
 
@@ -191,137 +117,25 @@ function bootSourceReader(options = {}) {
     document.querySelector('[data-act="notes"]')?.setAttribute('aria-expanded', String(!!open));
   }
 
-  prefsPanel?.addEventListener('input', (e) => {
-    const input = e.target.closest('[data-pref]');
-    if (!input) return;
-    if (input.dataset.pref === 'fontSize') prefs.fontSize = clamp(Number(input.value), 16, 24);
-    if (input.dataset.pref === 'lineHeight') prefs.lineHeight = clamp(Number(input.value), 1.65, 2.25);
-    applyPrefs();
-    savePrefs();
-  });
-
-  prefsPanel?.addEventListener('click', (e) => {
-    const target = e.target instanceof Element ? e.target : e.target?.parentElement;
-    const button = target?.closest('button');
-    if (!button || !prefsPanel.contains(button)) return;
-    if (button.dataset.act === 'prefs-reset') prefs = { ...DEFAULT_PREFS };
-    else if (button.dataset.width) prefs.width = button.dataset.width;
-    else if (button.dataset.theme) prefs.theme = button.dataset.theme;
-    else if (button.dataset.font) prefs.font = button.dataset.font;
-    else if (button.dataset.mode) prefs.mode = button.dataset.mode;
-    else return;
-    applyPrefs();
-    savePrefs();
-  });
-  prefsPanel?.addEventListener('toggle', () => {
-    document.querySelector('[data-act="prefs"]')?.setAttribute('aria-expanded', String(isPopoverOpen(prefsPanel)));
-  });
-
   document.getElementById('sr-notes-shade')?.addEventListener('click', () => setNotesOpen(false));
   document.querySelector('[data-act="notes-close"]')?.addEventListener('click', () => setNotesOpen(false));
   root.querySelector('.sr-actions')?.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
-    if (btn.dataset.act === 'prefs') setPrefsOpen(!isPopoverOpen(prefsPanel));
-    if (btn.dataset.act === 'focus') setFocusMode(!prefs.focus);
-    if (btn.dataset.act === 'page-prev') pageStep(-1);
-    if (btn.dataset.act === 'page-next') pageStep(1);
+    if (btn.dataset.act === 'prefs') readerState.setPrefsOpen(!readerState.isPrefsOpen());
+    if (btn.dataset.act === 'focus') readerState.setFocusMode(!prefs.focus);
+    if (btn.dataset.act === 'page-prev') readerState.pageStep(-1);
+    if (btn.dataset.act === 'page-next') readerState.pageStep(1);
     if (btn.dataset.act === 'notes') {
       if (isDrawerViewport()) setNotesOpen(!document.body.classList.contains('sr-notes-open'));
       else notesEl?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
-    if (btn.dataset.act === 'resume') restoreProgress(true);
+    if (btn.dataset.act === 'resume') readerState.restoreProgress(true);
   });
-
-  function scrollPercent() {
-    const max = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
-    return clamp((window.scrollY / max) * 100, 0, 100);
-  }
-
-  function sectionLabelFor(el) {
-    let n = el;
-    while (n && !n.classList?.contains('sec-h')) n = n.previousElementSibling;
-    const label = (n?.textContent || '').trim();
-    return label.length > 18 ? label.slice(0, 18) + '...' : label;
-  }
-
-  function updateProgressUi(el = activeBlock) {
-    const pct = scrollPercent();
-    if (progressFill) progressFill.style.width = `${pct}%`;
-    if (progressText) {
-      const label = el ? sectionLabelFor(el) : '';
-      progressText.textContent = `${Math.round(pct)}%${label ? ` · ${label}` : ''}`;
-    }
-  }
-
-  function updateResumeState() {
-    const btn = document.querySelector('[data-act="resume"]');
-    if (!btn) return;
-    const saved = readJson(PROGRESS_KEY, null);
-    btn.disabled = !saved?.block_id;
-  }
-
-  function saveProgress(el = activeBlock) {
-    if (!el?.dataset?.block) return;
-    writeJson(PROGRESS_KEY, {
-      block_id: el.dataset.block,
-      section_id: el.dataset.section || '',
-      scrollY: Math.round(window.scrollY),
-      percent: Math.round(scrollPercent()),
-      updated: Date.now(),
-    });
-    updateResumeState();
-  }
-
-  function queueProgressSave(el = activeBlock) {
-    if (saveProgressTimer) return;
-    saveProgressTimer = window.setTimeout(() => {
-      saveProgressTimer = 0;
-      saveProgress(el);
-    }, 700);
-  }
-
-  function restoreProgress(animate) {
-    const saved = readJson(PROGRESS_KEY, null);
-    const el = saved?.block_id ? doc.querySelector(`[data-block="${CSS.escape(saved.block_id)}"]`) : null;
-    if (!el) return false;
-    activeBlock = el;
-    el.scrollIntoView({ block: 'center', behavior: animate ? 'smooth' : 'auto' });
-    updateProgressUi(el);
-    if (animate) {
-      el.classList.add('pulse');
-      setTimeout(() => el.classList.remove('pulse'), 1500);
-    }
-    return true;
-  }
-
-  const progressObserver = new IntersectionObserver((entries) => {
-    const hit = entries
-      .filter((entry) => entry.isIntersecting)
-      .sort((a, b) => Math.abs(a.boundingClientRect.top - 120) - Math.abs(b.boundingClientRect.top - 120))[0];
-    if (!hit) return;
-    activeBlock = hit.target;
-    updateProgressUi(activeBlock);
-    queueProgressSave(activeBlock);
-  }, { rootMargin: '-12% 0px -76% 0px', threshold: [0, 0.1, 0.5] });
-
-  doc.querySelectorAll('.blk, .fig, .sub-h').forEach((el) => progressObserver.observe(el));
-  window.addEventListener('scroll', () => {
-    if (progressRaf) return;
-    progressRaf = requestAnimationFrame(() => {
-      progressRaf = 0;
-      updateProgressUi(activeBlock);
-      queueProgressSave(activeBlock);
-    });
-  }, { passive: true });
-  window.addEventListener('beforeunload', () => saveProgress(activeBlock));
-  applyPrefs();
-  updateResumeState();
-  updateProgressUi();
 
   async function load() {
     try {
-      const r = await fetch(`${BACKEND}/annotations?source_id=${encodeURIComponent(sourceId)}`, { headers: H });
+      const r = await api(`/annotations?source_id=${encodeURIComponent(sourceId)}`);
       if (r.status === 503) {
         statusEl.textContent = t('sr.tokenNeeded');
         return;
@@ -340,66 +154,6 @@ function bootSourceReader(options = {}) {
 
   function resolveBlock(a) {
     return anchors.resolveBlock(doc, a);
-  }
-
-  function charRange(rootEl, start, end) {
-    const r = document.createRange();
-    let pos = 0;
-    let f = 0;
-    const w = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT);
-    let n;
-    while ((n = w.nextNode())) {
-      const len = n.nodeValue.length;
-      if (!(f & 1) && start <= pos + len) {
-        r.setStart(n, start - pos);
-        f |= 1;
-      }
-      if (!(f & 2) && end <= pos + len) {
-        r.setEnd(n, end - pos);
-        f |= 2;
-        break;
-      }
-      pos += len;
-    }
-    return f === 3 ? r : null;
-  }
-
-  function wrapTextSegments(range, className, aid, title = '') {
-    const rootNode = range.commonAncestorContainer.nodeType === Node.TEXT_NODE
-      ? range.commonAncestorContainer.parentNode
-      : range.commonAncestorContainer;
-    const nodes = [];
-    const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        if (!node.nodeValue || !range.intersectsNode(node)) return NodeFilter.FILTER_REJECT;
-        const start = node === range.startContainer ? range.startOffset : 0;
-        const end = node === range.endContainer ? range.endOffset : node.nodeValue.length;
-        return end > start ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      },
-    });
-    let node;
-    while ((node = walker.nextNode())) {
-      nodes.push({
-        node,
-        start: node === range.startContainer ? range.startOffset : 0,
-        end: node === range.endContainer ? range.endOffset : node.nodeValue.length,
-      });
-    }
-    let wrapped = 0;
-    for (const part of nodes) {
-      try {
-        const r = document.createRange();
-        r.setStart(part.node, part.start);
-        r.setEnd(part.node, part.end);
-        const mark = document.createElement('mark');
-        mark.className = className;
-        mark.dataset.aid = aid;
-        if (title) mark.title = title;
-        r.surroundContents(mark);
-        wrapped++;
-      } catch {}
-    }
-    return wrapped;
   }
 
   function clearMarks() {
@@ -550,7 +304,7 @@ function bootSourceReader(options = {}) {
 
   async function saveAnnotation(target, color, focusNote) {
     try {
-      const r = await fetch(`${BACKEND}/annotations`, { method: 'POST', headers: H, body: JSON.stringify({ source_id: sourceId, color, target, body: '' }) });
+      const r = await api('/annotations', { method: 'POST', json: { source_id: sourceId, color, target, body: '' } });
       if (!r.ok) throw new Error(await r.text());
       const a = await r.json();
       allAnnotationCount++;
@@ -671,7 +425,7 @@ function bootSourceReader(options = {}) {
     const pendingBody = pendingAnnotationBodies.get(aid);
     if (!a || (a.body === body && pendingBody !== body)) return;
     try {
-      const r = await fetch(`${BACKEND}/annotations/${aid}`, { method: 'PATCH', headers: H, body: JSON.stringify({ body }) });
+      const r = await api(`/annotations/${aid}`, { method: 'PATCH', json: { body } });
       if (!r.ok) throw new Error();
       a.body = body;
       pendingAnnotationBodies.delete(aid);
@@ -729,7 +483,7 @@ function bootSourceReader(options = {}) {
   async function doPromote(aid, rel) {
     if (!rel) return;
     try {
-      const r = await fetch(`${BACKEND}/annotations/${aid}/promote`, { method: 'POST', headers: H, body: JSON.stringify({ wiki_rel: rel, source_title: sourceTitle }) });
+      const r = await api(`/annotations/${aid}/promote`, { method: 'POST', json: { wiki_rel: rel, source_title: sourceTitle } });
       if (!r.ok) throw new Error(await r.text());
       const res = await r.json();
       const a = annotations.find((x) => x.id === aid);
@@ -756,7 +510,7 @@ function bootSourceReader(options = {}) {
     if (del) {
       const aid = del.dataset.del;
       try {
-        const r = await fetch(`${BACKEND}/annotations/${aid}`, { method: 'DELETE', headers: H });
+        const r = await api(`/annotations/${aid}`, { method: 'DELETE' });
         if (!r.ok) throw new Error();
       } catch {
         showOfflineStatus(t('sr.delOffline'));
@@ -806,9 +560,7 @@ function bootSourceReader(options = {}) {
     if (!el) return;
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     el.classList.add('pulse');
-    activeBlock = el.matches?.('[data-block]') ? el : el.querySelector?.('[data-block]') || activeBlock;
-    updateProgressUi(activeBlock);
-    queueProgressSave(activeBlock);
+    readerState.activate(el.matches?.('[data-block]') ? el : el.querySelector?.('[data-block]'));
     setTimeout(() => el.classList.remove('pulse'), 1500);
   }
 
@@ -861,7 +613,7 @@ function bootSourceReader(options = {}) {
     const out = assist.querySelector('.out');
     out.textContent = t('ai.thinking');
     try {
-      const r = await fetch(`${BACKEND}/assist`, { method: 'POST', headers: H, body: JSON.stringify({ text: assistText, mode }) });
+      const r = await api('/assist', { method: 'POST', json: { text: assistText, mode } });
       const j = await r.json();
       out.textContent = j.result || t('ai.noResult');
     } catch {
@@ -888,11 +640,11 @@ function bootSourceReader(options = {}) {
 
   function buildCommands() {
     const c = [];
-    c.push({ label: t('cmd.resume'), run: () => restoreProgress(true) });
-    c.push({ label: t('cmd.prev'), run: () => pageStep(-1) });
-    c.push({ label: t('cmd.next'), run: () => pageStep(1) });
-    c.push({ label: t(prefs.focus ? 'cmd.focusOff' : 'cmd.focusOn'), run: () => setFocusMode(!prefs.focus) });
-    c.push({ label: t('cmd.prefs'), run: () => setPrefsOpen(true) });
+    c.push({ label: t('cmd.resume'), run: () => readerState.restoreProgress(true) });
+    c.push({ label: t('cmd.prev'), run: () => readerState.pageStep(-1) });
+    c.push({ label: t('cmd.next'), run: () => readerState.pageStep(1) });
+    c.push({ label: t(prefs.focus ? 'cmd.focusOff' : 'cmd.focusOn'), run: () => readerState.setFocusMode(!prefs.focus) });
+    c.push({ label: t('cmd.prefs'), run: () => readerState.setPrefsOpen(true) });
     if (chapterCommands?.length) chapterCommands.forEach((chapter) => c.push({ label: t('cmd.chapter', { t: chapter.title }), run: () => { location.href = chapter.href; } }));
     else [...doc.querySelectorAll('.sec-h')].forEach((s) => c.push({ label: t('cmd.chapter', { t: s.textContent }), run: () => locate(s.textContent) }));
     [['all', t('cmd.fAll')], ['note', t('sr.fNotes')], ['question', t('sr.fQuestions')], ['important', t('sr.fImportant')]].forEach(([f, l]) => c.push({ label: t('cmd.filter', { t: l }), run: () => setFilter(f) }));
@@ -986,12 +738,12 @@ function bootSourceReader(options = {}) {
     if (prefs.mode === 'page' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
         e.preventDefault();
-        pageStep(1);
+        readerState.pageStep(1);
         return;
       }
       if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
         e.preventDefault();
-        pageStep(-1);
+        readerState.pageStep(-1);
         return;
       }
     }
@@ -1006,7 +758,7 @@ function bootSourceReader(options = {}) {
 
   load().then(() => setTimeout(() => {
     if (location.hash) resolveFragment();
-    else restoreProgress(false);
+    else readerState.restoreProgress(false);
   }, 120));
   window.addEventListener('hashchange', resolveFragment);
 }

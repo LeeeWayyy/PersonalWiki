@@ -8,7 +8,7 @@ import math
 import subprocess
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import db
 from .. import ingest_runner as ir
@@ -16,7 +16,7 @@ from .. import promote as promote_mod
 from ..auth import require_auth
 from ..validation import json_object, optional_object, optional_string
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 LOGGER = logging.getLogger(__name__)
 
 ALLOWED_ANNOTATION_COLORS = {"note", "question", "important"}
@@ -279,8 +279,7 @@ def _delete_annotation(aid: str):
 
 
 @router.post("/annotations")
-async def create_annotation(request: Request, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def create_annotation(request: Request):
     body = await json_object(request)
     source_id = optional_string(body.get("source_id"), "source_id").strip()
     if not source_id:
@@ -310,15 +309,13 @@ async def create_annotation(request: Request, x_auth_token: str | None = Header(
 
 
 @router.get("/annotations")
-async def list_annotations(source_id: str, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def list_annotations(source_id: str):
     rows = await asyncio.to_thread(_list_annotations, source_id)
     return [_annotation_dict(row) for row in rows]
 
 
 @router.patch("/annotations/{aid}")
-async def update_annotation(aid: str, request: Request, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def update_annotation(aid: str, request: Request):
     body = await json_object(request)
     sets: list[str] = []
     vals: list[str] = []
@@ -346,12 +343,11 @@ async def update_annotation(aid: str, request: Request, x_auth_token: str | None
 
 
 @router.post("/annotations/{aid}/promote")
-async def promote_annotation(aid: str, request: Request, x_auth_token: str | None = Header(None)):
+async def promote_annotation(aid: str, request: Request):
     """Write this annotation into a wiki page's human-zone and commit it.
 
     Serialized behind the ingest lock so it cannot race an ingest commit.
     """
-    require_auth(x_auth_token)
     body = await json_object(request)
     wiki_rel = optional_string(body.get("wiki_rel"), "wiki_rel").strip()
     if not wiki_rel:
@@ -394,8 +390,7 @@ async def promote_annotation(aid: str, request: Request, x_auth_token: str | Non
 
 
 @router.get("/wiki/human-zone")
-async def get_human_zone(rel: str, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def get_human_zone(rel: str):
     if not _valid_wiki_rel(rel):
         raise HTTPException(400, "invalid rel")
     try:
@@ -405,12 +400,11 @@ async def get_human_zone(rel: str, x_auth_token: str | None = Header(None)):
 
 
 @router.put("/wiki/human-zone")
-async def put_human_zone(request: Request, x_auth_token: str | None = Header(None)):
+async def put_human_zone(request: Request):
     """Replace a wiki page's human-zone from the UI and commit it.
 
     Serialized behind the ingest lock so it cannot race an ingest commit.
     """
-    require_auth(x_auth_token)
     body = await json_object(request)
     rel = optional_string(body.get("rel"), "rel").strip()
     if not rel or not _valid_wiki_rel(rel):
@@ -433,9 +427,8 @@ async def put_human_zone(request: Request, x_auth_token: str | None = Header(Non
 
 
 @router.post("/wiki/page/remove")
-async def remove_wiki_page(request: Request, x_auth_token: str | None = Header(None)):
+async def remove_wiki_page(request: Request):
     """Delete or merge a content page after an explicit client confirmation."""
-    require_auth(x_auth_token)
     body = await json_object(request)
     rel = optional_string(body.get("rel"), "rel").strip()
     merge_into = optional_string(body.get("merge_into"), "merge_into").strip() or None
@@ -482,8 +475,7 @@ async def remove_wiki_page(request: Request, x_auth_token: str | None = Header(N
 
 
 @router.delete("/annotations/{aid}")
-async def delete_annotation(aid: str, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def delete_annotation(aid: str):
     source_id = await asyncio.to_thread(_delete_annotation, aid)
     if source_id is None:
         raise HTTPException(404, "unknown annotation")

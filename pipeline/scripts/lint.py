@@ -29,7 +29,6 @@ Exits 0 if all checks pass, non-zero and prints a summary if not.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import random
@@ -241,55 +240,6 @@ def all_sidecars() -> list[Path]:
 # ─── checks ─────────────────────────────────────────────────────────────────
 
 
-def _under_sources(path) -> bool:
-    """An evidence/audit path is acceptable only if it is lexically under sources/ (no
-    `..`) AND resolves — following symlinks — to a location still under sources/. The
-    lexical check alone lets a committed symlink (`sources/link.jpg -> /outside`) make
-    drift/reuse fingerprint a file outside the vault, defeating the no-silent-drift
-    contract."""
-    if not path or ".." in str(path).split("/") or not str(path).startswith("sources/"):
-        return False
-    try:
-        (VAULT_ROOT / path).resolve().relative_to((VAULT_ROOT / "sources").resolve())
-    except (ValueError, OSError):
-        return False
-    return True
-
-
-def _recompute_bundle(recipe: str, args: dict) -> str | None:
-    """Recompute a derived bundle hash from committed files (schema §7.2). Returns
-    the hex digest, or None if the recipe/inputs are unusable (caller reports it).
-
-    Recipes:
-      `image_sha256_index_join` — sha256 over the index-ordered per-image
-      `image_sha256` values from a committed `.cards.json` (`from:` path),
-      `\n`-joined (UTF-8, LF, no trailing newline). This is the image_note
-      `image_bundle_sha256` (and the frames frame-bundle, same shape).
-    """
-    if recipe != "image_sha256_index_join":
-        return None
-    src = args.get("from")
-    # Same constraint as file artifacts (under sources/, no `..`, no symlink escape):
-    # a hand-edited `from:` must not make lint fingerprint a file outside sources/.
-    if not _under_sources(src):
-        return None
-    p = VAULT_ROOT / src
-    if not p.is_file():
-        return None
-    try:
-        cards = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(cards, list):
-        return None
-    try:
-        ordered = sorted(cards, key=lambda c: c["index"])
-        joined = "\n".join(str(c["image_sha256"]) for c in ordered)
-    except (KeyError, TypeError):
-        return None
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
-
-
 def _requires_evidence(sidecar: Path, fm: dict) -> bool:
     """True for sidecars whose drift guard IS media.evidence_artifacts[]. image_note
     always qualifies; a frames source is identified by its PHYSICAL committed
@@ -327,7 +277,7 @@ def _requires_evidence(sidecar: Path, fm: dict) -> bool:
 def _check_evidence_artifacts(sidecar: Path, fm: dict) -> tuple[bool, list[str]]:
     """Re-hash every committed evidence artifact named in media.evidence_artifacts[]
     (§7.2). File entries (`path` + `sha256`) are re-hashed directly; `bundle_recipe`
-    entries are recomputed via _recompute_bundle. Paths must be repo-relative, under
+    entries are recomputed by media_resolver. Paths must be repo-relative, under
     sources/, with no `..`."""
     ok = True
     notes: list[str] = []
@@ -347,7 +297,7 @@ def _check_evidence_artifacts(sidecar: Path, fm: dict) -> tuple[bool, list[str]]
             continue
         role = art.get("role", "?")
         if "bundle_recipe" in art:
-            got = _recompute_bundle(art["bundle_recipe"], art)
+            got = media_resolver.recompute_evidence_bundle(VAULT_ROOT, art)
             if got is None:
                 notes.append(f"  ✗ {rel}: evidence bundle '{role}' is unverifiable "
                              f"(recipe={art['bundle_recipe']!r}, inputs missing)")
@@ -358,7 +308,7 @@ def _check_evidence_artifacts(sidecar: Path, fm: dict) -> tuple[bool, list[str]]
                 ok = False
             continue
         path = art.get("path")
-        if not _under_sources(path):
+        if not media_resolver.evidence_path_ok(VAULT_ROOT, path):
             notes.append(f"  ✗ {rel}: evidence artifact '{role}' has an unsafe/invalid path: {path!r}")
             ok = False
             continue

@@ -155,7 +155,8 @@ failure is a warning, not fatal. Empty extracted text is fatal.
 ## Stage 5 — Chapter Intelligence Analysis
 
 Owner: `pipeline/scripts/analyze-chapter.py` (CLI) →
-`pipeline/scripts/chapter_intelligence.py` (library). The
+`pipeline/scripts/chapter_intelligence.py` (prompt/cache orchestration) →
+`pipeline/scripts/chapter_artifact.py` (materialization/validation). The
 [design doc](CHAPTER-INTELLIGENCE-DESIGN.md) covers the artifact contract;
 operationally:
 
@@ -306,7 +307,7 @@ so child termination and Git rollback can finish.
 | `pipeline/ingest.py` | Orchestrator: lock, preflight, chapter loop, LLM loop, gates, commit, rollback |
 | `pipeline/scripts/source-identity.py` | sha256 dedup, ULID, source asset + sidecar (two-phase publish) |
 | `pipeline/scripts/extract.py` | Text + image extraction, `--section` slicing |
-| `pipeline/scripts/analyze-chapter.py` / `chapter_intelligence.py` | Chapter-intelligence artifact: prompt, validation, manifest-verified cache |
+| `pipeline/scripts/analyze-chapter.py` / `chapter_intelligence.py` / `chapter_artifact.py` | Chapter intelligence: CLI, prompt/cache orchestration, artifact validation |
 | `pipeline/scripts/build-prompt.py` + `pipeline/prompts/*.md` | Main diff prompt assembly (digest/expand/retry) |
 | `pipeline/scripts/apply-diff.py` / `diff-paths.py` | Fence-strip, expand detection, scope + retry-path parsing |
 | `pipeline/scripts/ingest_quality.py` / `verify-ingest-quality.py` | Deterministic coverage/citation/prose quality gate (JSON receipt) |

@@ -7,7 +7,7 @@ import datetime as dt
 import io
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
 from .. import db
@@ -15,7 +15,7 @@ from ..auth import require_auth
 from ..fsrs import Card, schedule
 from ..validation import json_object, optional_string
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -199,8 +199,7 @@ def _export_rows():
 
 
 @router.post("/vocab")
-async def add_vocab(request: Request, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def add_vocab(request: Request):
     body = await json_object(request)
     kind = optional_string(body.get("kind"), "kind", "word")
     if kind not in ("word", "grammar"):
@@ -219,8 +218,7 @@ async def add_vocab(request: Request, x_auth_token: str | None = Header(None)):
 
 
 @router.patch("/vocab/{item_id}")
-async def update_vocab(item_id: int, request: Request, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def update_vocab(item_id: int, request: Request):
     body = await json_object(request)
     status = body.get("status")
     if status is not None and status not in ("new", "learning", "known"):
@@ -246,22 +244,19 @@ async def update_vocab(item_id: int, request: Request, x_auth_token: str | None 
 
 
 @router.get("/vocab")
-async def list_vocab(kind: str | None = None, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def list_vocab(kind: str | None = None):
     rows = await asyncio.to_thread(_list_vocab, kind)
     return [dict(r) for r in rows]
 
 
 @router.get("/review/queue")
-async def review_queue(limit: int = Query(40, ge=1, le=200), x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def review_queue(limit: int = Query(40, ge=1, le=200)):
     rows = await asyncio.to_thread(_review_queue, limit)
     return [dict(r) for r in rows]
 
 
 @router.post("/review/{item_id}/grade")
-async def grade(item_id: int, request: Request, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def grade(item_id: int, request: Request):
     body = await json_object(request)
     grade_raw = body.get("grade", 3)
     if isinstance(grade_raw, bool) or not isinstance(grade_raw, int):
@@ -284,14 +279,12 @@ async def grade(item_id: int, request: Request, x_auth_token: str | None = Heade
 
 
 @router.get("/review/stats")
-async def review_stats(x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def review_stats():
     return await asyncio.to_thread(_review_stats)
 
 
 @router.get("/export")
-async def export(format: str = "csv", x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def export(format: str = "csv"):
     if format != "csv":
         raise HTTPException(400, "unsupported export format")
     rows = await asyncio.to_thread(_export_rows)

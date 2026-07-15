@@ -1,4 +1,5 @@
 import { t } from '../lib/i18n.mjs';
+import { api } from './backend-client.js';
 
 // Drives the shared #idx-page-dialog for merge/delete over one page (wiki
 // article action group) or many (index selection mode). Returns { open }
@@ -75,17 +76,14 @@ export function installPageOps() {
     setBusy(true);
     status.classList.remove('error');
     status.textContent = t('idx.working');
-    const backend = '';
-    const token = localStorage.getItem('backendToken') || '';
     let rebuilt = false;
     const failed = [];
     // ponytail: the backend removes one page per call — bulk fans out sequentially.
     for (const it of items) {
       try {
-        const response = await fetch(`${backend}/wiki/page/remove`, {
+        const response = await api('/wiki/page/remove', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(token ? { 'X-Auth-Token': token } : {}) },
-          body: JSON.stringify({ rel: it.rel, merge_into: mergeInto, confirmation: it.rel }),
+          json: { rel: it.rel, merge_into: mergeInto, confirmation: it.rel },
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.detail || response.statusText);

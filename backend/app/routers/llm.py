@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from .. import db
 from .. import llm as llm_client
@@ -13,7 +13,7 @@ from .. import settings
 from ..auth import require_auth
 from ..validation import json_object, optional_string
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 LOGGER = logging.getLogger(__name__)
 
 
@@ -101,8 +101,7 @@ async def _cached_completion(*, text: str, context: str, lang: str,
 
 
 @router.post("/translate")
-async def translate(request: Request, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def translate(request: Request):
     b = await json_object(request)
     text = optional_string(b.get("text"), "text").strip()
     if not text:
@@ -137,8 +136,7 @@ ASSIST_PROMPTS = {
 
 
 @router.post("/assist")
-async def assist(request: Request, x_auth_token: str | None = Header(None)):
-    require_auth(x_auth_token)
+async def assist(request: Request):
     b = await json_object(request)
     text = optional_string(b.get("text"), "text").strip()
     mode = optional_string(b.get("mode"), "mode", "explain").lower()
