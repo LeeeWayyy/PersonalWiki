@@ -13,6 +13,7 @@ from llm_client import (  # noqa: E402,F401
     complete,
     complete_command,
     configured,
+    execution_identity,
     identity,
     model,
     provider,

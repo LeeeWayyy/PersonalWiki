@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -66,9 +67,10 @@ def _translation_cache_put(
 async def _cached_completion(*, text: str, context: str, lang: str,
                              prompt_version: str, prompt: str,
                              hash_parts: tuple[str, ...], unavailable: str) -> tuple[str, bool, dict]:
-    identity = llm_client.identity()
+    identity = llm_client.execution_identity()
     provider, model = identity["provider"], identity["model"]
-    h = _cache_hash(*hash_parts, provider or "", model or "", text)
+    identity_key = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    h = _cache_hash(*hash_parts, identity_key, text)
     cached = await asyncio.to_thread(_translation_cache_get, h)
     if cached:
         return cached["translation"], True, _cache_payload(cached)
