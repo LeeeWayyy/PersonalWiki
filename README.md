@@ -71,15 +71,15 @@ python3 scripts/vendor_content.py /path/to/existing/wiki-content
 
 ## Quick start
 
-Everything in one shot (site + backend; Ctrl-C stops both):
+Everything in one shot (the backend serves the built site; Ctrl-C stops it):
 
 ```sh
-python3 scripts/app_start.py        # build the site, serve it, start the backend
+python3 scripts/app_start.py        # build the site, then start the app
 python3 scripts/app_start.py --dev  # hot-reload dev server (no Pagefind search) + backend
 # or: ./run.sh                      # compatibility wrapper
 ```
 
-Then open http://localhost:4321 (backend on http://localhost:8787). On first run it
+Then open http://localhost:8787 (or http://localhost:4321 with `--dev`). On first run it
 installs deps, creates `backend/.env`, creates the gitignored `./content` vault
 when missing, enables the local Codex provider, and generates `PW_AUTH_TOKEN`
 automatically. If you are not using `./content`, set `PW_CONTENT_DIR` to your
@@ -89,14 +89,14 @@ wiki folder. Use `--open` or
 Or run the pieces separately:
 
 ```sh
-# 1) Frontend (reading site). Requires Node 22.12+.
+# 1) Build the frontend. Requires Node 22.12+.
 npm install
 npm run check      # Astro + TypeScript diagnostics
 npm run test:unit  # frontend contract tests against ci-fixtures/content
 npm run build      # sync content → astro build → pagefind index
-npm run preview    # serve dist locally
+npm run preview    # optional Astro-only preview
 
-# 2) Backend (ingest + study). Requires Python 3.11+.
+# 2) Serve the built site and API. Requires Python 3.11+.
 cd backend
 python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
@@ -107,8 +107,8 @@ python3 -m venv .venv
 After the first run creates `backend/.env`, run `npm run doctor` from the repo root
 for local readiness/preflight checks.
 
-In the site, open **Ingest console → Backend** and set the URL + auth token once
-(stored in your browser). Or exercise the ingest flow with no LLM/ASR spend:
+In the site, open **Ingest console** and set the auth token once (stored in your
+browser). Or exercise the ingest flow with no LLM/ASR spend:
 `PW_INGEST_STUB=1 python3 scripts/app_start.py`.
 
 `npm run dev` runs the site with hot reload (search needs a production build).
@@ -120,12 +120,12 @@ pipeline/ingest.py ──► PW_CONTENT_DIR (local wiki repo — private, never 
         ▲                        │
         │            scripts/sync_content.py (snapshot → ./vault + .blocks, read-only)
         │                        ▼
-   FastAPI backend        Astro build ──► dist/ + Pagefind
-   (ingest + study +             │
-    annotations)                 │
-        └── SSE · word bank · annotations ──┘
+                         Astro build ──► dist/ + Pagefind
+                                           │
+   FastAPI app ◄────────────────────────────┘
+   (static site + API + SSE + study + annotations)
                  │
-        both served locally ──► Tailscale ──► only your devices
+              Tailscale ──► only your devices
 ```
 
 - The site is a **read-only consumer** of `PW_CONTENT_DIR`. `scripts/sync_content.py`
@@ -152,13 +152,11 @@ pipeline/ingest.py ──► PW_CONTENT_DIR (local wiki repo — private, never 
    `openai`) with `PW_LLM_API_KEY`. If local Codex auth is not viable, you can
    also set `LLM_CMD` to a custom stdin-to-stdout command or keep the legacy
    OpenAI-compatible backup path with `PW_LLM_API_ENABLED=1` and
-   `PW_LLM_API_KEY`. Debug daemon auth with
-   `GET /health/llm` using `X-Auth-Token`; it probes only the local provider,
-   never the API fallback. Without one configured, real ingest and `/translate`
-   won't run (the UI degrades gracefully).
-3. **Private hosting** — `tailscale serve` in front of `scripts/serve.mjs` (site)
-   and `python -m app.serve` (backend), plus `launchd` agents to keep both
-   resident. Run the daemon as your login user so git ownership matches the vault.
+   `PW_LLM_API_KEY`. Without one configured, real ingest and `/translate` won't
+   run (the UI degrades gracefully).
+3. **Private hosting** — `tailscale serve` in front of `python -m app.serve`,
+   plus one `launchd` agent to keep it resident. Run the daemon as your login
+   user so git ownership matches the vault.
 
 ## Tests & CI
 

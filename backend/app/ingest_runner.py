@@ -67,18 +67,6 @@ JOBS: dict[str, "Job"] = {}
 TERMINAL_STATUSES = {"blocked", "done", "error", "canceled"}
 LOGGER = logging.getLogger(__name__)
 
-# Keep these backend preflight constants next to the guard while ingest.py lacks
-# a stable --preflight CLI. They intentionally mirror ingest.py's dirty scopes.
-_WIKI_WATCHED = ("wiki/entities/", "wiki/topics/", "wiki/_index/", "wiki/_taxonomy.md")
-_LEFTOVER = re.compile(r"\.(rejected|failed(\.\d+)?|apply-err(\.\d+)?)$")
-# ingest.py's ensure_wiki_scaffold creates wiki/_taxonomy.md and commits it in
-# the same run; its own preflight allows the placeholder as untracked. A run
-# interrupted after scaffold but before commit leaves it untracked, which would
-# otherwise wedge every later job here. Mirror ingest's tolerance — the
-# authoritative placeholder-vs-user-edit check stays in ingest.py's preflight.
-_SCAFFOLD_UNTRACKED = frozenset({"wiki/_taxonomy.md"})
-
-
 class Job:
     def __init__(self, job_id: str):
         self.id = job_id
@@ -227,21 +215,6 @@ def get_job(job_id: str) -> Job | None:
     return JOBS.get(job_id)
 
 
-def _expand_status_path(content: Path, path: str) -> list[str]:
-    target = content / path
-    if not path.endswith("/") or not target.is_dir():
-        return [path]
-    files = [p.relative_to(content).as_posix() for p in target.rglob("*") if p.is_file()]
-    return sorted(files) or [path]
-
-
-def _porcelain_paths(line: str) -> list[str]:
-    path = line[3:].strip()
-    if " -> " not in path:
-        return [path] if path else []
-    return [part.strip() for part in path.split(" -> ", 1) if part.strip()]
-
-
 def ensure_content_git(content: Path) -> tuple[bool, str]:
     """Guarantee the wiki folder exists and is a git repo ingest can commit into.
 
@@ -284,61 +257,25 @@ def ensure_content_git(content: Path) -> tuple[bool, str]:
 
 
 def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
-    """Return (ok, message, offending_paths)."""
-    content = CONTENT_DIR
-    if not content.exists():
-        return False, f"wiki folder not found at {content} - set PW_CONTENT_DIR or run python3 scripts/vendor_content.py", []
-    if not (content / ".git").exists():
-        return False, f"wiki folder is not a git repo ({content}) — ingest needs git so it can commit changes", []
+    """Return ingest.py's authoritative (ok, message, offending_paths) report."""
+    profile = "lang" if (options or {}).get("kind") == "lang" else "wiki"
     try:
         result = subprocess.run(
-            [
-                "git", "-C", str(content), "-c", "core.quotepath=false",
-                "status", "--porcelain", "--untracked-files=all",
-            ],
+            [sys.executable, str(DEFAULT_INGEST_SCRIPT), "--preflight", "--profile", profile],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            env={**os.environ, "PW_CONTENT_DIR": str(CONTENT_DIR)},
         )
-    except Exception as e:  # noqa
-        return False, f"git status failed: {e}", []
+    except Exception as exc:
+        return False, f"ingest preflight failed: {exc}", []
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         detail = detail.splitlines()[-1] if detail else f"exit code {result.returncode}"
         return False, f"git status failed: {detail}", []
-    out = result.stdout
-    lang = (options or {}).get("kind") == "lang"
-    prefix = "lang/" if lang else ""
-    offending, leftover = [], []
-    for line in out.splitlines():
-        status = line[:2]
-        for path in _porcelain_paths(line):
-            staged = status[0] not in {" ", "?"}
-            untracked = status == "??"
-            wiki_dirty = not lang and any(
-                path.startswith(w) or path == w.rstrip("/") for w in _WIKI_WATCHED
-            )
-            generated_dirty = lang and (
-                path.startswith("lang/_reading/") or path == "lang/_reading"
-            )
-            provenance_dirty = not untracked and (
-                path == f"{prefix}.wiki/log.md" or path.startswith(f"{prefix}sources/")
-            )
-            stale_asset = untracked and path.startswith(f"{prefix}sources/") and ".assets/" in path
-            ignored_runtime = untracked and path == f"{prefix}.wiki/ingest.lock"
-            scaffold = untracked and path in _SCAFFOLD_UNTRACKED
-            if not (ignored_runtime or scaffold) and (
-                staged or wiki_dirty or generated_dirty or provenance_dirty or stale_asset
-            ):
-                offending.extend(_expand_status_path(content, path))
-            if _LEFTOVER.search(path):
-                leftover.append(path)
-    offending = list(dict.fromkeys(offending))
-    leftover = list(dict.fromkeys(leftover))
-    if offending or leftover:
-        msg = "Vault tree is not clean — ingest preflight would refuse."
-        if leftover:
-            msg += f" Leftover artifacts: {', '.join(leftover)}."
-        return False, msg, offending + leftover
-    return True, "clean", []
+    try:
+        report = json.loads(result.stdout)
+        return bool(report["ok"]), str(report["message"]), list(report["offending"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        return False, f"ingest preflight returned invalid JSON: {exc}", []
 
 
 def _build_argv(target: str, options: dict) -> list[str]:

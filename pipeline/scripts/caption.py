@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = ["pyyaml>=6.0"]
 # ///
 """
 Vision-captioner for image manifests written by extract.py.
@@ -11,7 +11,7 @@ every image entry that's neither captioned nor marked terminally
 failed:
   1. Run a pre-LLM heuristic for "obviously decorative" images
      (cover/logo/qr/spacer/tiny). Decorative → mark, skip LLM.
-  2. Otherwise call a vision-capable CLI (gemini, codex, or claude)
+  2. Otherwise call a vision-capable CLI (gemini or codex)
      to produce a 1–3 sentence caption.
   3. If the model output is the literal token `DECORATIVE`, mark the
      entry decorative and skip persisting a caption.
@@ -22,7 +22,7 @@ so a crash mid-loop leaves the manifest consistent for re-runs.
 
 Usage:
     scripts/caption.py <manifest-path-or-assets-dir>
-                       [--backend gemini|codex|claude|agy]
+                       [--backend gemini|codex]
                        [--model MODEL]   # caption model, independent of the
                                          # ingest model (PW_LLM_MODEL)
                        [--source-lang Chinese|English|...]
@@ -37,7 +37,7 @@ is codex), so there is one tool to authenticate. Override with CAPTION_BACKEND.
 
 Env vars (override CLI defaults):
     CAPTION_BACKEND, CAPTION_MODEL, CAPTION_LANG, CAPTION_LIMIT, CAPTION_JOBS
-    GEMINI_BIN (gemini backend only; point at a renamed CLI such as `agy`)
+    GEMINI_BIN (gemini backend only; path to the CLI)
 
 Captioning is the slow part of an image-heavy ingest (one vision call per
 non-decorative image). Calls run in a thread pool (--jobs, default 4) since each
@@ -49,14 +49,11 @@ See plan/image-ingest-plan.md §4–§5.
 from __future__ import annotations
 
 import argparse
-import base64
-import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -86,8 +83,6 @@ DEFAULT_BACKEND = "gemini"
 DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
     "codex": "gpt-5-mini",
-    "claude": "claude-haiku-4-5-20251001",
-    "agy": "Gemini 3.5 Flash (Low)",  # cheap vision model; agy fronts Gemini/Claude/GPT
 }
 
 
@@ -107,6 +102,10 @@ def _default_backend() -> str:
         pass
     return DEFAULT_BACKEND
 
+
+def _backend_bin(backend: str) -> str:
+    return os.environ.get("GEMINI_BIN", "gemini") if backend == "gemini" else backend
+
 # Filename patterns that strongly suggest a decorative image (cover,
 # copyright, TOC, logo, QR). Includes Chinese / Japanese terms common
 # in CN-published EPUBs. NFKC + lowercase before matching.
@@ -124,7 +123,7 @@ def main() -> int:
                     help="Path to a `_manifest.md` or to its containing "
                          "<source>.assets/ directory.")
     ap.add_argument("--backend", default=_default_backend(),
-                    choices=("gemini", "codex", "claude", "agy"))
+                    choices=("gemini", "codex"))
     ap.add_argument("--model", default=os.environ.get("CAPTION_MODEL"))
     ap.add_argument("--source-lang", default=os.environ.get("CAPTION_LANG",
                                                             "match the source "
@@ -167,8 +166,9 @@ def main() -> int:
     backend = args.backend
     model = args.model or DEFAULT_MODELS[backend]
     model_label = model or "default"
-    if not args.dry_run and shutil.which(backend) is None:
-        print(f"caption: backend CLI '{backend}' not found in PATH", file=sys.stderr)
+    binary = _backend_bin(backend)
+    if not args.dry_run and shutil.which(binary) is None:
+        print(f"caption: backend CLI '{binary}' not found in PATH", file=sys.stderr)
         return 3
 
     prompt = PROMPT_TEMPLATE.format(lang=args.source_lang)
@@ -368,10 +368,6 @@ def _dispatch(backend: str, model: str, prompt: str, image: Path) -> str:
         return _dispatch_gemini(model, prompt, image)
     if backend == "codex":
         return _dispatch_codex(model, prompt, image)
-    if backend == "claude":
-        return _dispatch_claude(model, prompt, image)
-    if backend == "agy":
-        return _dispatch_agy(model, prompt, image)
     raise ValueError(f"unknown backend: {backend}")
 
 
@@ -385,8 +381,8 @@ def _dispatch_gemini(model: str, prompt: str, image: Path) -> str:
     abs_path = str(image)
     if " " in abs_path:
         raise RuntimeError(f"unexpected space in asset path: {abs_path}")
-    # GEMINI_BIN lets you point at a renamed CLI (e.g. `agy`) without code changes.
-    cmd = [os.environ.get("GEMINI_BIN", "gemini"), "-m", model, "-p", f"{prompt} @{abs_path}"]
+    # GEMINI_BIN supports a renamed or non-PATH installation.
+    cmd = [_backend_bin("gemini"), "-m", model, "-p", f"{prompt} @{abs_path}"]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=True,
                           timeout=120)
     return proc.stdout
@@ -404,69 +400,6 @@ def _dispatch_codex(model: str | None, prompt: str, image: Path) -> str:
     cmd += ["-i", str(image), "-"]
     proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
                           check=True, timeout=180)
-    return proc.stdout
-
-
-def _dispatch_claude(model: str, prompt: str, image: Path) -> str:
-    """Claude CLI: stream-json with base64-encoded image content block."""
-    mime_by_ext = {
-        ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".gif": "image/gif", ".webp": "image/webp",
-    }
-    mime = mime_by_ext.get(image.suffix.lower(), "application/octet-stream")
-    payload = {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {
-                    "type": "base64", "media_type": mime,
-                    "data": base64.b64encode(image.read_bytes()).decode(),
-                }},
-                {"type": "text", "text": prompt},
-            ],
-        },
-    }
-    # Current Claude Code requires stream-json OUT when IN is stream-json, and
-    # rejects --bare (it drops user auth). Run from a neutral cwd so the repo's
-    # project hooks / CLAUDE.md don't load; user-level auth is unaffected.
-    cmd = ["claude", "--print", "--input-format", "stream-json",
-           "--output-format", "stream-json", "--verbose", "--model", model]
-    proc = subprocess.run(cmd, input=json.dumps(payload),
-                          capture_output=True, text=True, check=True,
-                          timeout=180, cwd=tempfile.gettempdir())
-    return _parse_claude_result(proc.stdout)
-
-
-def _parse_claude_result(stdout: str) -> str:
-    """Extract the final text from Claude Code's stream-json events: prefer the
-    terminal `result` event, else concatenate assistant text blocks."""
-    result = ""
-    texts: list[str] = []
-    for line in stdout.splitlines():
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        if obj.get("type") == "result" and obj.get("subtype") == "success":
-            result = obj.get("result") or result
-        elif obj.get("type") == "assistant":
-            for block in obj.get("message", {}).get("content", []):
-                if block.get("type") == "text":
-                    texts.append(block.get("text", ""))
-    return (result or "\n".join(texts)).strip()
-
-
-def _dispatch_agy(model: str, prompt: str, image: Path) -> str:
-    """agy CLI (agentic, multi-model gateway): no image flag, so the prompt
-    points it at the absolute path and it reads the file with its own tools.
-    --dangerously-skip-permissions auto-approves that local read in non-
-    interactive mode; run from a neutral cwd so project context doesn't load."""
-    abs_path = str(image.resolve())
-    full = f"{prompt}\n\nDescribe the image file at this exact path: {abs_path}"
-    cmd = ["agy", "-p", full, "--model", model, "--dangerously-skip-permissions"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=True,
-                          timeout=180, cwd=tempfile.gettempdir())
     return proc.stdout
 
 

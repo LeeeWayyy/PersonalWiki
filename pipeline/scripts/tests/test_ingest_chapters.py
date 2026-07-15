@@ -25,7 +25,7 @@ INGEST_SPEC.loader.exec_module(ingest)
 def _args(input_path):
     return types.SimpleNamespace(
         input=str(input_path), section="", images_only=False, kind="",
-        rerender=False, profile="wiki", limit="100000", model="",
+        profile="wiki", limit="100000", model="",
         section_label="", chapters=False)
 
 

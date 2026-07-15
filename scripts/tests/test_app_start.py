@@ -45,7 +45,7 @@ class AppStartTests(unittest.TestCase):
 
             config = app_start.build_config([], root, {})
 
-            self.assertEqual(config.mode, "preview")
+            self.assertEqual(config.mode, "production")
             self.assertEqual(config.backend_port, 9888)
             self.assertEqual(config.site_port, 4555)
             self.assertEqual(config.env["PW_AUTH_TOKEN"], "backend-token")

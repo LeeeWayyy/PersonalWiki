@@ -39,11 +39,8 @@ The target principle:
 | `pipeline/scripts/llm_client.py` | Shared LLM client and stdin/stdout CLI | Runtime for LLM-backed flows | Local app LLM adapter |
 | `pipeline/scripts/tests/test_*.sh` | Pipeline integration tests | Dev/CI | Keep until migrated to Python tests |
 
-Not shell, but part of the same runtime surface: `scripts/serve.mjs` serves the
-built `dist/` site with security headers in production. The Python startup
-manager and launchd site agent both call it directly. It is already Node, so it
-is not shell debt; the open question is only whether a future desktop app embeds
-static serving instead of running a sidecar Node process.
+FastAPI now serves the built `dist/` site with security headers in production,
+so the runtime has no static-server sidecar.
 
 Phase 1 is done:
 
@@ -61,9 +58,8 @@ configuration and Uvicorn launch while `backend/run.sh` remains as a developer
 dependency-bootstrap wrapper.
 
 Phase 3 has started with `scripts/app_start.py`, which owns local startup,
-dependency checks, port cleanup, backend launch, build/static serve or dev
-server launch, health checks, and shutdown while top-level `run.sh` remains as a
-compatibility wrapper.
+dependency checks, port cleanup, build/backend or dev-server launch, health
+checks, and shutdown while top-level `run.sh` remains a compatibility wrapper.
 
 Phase 4 has started with `pipeline/scripts/llm_client.py`, which gives backend
 and pipeline code one local Codex/API/custom-command client. `LLM_CMD` remains an
@@ -102,7 +98,7 @@ Local app
   Runtime manager
     ensure Python/Node runtime
     start/stop backend or embedded service
-    serve or embed the built static site (replaces scripts/serve.mjs)
+    serve or embed the built static site
     preserve current security headers or equivalent webview policy
     supervise background jobs
     surface logs/errors in UI
@@ -212,8 +208,8 @@ Validation:
 - Existing configured wiki folder starts without prompts
 - Failure states are visible: missing folder, dirty tree, backend port conflict,
   missing runtime dependency
-- The site-serving replacement preserves `X-Frame-Options`, `nosniff`,
-  `Referrer-Policy`, and equivalent isolation behavior from `scripts/serve.mjs`
+- FastAPI static serving preserves `X-Frame-Options`, `nosniff`,
+  `Referrer-Policy`, and cross-origin isolation behavior
 
 ### Phase 4 - Replace LLM Shell Adapter
 
@@ -232,7 +228,7 @@ Validation:
 - Wiki ingest and language ingest work when launched from a wiki folder cwd
 - Existing `PW_LLM_CMD_BASE_DIR` regression test remains covered or is no longer
   needed because relative shell commands are gone
-- `/health/llm` still tests the configured LLM path
+- the configured LLM path remains covered by client tests
 
 ### Phase 5 - Move Diagnostics And Backup Into The App
 

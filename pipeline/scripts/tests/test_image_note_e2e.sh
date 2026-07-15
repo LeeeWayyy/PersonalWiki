@@ -26,7 +26,7 @@ GUARD_MD="$C/sources/${DAY}-rednote-guard-md.cards.md"
 printf 'user markdown\n' > "$GUARD_MD"
 if run "$MI" /tmp/export.zip --kind image_note --post-id guard-md --platform rednote >/dev/null 2>/tmp/in-guard-md.err; then
   bad "sidecar-less untracked markdown should be refused"
-elif [[ "$(cat "$GUARD_MD")" == "user markdown" ]] && grep -q 'no coherent ownership sidecar' /tmp/in-guard-md.err; then
+elif [[ "$(cat "$GUARD_MD")" == "user markdown" ]] && grep -q 'leftovers from aborted run; delete and re-run' /tmp/in-guard-md.err; then
   ok "sidecar-less untracked markdown is refused intact"
 else bad "untracked markdown guard changed data or gave wrong error"; fi
 rm -f "$GUARD_MD"
@@ -35,7 +35,7 @@ GUARD_JSON="$C/sources/${DAY}-rednote-guard-json.cards.json"
 printf '{"user":true}\n' > "$GUARD_JSON"
 if run "$MI" /tmp/export.zip --kind image_note --post-id guard-json --platform rednote >/dev/null 2>/tmp/in-guard-json.err; then
   bad "sidecar-less untracked audit JSON should be refused"
-elif [[ "$(cat "$GUARD_JSON")" == '{"user":true}' ]] && grep -q 'no coherent ownership sidecar' /tmp/in-guard-json.err; then
+elif [[ "$(cat "$GUARD_JSON")" == '{"user":true}' ]] && grep -q 'leftovers from aborted run; delete and re-run' /tmp/in-guard-json.err; then
   ok "sidecar-less untracked audit JSON is refused intact"
 else bad "untracked audit JSON guard changed data or gave wrong error"; fi
 rm -f "$GUARD_JSON"
@@ -44,7 +44,7 @@ GUARD_ASSETS="$C/sources/${DAY}-rednote-guard-assets.cards.md.assets"
 mkdir -p "$GUARD_ASSETS"; printf 'user image\n' > "$GUARD_ASSETS/user.jpg"
 if run "$MI" /tmp/export.zip --kind image_note --post-id guard-assets --platform rednote >/dev/null 2>/tmp/in-guard-assets.err; then
   bad "sidecar-less untracked assets should be refused"
-elif [[ "$(cat "$GUARD_ASSETS/user.jpg")" == "user image" ]] && grep -q 'no coherent ownership sidecar' /tmp/in-guard-assets.err; then
+elif [[ "$(cat "$GUARD_ASSETS/user.jpg")" == "user image" ]] && grep -q 'leftovers from aborted run; delete and re-run' /tmp/in-guard-assets.err; then
   ok "sidecar-less untracked assets dir is refused intact"
 else bad "untracked assets guard changed data or gave wrong error"; fi
 rm -rf "$GUARD_ASSETS"
@@ -75,7 +75,7 @@ printf 'user extra\n' > "$ADIR/user-extra.jpg"
 if run "$MI" /tmp/export.zip --kind image_note --post-id 64fABC --platform rednote >/dev/null 2>/tmp/in-extra.err; then
   bad "coherent orphan with an unlisted asset should be refused"
 elif [[ "$(cat "$ADIR/user-extra.jpg")" == "user extra" ]] \
-     && grep -q 'unlisted or does not match' /tmp/in-extra.err; then
+     && grep -q 'leftovers from aborted run; delete and re-run' /tmp/in-extra.err; then
   ok "coherent sidecar does not authorize deletion of an unlisted asset"
 else bad "unlisted orphan asset changed or wrong error"; fi
 rm -f "$ADIR/user-extra.jpg"

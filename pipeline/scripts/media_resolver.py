@@ -1,9 +1,7 @@
 """Shared media identity + head resolution (expansion-plan §8.0).
 
-ONE resolver, imported by `media-identity.py`, `rerender-media.py`, and future
-card/frame paths — replacing the two hand-rolled, divergent copies (a bare-regex
-+ silent-skip one in rerender, a `[[…]]`-regex + die-loud one in media-identity).
-The merged contract is **die-loud**: a tracked media sidecar that can't be
+ONE resolver, imported by `media-identity.py` and future card/frame paths. The
+contract is **die-loud**: a tracked media sidecar that can't be
 classified, or a `supersedes:` pointer outside the identity set, is a hard error
 — never silently skipped (no-silent-drift).
 

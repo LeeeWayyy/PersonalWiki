@@ -72,7 +72,7 @@ function bootSourceReader(options = {}) {
   const notesEl = document.getElementById('sr-notes');
   if (!anchors || !doc || !pop || !list || !orphans || !statusEl) return;
 
-  const BACKEND = localStorage.getItem('backendUrl') || 'http://localhost:8787';
+  const BACKEND = '';
   const TOKEN = localStorage.getItem('backendToken') || '';
   const H = { 'Content-Type': 'application/json', ...(TOKEN ? { 'X-Auth-Token': TOKEN } : {}) };
   const PREFS_KEY = 'sourceReaderPrefs:v1';

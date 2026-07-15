@@ -726,7 +726,7 @@ change).
 
 **Phase-3 supersession rules.** Re-OCR of an image_note (`--reocr`) = a new
 `source_id` with `supersedes:` (the card text *is* the OCR output, so there is
-**no** card `render_format_version` and no `--rerender-cards`). Adding video
+**no** card `render_format_version`). Adding video
 **frames** to an existing transcript = a new source that `supersedes:` the
 transcript, carries it byte-for-byte, and rewrites live `[src:<old>#…]` citations
 to the new head (then re-runs the timestamp gate). A frame asset's `_manifest.md`

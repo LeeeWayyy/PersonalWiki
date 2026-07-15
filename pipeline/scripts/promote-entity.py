@@ -18,7 +18,7 @@ alias on the new topic, so existing `[[OldName]]` links continue to
 resolve via the alias index.
 
 Usage:
-    scripts/promote.py [--dry-run] <entity_path> [<new_topic_name>]
+    scripts/promote-entity.py [--dry-run] <entity_path> [<new_topic_name>]
 
 If `<new_topic_name>` is omitted, the file keeps the same stem under
 `wiki/topics/`.

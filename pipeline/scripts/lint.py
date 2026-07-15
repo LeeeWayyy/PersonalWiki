@@ -912,7 +912,7 @@ def check_no_source_metadata_headings() -> tuple[bool, list[str]]:
 def check_entity_size(threshold: int = 400) -> tuple[bool, list[str]]:
     """Warn (not fail) when an entity exceeds `threshold` lines.
     Large entities are usually candidates for promotion to a Topic with
-    sub-entity splits — see scripts/promote.py."""
+    sub-entity splits — see scripts/promote-entity.py."""
     notes: list[str] = []
     big: list[tuple[Path, int]] = []
     entities_dir = WIKI_DIR / "entities"
@@ -926,7 +926,10 @@ def check_entity_size(threshold: int = 400) -> tuple[bool, list[str]]:
     if not big:
         notes.append(f"  ✓ all entities ≤ {threshold} lines")
         return True, notes
-    notes.append(f"  ⚠ {len(big)} entity/entities exceed {threshold} lines (consider promote.py):")
+    notes.append(
+        f"  ⚠ {len(big)} entity/entities exceed {threshold} lines "
+        "(consider promote-entity.py):"
+    )
     for page, n in big:
         notes.append(f"    {page.relative_to(VAULT_ROOT)}  ({n} lines)")
     return True, notes  # warn-only

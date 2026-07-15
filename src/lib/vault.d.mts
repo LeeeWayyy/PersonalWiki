@@ -57,6 +57,7 @@ export interface ReadingDoc {
   title: string;
   lang: string;
   target_lang?: string;
+  audio?: string;
   prompt_version?: string;
   chapters: ReadingChapter[];
 }

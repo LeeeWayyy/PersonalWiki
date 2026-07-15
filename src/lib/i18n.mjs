@@ -63,7 +63,6 @@ const D = {
   'be.error': ['○ backend error', '○ 后端出错'],
   'be.offline': ['○ backend offline', '○ 后端未运行'],
   'be.btn': ['⚙ Backend', '⚙ 后端'],
-  'be.url': ['Backend URL', '后端地址'],
   'be.token': ['Auth token', '访问令牌'],
   'act.save': ['Save', '保存'],
   'ingest.link': ['Link', '链接'],

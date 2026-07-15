@@ -68,6 +68,38 @@ def _translation_cache_put(
         conn.close()
 
 
+async def _cached_completion(*, text: str, context: str, lang: str,
+                             prompt_version: str, prompt: str,
+                             hash_parts: tuple[str, ...], unavailable: str) -> tuple[str, bool, dict]:
+    h = _cache_hash(*hash_parts, text)
+    cached = await asyncio.to_thread(_translation_cache_get, h)
+    if cached:
+        return cached["translation"], True, _cache_payload(cached)
+    LOGGER.info("%s cache miss lang=%s chars=%d", context, lang, len(text))
+    if not llm_client.configured():
+        return unavailable, False, {"configured": False}
+    try:
+        raw = await asyncio.to_thread(llm_client.complete, prompt, timeout=120)
+    except Exception as exc:
+        LOGGER.exception("%s LLM call failed lang=%s chars=%d", context, lang, len(text))
+        raise HTTPException(502, f"LLM call failed: {exc}") from exc
+    output = (raw or "").strip()
+    prompt_version, provider, model = _llm_cache_meta(prompt_version)
+    if output:
+        await asyncio.to_thread(
+            _translation_cache_put, h=h, context=context, lang=lang,
+            translation=output, prompt_version=prompt_version, provider=provider, model=model,
+        )
+    else:
+        LOGGER.warning("%s LLM returned empty output lang=%s chars=%d", context, lang, len(text))
+        output = "(no output)"
+    return output, False, {
+        "prompt_version": prompt_version,
+        "llm_provider": provider,
+        "llm_model": model,
+    }
+
+
 @router.post("/translate")
 async def translate(request: Request, x_auth_token: str | None = Header(None)):
     require_auth(x_auth_token)
@@ -75,55 +107,22 @@ async def translate(request: Request, x_auth_token: str | None = Header(None)):
     text = optional_string(b.get("text"), "text").strip()
     if not text:
         raise HTTPException(400, "text required")
-    h = _cache_hash("translate", settings.TRANSLATE_PROMPT_VERSION, settings.TRANSLATE_LANG, text)
-    cached = await asyncio.to_thread(_translation_cache_get, h)
-    if cached:
-        return {
-            "translation": cached["translation"],
-            "cached": True,
-            "target_lang": cached["lang"],
-            **_cache_payload(cached),
-        }
-    LOGGER.info("translate cache miss target_lang=%s chars=%d", settings.TRANSLATE_LANG, len(text))
-    if not llm_client.configured():
-        return {
-            "translation": (
-                "(translation needs an LLM - set PW_LLM_PROVIDER=codex, configure a custom LLM_CMD, "
-                "or explicitly enable the API fallback with PW_LLM_API_ENABLED=1 and "
-                "PW_LLM_API_KEY in backend/.env)"
-            ),
-            "cached": False,
-            "configured": False,
-        }
     prompt = f"Translate to natural {settings.TRANSLATE_LANG}. Output only the translation, no notes.\n\n{text}"
-    try:
-        raw = await asyncio.to_thread(llm_client.complete, prompt, timeout=120)
-    except Exception as e:  # noqa
-        LOGGER.exception("translate LLM call failed target_lang=%s chars=%d", settings.TRANSLATE_LANG, len(text))
-        raise HTTPException(502, f"LLM call failed: {e}")
-    tr = (raw or "").strip()
-    prompt_version, provider, model = _llm_cache_meta(settings.TRANSLATE_PROMPT_VERSION)
-    if tr:
-        await asyncio.to_thread(
-            _translation_cache_put,
-            h=h,
-            context="translate",
-            lang=settings.TRANSLATE_LANG,
-            translation=tr,
-            prompt_version=prompt_version,
-            provider=provider,
-            model=model,
-        )
-    else:
-        LOGGER.warning("translate LLM returned empty output target_lang=%s chars=%d", settings.TRANSLATE_LANG, len(text))
-        tr = "(no output)"
+    output, cached, meta = await _cached_completion(
+        text=text, context="translate", lang=settings.TRANSLATE_LANG,
+        prompt_version=settings.TRANSLATE_PROMPT_VERSION, prompt=prompt,
+        hash_parts=("translate", settings.TRANSLATE_PROMPT_VERSION, settings.TRANSLATE_LANG),
+        unavailable=(
+            "(translation needs an LLM - set PW_LLM_PROVIDER=codex, configure a custom LLM_CMD, "
+            "or explicitly enable the API fallback with PW_LLM_API_ENABLED=1 and "
+            "PW_LLM_API_KEY in backend/.env)"
+        ),
+    )
     return {
-        "translation": tr,
-        "cached": False,
+        "translation": output,
+        "cached": cached,
         "target_lang": settings.TRANSLATE_LANG,
-        "prompt_version": prompt_version,
-        "llm_provider": provider,
-        "llm_model": model,
+        **meta,
     }
 
 
@@ -148,49 +147,20 @@ async def assist(request: Request, x_auth_token: str | None = Header(None)):
     if not text:
         raise HTTPException(400, "text required")
     lang = optional_string(b.get("lang"), "lang", settings.TRANSLATE_LANG) or settings.TRANSLATE_LANG
-    h = _cache_hash("assist", settings.ASSIST_PROMPT_VERSION, mode, lang, text)
-    cached = await asyncio.to_thread(_translation_cache_get, h)
-    if cached:
-        return {"result": cached["translation"], "mode": mode, "cached": True, **_cache_payload(cached)}
-    LOGGER.info("assist cache miss mode=%s lang=%s chars=%d", mode, lang, len(text))
-    if not llm_client.configured():
-        return {
-            "result": (
-                "(AI assist needs an LLM - set PW_LLM_PROVIDER=codex, configure a custom LLM_CMD, "
-                "or explicitly enable the API fallback with PW_LLM_API_ENABLED=1 and "
-                "PW_LLM_API_KEY in backend/.env)"
-            ),
-            "mode": mode,
-            "cached": False,
-            "configured": False,
-        }
     prompt = ASSIST_PROMPTS[mode].format(lang=lang) + "\n\n" + text
-    try:
-        raw = await asyncio.to_thread(llm_client.complete, prompt, timeout=120)
-    except Exception as e:  # noqa
-        LOGGER.exception("assist LLM call failed mode=%s lang=%s chars=%d", mode, lang, len(text))
-        raise HTTPException(502, f"LLM call failed: {e}")
-    out = (raw or "").strip()
-    prompt_version, provider, model = _llm_cache_meta(settings.ASSIST_PROMPT_VERSION)
-    if out:
-        await asyncio.to_thread(
-            _translation_cache_put,
-            h=h,
-            context=mode,
-            lang=lang,
-            translation=out,
-            prompt_version=prompt_version,
-            provider=provider,
-            model=model,
-        )
-    else:
-        LOGGER.warning("assist LLM returned empty output mode=%s lang=%s chars=%d", mode, lang, len(text))
-        out = "(no output)"
+    output, cached, meta = await _cached_completion(
+        text=text, context=mode, lang=lang,
+        prompt_version=settings.ASSIST_PROMPT_VERSION, prompt=prompt,
+        hash_parts=("assist", settings.ASSIST_PROMPT_VERSION, mode, lang),
+        unavailable=(
+            "(AI assist needs an LLM - set PW_LLM_PROVIDER=codex, configure a custom LLM_CMD, "
+            "or explicitly enable the API fallback with PW_LLM_API_ENABLED=1 and "
+            "PW_LLM_API_KEY in backend/.env)"
+        ),
+    )
     return {
-        "result": out,
+        "result": output,
         "mode": mode,
-        "cached": False,
-        "prompt_version": prompt_version,
-        "llm_provider": provider,
-        "llm_model": model,
+        "cached": cached,
+        **meta,
     }

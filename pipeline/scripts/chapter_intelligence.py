@@ -1671,13 +1671,7 @@ def load_cached_artifact(
     prior_chapters: Sequence[Mapping[str, object]] = (),
     prompt_template_sha256: str | None = None,
 ) -> dict | None:
-    """Load and revalidate a cache entry; stale or malformed data is a miss.
-
-    A failed ingest may clean up its untracked sidecar and mint a new source id
-    on retry. The analysis itself is content-addressed, so a matching cache entry
-    under that abandoned id may be adopted after rebinding only the metadata id
-    and revalidating every content/hash field.
-    """
+    """Load and revalidate the exact cache entry; stale or malformed data is a miss."""
     template_digest = prompt_template_sha256 or prompt_template_identity()
     inputs = cache_inputs(
         source_sha256=source_sha256,
@@ -1696,89 +1690,20 @@ def load_cached_artifact(
         source_id=source_id,
         key=json_digest(inputs),
     )
-    candidates = [path]
-    candidates.extend(
-        candidate
-        for candidate in sorted(path.parent.parent.glob(f"*/{path.name}"))
-        if candidate != path
-    )
-    for candidate in candidates:
-        try:
-            entry = read_cache_entry(candidate, require_manifest=False)
-            artifact = entry["artifact"]
-            if candidate != path:
-                if type(artifact) is not dict:
-                    continue
-                artifact = copy.deepcopy(artifact)
-                artifact["source_id"] = source_id
-            original = copy.deepcopy(artifact)
-            artifact = materialize_unique_aliases(artifact)
-            validated = validate_artifact(
-                artifact,
-                text=text,
-                source_id=source_id,
-                source_sha256=source_sha256,
-                section_label=section_label,
-                prompt_version=prompt_version,
-                ordered_sections=ordered_sections,
-            )
-            if candidate != path or artifact != original:
-                write_cache_entry(path, validated, inputs)
-            elif entry["manifest"] is None:
-                write_cache_entry(path, validated, inputs)
-            return validated
-        except (OSError, json.JSONDecodeError, ArtifactValidationError, ValueError):
-            continue
-
-    invalid_path = _invalid_cache_path(
-        cache_dir,
-        prompt_version=prompt_version,
-        source_id=source_id,
-        filename=path.name,
-    )
-    invalid_candidates = [invalid_path]
-    if not invalid_path.is_file():
-        invalid_candidates.extend(
-            sorted(invalid_path.parent.parent.glob(f"*/{path.name}"))
+    try:
+        entry = read_cache_entry(path, require_manifest=False)
+        original = copy.deepcopy(entry["artifact"])
+        artifact = materialize_unique_aliases(entry["artifact"])
+        validated = validate_artifact(
+            artifact, text=text, source_id=source_id, source_sha256=source_sha256,
+            section_label=section_label, prompt_version=prompt_version,
+            ordered_sections=ordered_sections,
         )
-    for candidate in invalid_candidates:
-        try:
-            diagnostic = json.loads(candidate.read_text(encoding="utf-8"))
-            if type(diagnostic) is not dict:
-                continue
-            if (
-                diagnostic.get("schema") != "chapter-intelligence-invalid/1"
-                or diagnostic.get("source_sha256") != source_sha256
-                or diagnostic.get("section_label") != section_label
-                or diagnostic.get("prompt_version") != prompt_version
-                or type(diagnostic.get("raw_response")) is not str
-            ):
-                continue
-            artifact = materialize_response(
-                diagnostic["raw_response"],
-                text,
-                source_id_override=source_id,
-            )
-            validated = validate_artifact(
-                artifact,
-                text=text,
-                source_id=source_id,
-                source_sha256=source_sha256,
-                section_label=section_label,
-                prompt_version=prompt_version,
-                ordered_sections=ordered_sections,
-            )
+        if artifact != original or entry["manifest"] is None:
             write_cache_entry(path, validated, inputs)
-            candidate.unlink(missing_ok=True)
-            return validated
-        except (
-            OSError,
-            json.JSONDecodeError,
-            ArtifactValidationError,
-            ValueError,
-        ):
-            continue
-    return None
+        return validated
+    except (OSError, json.JSONDecodeError, ArtifactValidationError, ValueError):
+        return None
 
 
 def scan_validated_entries(

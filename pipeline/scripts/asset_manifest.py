@@ -42,8 +42,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# YAML pinned-style serializer using stdlib only — we don't have a yaml
-# dep. Format is constrained enough that we hand-roll it.
+import yaml
+
+# Keep the pinned-style serializer for byte determinism; use PyYAML to parse.
 
 SCHEMA_VERSION = 1
 
@@ -171,41 +172,19 @@ def read_manifest(assets_dir: Path) -> tuple[str | None, list[ImageEntry]]:
     m = FM_RX.match(text)
     if not m:
         return None, []
-    fm = m.group(1)
-    # Hand-rolled parse — enough for the constrained shape we write.
-    source_id: str | None = None
-    entries: list[ImageEntry] = []
-    cur: dict[str, Any] | None = None
-    cur_refs: list[dict[str, Any]] | None = None
-    in_images = False
-    for line in fm.splitlines():
-        if line.startswith("source_id:"):
-            source_id = line.split(":", 1)[1].strip()
-            if source_id == "null":
-                source_id = None
-        elif line.strip() == "images:":
-            in_images = True
-        elif in_images and line.startswith("  - file:"):
-            if cur:
-                entries.append(_finalize_entry(cur, cur_refs or []))
-            cur = {"file": _parse_yaml_str(line.split(":", 1)[1].strip())}
-            cur_refs = []
-        elif cur is not None and line.startswith("    "):
-            stripped = line.strip()
-            if stripped == "origin_refs:":
-                cur_refs = []
-            elif stripped.startswith("- {") and cur_refs is not None:
-                # flow mapping
-                cur_refs.append(_parse_flow_mapping(stripped[2:].strip()))
-            elif ":" in stripped:
-                key, _, val = stripped.partition(":")
-                key = key.strip()
-                val = val.strip()
-                cur[key] = _parse_scalar(val)
-        # else: ignore
-    if cur:
-        entries.append(_finalize_entry(cur, cur_refs or []))
-    return source_id, entries
+    try:
+        data = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError:
+        return None, []
+    if not isinstance(data, dict):
+        return None, []
+    images = data.get("images") or []
+    if not isinstance(images, list):
+        return data.get("source_id"), []
+    return data.get("source_id"), [
+        _finalize_entry(item, item.get("origin_refs") or [])
+        for item in images if isinstance(item, dict)
+    ]
 
 
 def _finalize_entry(d: dict[str, Any], refs: list[dict[str, Any]]) -> ImageEntry:
@@ -224,103 +203,6 @@ def _finalize_entry(d: dict[str, Any], refs: list[dict[str, Any]]) -> ImageEntry
         caption_error_kind=d.get("caption_error_kind"),
         original_sha256=d.get("original_sha256"),
     )
-
-
-def _parse_yaml_str(s: str) -> str:
-    s = s.strip()
-    if s.startswith('"') and s.endswith('"'):
-        return json.loads(s)
-    return s
-
-
-def _parse_scalar(s: str) -> Any:
-    s = s.strip()
-    if s == "null":
-        return None
-    if s == "true":
-        return True
-    if s == "false":
-        return False
-    if s.startswith("[") and s.endswith("]"):
-        # flow list — we only emit list-of-numbers and list-of-nothing
-        inner = s[1:-1].strip()
-        if not inner:
-            return []
-        parts = [p.strip() for p in inner.split(",")]
-        try:
-            return [int(p) for p in parts]
-        except ValueError:
-            try:
-                return [float(p) for p in parts]
-            except ValueError:
-                return parts
-    if s.startswith('"') and s.endswith('"'):
-        return json.loads(s)
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    try:
-        return float(s)
-    except ValueError:
-        pass
-    return s
-
-
-def _parse_flow_mapping(s: str) -> dict[str, Any]:
-    """Parse `{ k: v, k2: "v2", k3: [1, 2, 3] }`."""
-    s = s.strip()
-    if not (s.startswith("{") and s.endswith("}")):
-        return {}
-    inner = s[1:-1].strip()
-    out: dict[str, Any] = {}
-    # Split on top-level commas (not inside brackets / quotes).
-    parts = _split_top_level(inner, ",")
-    for p in parts:
-        if not p.strip():
-            continue
-        if ":" not in p:
-            continue
-        key, _, val = p.partition(":")
-        out[key.strip()] = _parse_scalar(val)
-    return out
-
-
-def _split_top_level(s: str, sep: str) -> list[str]:
-    """Split `s` on `sep`, ignoring `sep` inside `"..."` strings or `[...]`/`{...}`
-    nesting. Tracks JSON-style backslash escapes so `\"` does NOT close a
-    string. Without this, any string value containing a literal `"` would
-    cause the splitter to silently misalign and corrupt the parse — which
-    matters once Phase 2 web origin_refs land with arbitrary URLs.
-    """
-    out: list[str] = []
-    depth = 0
-    in_str = False
-    prev_backslash = False
-    cur = []
-    for ch in s:
-        cur.append(ch)
-        if ch == '"' and not prev_backslash:
-            in_str = not in_str
-            prev_backslash = False
-            continue
-        if not in_str:
-            if ch in "[{":
-                depth += 1
-            elif ch in "]}":
-                depth -= 1
-            elif depth == 0 and ch == sep:
-                # remove the just-appended sep and emit the segment
-                cur.pop()
-                out.append("".join(cur))
-                cur = []
-                prev_backslash = False
-                continue
-        # backslash tracking — only for in-string state, but cheap to track always
-        prev_backslash = (ch == "\\") and not prev_backslash
-    if cur:
-        out.append("".join(cur))
-    return out
 
 
 def write_manifest(assets_dir: Path, source_id: str | None,

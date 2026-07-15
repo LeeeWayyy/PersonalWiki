@@ -11,7 +11,6 @@ import json
 import os
 import signal
 import shlex
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -27,6 +26,17 @@ def test_health_ok(client):
     body = r.json()
     assert body["ok"] is True and body["auth"] is True
     assert "content" in body  # regression: /health used to reference a removed attr
+    assert r.headers["X-Frame-Options"] == "DENY"
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert r.headers["Referrer-Policy"] == "no-referrer"
+    assert r.headers["Cross-Origin-Opener-Policy"] == "same-origin"
+
+
+def test_static_site_mount_is_last():
+    from app.main import app
+
+    assert app.routes[-1].name == "site"
+    assert app.routes[-1].path == ""
 
 
 def test_db_connection_pragmas_and_indexes():
@@ -48,196 +58,6 @@ def test_db_connection_pragmas_and_indexes():
         conn.close()
 
 
-def test_db_schema_initializes_once_per_database(monkeypatch, tmp_path):
-    from app import db
-
-    test_db = tmp_path / "study.db"
-    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(db, "DB_PATH", test_db)
-
-    conn = db.connect()
-    conn.close()
-
-    monkeypatch.setattr(
-        db, "_MIGRATIONS", ["ALTER TABLE missing_table ADD COLUMN bad TEXT"]
-    )
-
-    conn = db.connect()
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
-    finally:
-        conn.close()
-
-
-def test_db_migrates_legacy_reviews_table_to_foreign_key(monkeypatch, tmp_path):
-    from app import db
-
-    legacy_db = tmp_path / "study.db"
-    raw = sqlite3.connect(legacy_db)
-    raw.executescript(
-        """
-        CREATE TABLE items (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          kind TEXT NOT NULL DEFAULT 'word',
-          norm_key TEXT NOT NULL,
-          lemma TEXT NOT NULL,
-          reading TEXT,
-          pos TEXT,
-          gloss TEXT,
-          example TEXT,
-          source_id TEXT,
-          anchor TEXT,
-          status TEXT NOT NULL DEFAULT 'new',
-          stability REAL NOT NULL DEFAULT 0,
-          difficulty REAL NOT NULL DEFAULT 0,
-          state INTEGER NOT NULL DEFAULT 0,
-          reps INTEGER NOT NULL DEFAULT 0,
-          lapses INTEGER NOT NULL DEFAULT 0,
-          due TEXT,
-          last_review TEXT,
-          created TEXT NOT NULL
-        );
-        CREATE TABLE reviews (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          item_id INTEGER NOT NULL,
-          grade INTEGER NOT NULL,
-          reviewed TEXT NOT NULL,
-          interval INTEGER
-        );
-        INSERT INTO items(id,kind,norm_key,lemma,created,due)
-          VALUES(1,'word','word:legacy','legacy','2026-01-01T00:00:00Z','2026-01-02');
-        INSERT INTO reviews(id,item_id,grade,reviewed,interval)
-          VALUES(1,1,3,'2026-01-02T00:00:00Z',1),
-                (2,99,3,'2026-01-02T00:00:00Z',1);
-        """
-    )
-    raw.commit()
-    raw.close()
-
-    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(db, "DB_PATH", legacy_db)
-
-    conn = db.connect()
-    try:
-        assert conn.execute("PRAGMA foreign_key_list(reviews)").fetchone() is not None
-        rows = conn.execute("SELECT item_id FROM reviews ORDER BY id").fetchall()
-        assert [r[0] for r in rows] == [1]
-        conn.execute("DELETE FROM items WHERE id=1")
-        conn.commit()
-        assert conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == 0
-    finally:
-        conn.close()
-
-
-def test_db_recovers_stranded_reviews_legacy(monkeypatch, tmp_path):
-    from app import db
-
-    legacy_db = tmp_path / "study.db"
-    raw = sqlite3.connect(legacy_db)
-    raw.executescript(
-        """
-        CREATE TABLE items (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          kind TEXT NOT NULL DEFAULT 'word',
-          norm_key TEXT NOT NULL,
-          lemma TEXT NOT NULL,
-          reading TEXT,
-          pos TEXT,
-          gloss TEXT,
-          example TEXT,
-          source_id TEXT,
-          anchor TEXT,
-          status TEXT NOT NULL DEFAULT 'new',
-          stability REAL NOT NULL DEFAULT 0,
-          difficulty REAL NOT NULL DEFAULT 0,
-          state INTEGER NOT NULL DEFAULT 0,
-          reps INTEGER NOT NULL DEFAULT 0,
-          lapses INTEGER NOT NULL DEFAULT 0,
-          due TEXT,
-          last_review TEXT,
-          created TEXT NOT NULL
-        );
-        CREATE TABLE reviews_legacy (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          item_id INTEGER NOT NULL,
-          grade INTEGER NOT NULL,
-          reviewed TEXT NOT NULL,
-          interval INTEGER
-        );
-        INSERT INTO items(id,kind,norm_key,lemma,created,due)
-          VALUES(1,'word','word:stranded','stranded','2026-01-01T00:00:00Z','2026-01-02');
-        INSERT INTO reviews_legacy(id,item_id,grade,reviewed,interval)
-          VALUES(1,1,3,'2026-01-02T00:00:00Z',1),
-                (2,99,3,'2026-01-02T00:00:00Z',1);
-        """
-    )
-    raw.commit()
-    raw.close()
-
-    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(db, "DB_PATH", legacy_db)
-
-    conn = db.connect()
-    try:
-        assert conn.execute("PRAGMA foreign_key_list(reviews)").fetchone() is not None
-        rows = conn.execute("SELECT item_id FROM reviews ORDER BY id").fetchall()
-        assert [r[0] for r in rows] == [1]
-        assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reviews_legacy'"
-        ).fetchone() is None
-    finally:
-        conn.close()
-
-
-def test_db_migrates_translation_context(monkeypatch, tmp_path):
-    from app import db
-
-    legacy_db = tmp_path / "study.db"
-    raw = sqlite3.connect(legacy_db)
-    raw.executescript(
-        """
-        CREATE TABLE translations (
-          text_hash TEXT PRIMARY KEY,
-          lang TEXT,
-          translation TEXT,
-          prompt_version TEXT,
-          llm_provider TEXT,
-          llm_model TEXT,
-          created TEXT
-        );
-        INSERT INTO translations(text_hash,lang,translation,prompt_version,created)
-          VALUES('t1','Simplified Chinese','translated','translate:v1','2026-01-01T00:00:00Z'),
-                ('a1','summarize','assisted','assist:v1','2026-01-01T00:00:00Z');
-        """
-    )
-    raw.commit()
-    raw.close()
-
-    monkeypatch.setattr(db, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(db, "DB_PATH", legacy_db)
-
-    conn = db.connect()
-    try:
-        rows = {
-            r["text_hash"]: dict(r)
-            for r in conn.execute(
-                "SELECT text_hash,context,lang FROM translations ORDER BY text_hash"
-            ).fetchall()
-        }
-        assert rows["t1"] == {
-            "text_hash": "t1",
-            "context": "translate",
-            "lang": "Simplified Chinese",
-        }
-        assert rows["a1"] == {
-            "text_hash": "a1",
-            "context": "summarize",
-            "lang": None,
-        }
-    finally:
-        conn.close()
-
-
 def test_private_routes_fail_closed_when_auth_token_unset(client, monkeypatch):
     from app import settings
 
@@ -245,7 +65,6 @@ def test_private_routes_fail_closed_when_auth_token_unset(client, monkeypatch):
     assert client.get("/health").status_code == 200
 
     cases = [
-        ("GET", "/health/llm", {}),
         ("POST", "/ingest", {"json": {"url": "https://example.com"}}),
         ("POST", "/ingest/sections", {"json": {"url": "https://example.com"}}),
         ("GET", "/jobs/missing", {}),
@@ -269,7 +88,6 @@ def test_private_routes_fail_closed_when_auth_token_unset(client, monkeypatch):
 
 def test_private_routes_reject_missing_or_bad_token(client):
     cases = [
-        ("GET", "/health/llm", {}),
         ("POST", "/ingest", {"json": {"url": "https://example.com"}}),
         ("POST", "/ingest/sections", {"json": {"url": "https://example.com"}}),
         ("GET", "/jobs/missing", {}),
@@ -407,7 +225,11 @@ def test_preflight_allows_untracked_taxonomy_scaffold(client, auth, content_dir)
     # while still blocking a genuine untracked page.
     taxonomy = content_dir / "wiki" / "_taxonomy.md"
     page = content_dir / "wiki" / "entities" / "Leftover.md"
-    taxonomy.write_text("# Taxonomy\n", encoding="utf-8")
+    taxonomy.write_text(
+        "# Taxonomy\n\n## Domain\n- `general/knowledge`\n\n"
+        "## Form\n- `concept`\n\n## Reserved\n- `taxonomy-gap`\n",
+        encoding="utf-8",
+    )
     try:
         ok = client.get("/preflight", headers=auth).json()
         assert ok["ok"] is True, ok
@@ -1636,66 +1458,6 @@ def test_export_rejects_unsupported_formats(client, auth):
     r = client.get("/export?format=anki", headers=auth)
     assert r.status_code == 400
     assert "unsupported export format" in r.text
-
-
-def test_llm_health_requires_local_command(client, auth, monkeypatch):
-    monkeypatch.delenv("LLM_CMD", raising=False)
-    monkeypatch.delenv("PW_LLM_PROVIDER", raising=False)
-    monkeypatch.setenv("PW_LLM_API_ENABLED", "1")
-    monkeypatch.setenv("PW_LLM_API_KEY", "unused-api-key")
-
-    r = client.get("/health/llm", headers=auth)
-
-    assert r.status_code == 503
-    assert "Local LLM command/provider is not configured" in r.json()["message"]
-
-
-def test_llm_health_runs_command(client, auth, monkeypatch, tmp_path):
-    script = tmp_path / "llm_health_stub.py"
-    script.write_text("import sys\nsys.stdin.read()\nprint('ok')\n", encoding="utf-8")
-    monkeypatch.setenv("LLM_CMD", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
-    monkeypatch.setenv("PW_LLM_MODEL", "test-local-model")
-
-    r = client.get("/health/llm", headers=auth)
-
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["provider"] == "command"
-    assert body["model"] == "test-local-model"
-    assert body["matched_expected"] is True
-
-
-def test_llm_health_runs_codex_provider(client, auth, monkeypatch, tmp_path):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    codex = bin_dir / "codex"
-    codex.write_text(
-        "#!/usr/bin/env python3\n"
-        "import pathlib, sys\n"
-        "args = sys.argv[1:]\n"
-        "out = ''\n"
-        "for i, arg in enumerate(args):\n"
-        "    if arg == '-o' and i + 1 < len(args):\n"
-        "        out = args[i + 1]\n"
-        "if out:\n"
-        "    pathlib.Path(out).write_text('ok\\n', encoding='utf-8')\n"
-        "else:\n"
-        "    print('ok')\n",
-        encoding="utf-8",
-    )
-    codex.chmod(0o755)
-    monkeypatch.delenv("LLM_CMD", raising=False)
-    monkeypatch.setenv("PW_LLM_PROVIDER", "codex")
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-
-    r = client.get("/health/llm", headers=auth)
-
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["provider"] == "codex"
-    assert body["matched_expected"] is True
 
 
 def test_llm_command_timeout_kills_process_group(monkeypatch, tmp_path):

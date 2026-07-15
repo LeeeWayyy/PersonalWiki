@@ -29,7 +29,6 @@ export function ingestOptions(kind, sectionHeading) {
 export const isSectionableFile = (name) => /\.(epub|mobi|azw3?|pdf|md|markdown|txt|html?)$/i.test(name);
 
 export function mount(config) {
-  const urlInput = el(config.urlId);
   const tokenInput = el(config.tokenId);
   const status = el(config.statusId);
   const log = el(config.logId);
@@ -60,10 +59,6 @@ export function mount(config) {
   kindInput.addEventListener('change', syncSectionSupport);
   syncSectionSupport();
 
-  function baseUrl() {
-    return localStorage.getItem('backendUrl') || urlInput.value;
-  }
-
   function authHeaders() {
     return headersFor(localStorage.getItem('backendToken') || tokenInput.value);
   }
@@ -74,7 +69,7 @@ export function mount(config) {
 
   async function ping() {
     try {
-      const r = await fetch(urlInput.value + '/health');
+      const r = await fetch('/health');
       backendOnline = r.ok;
       const [text, color] = r.ok ? STATUS.online : STATUS.error;
       status.textContent = text;
@@ -87,10 +82,8 @@ export function mount(config) {
     }
   }
 
-  urlInput.value = localStorage.getItem('backendUrl') || 'http://localhost:8787';
   tokenInput.value = localStorage.getItem('backendToken') || '';
   el(config.saveId).onclick = () => {
-    localStorage.setItem('backendUrl', urlInput.value);
     localStorage.setItem('backendToken', tokenInput.value);
     if (config.settingsId) el(config.settingsId).style.display = 'none';
     ping();
@@ -135,7 +128,7 @@ export function mount(config) {
       if (payload.error) return append(payload.error);
       sectionsLoadBtn.disabled = true;
       try {
-        const res = await fetch(baseUrl() + '/ingest/sections', { method: 'POST', ...payload });
+        const res = await fetch('/ingest/sections', { method: 'POST', ...payload });
         if (!res.ok) throw new Error(await res.text());
         const { sections } = await res.json();
         sectionList.replaceChildren(
@@ -170,7 +163,7 @@ export function mount(config) {
     if (!activeJob) return;
     cancelBtn.disabled = true;
     try {
-      const r = await fetch(baseUrl() + '/jobs/' + activeJob + '/cancel', {
+      const r = await fetch('/jobs/' + activeJob + '/cancel', {
         method: 'POST',
         headers: activeHeaders,
       });
@@ -183,7 +176,6 @@ export function mount(config) {
   };
 
   el(config.runId).onclick = async () => {
-    const url = baseUrl();
     const H = authHeaders();
     const opts = ingestOptions(
       kindInput.value,
@@ -193,7 +185,7 @@ export function mount(config) {
     try {
       const payload = sourcePayload(H, opts);
       if (payload.error) return append(payload.error);
-      const res = await fetch(url + '/ingest', { method: 'POST', ...payload });
+      const res = await fetch('/ingest', { method: 'POST', ...payload });
       if (!res.ok) throw new Error(await res.text());
       const { job_id: jobId } = await res.json();
       append(t('ingest.jobStarted', { id: jobId }));
@@ -202,7 +194,7 @@ export function mount(config) {
       cancelBtn.style.display = '';
       cancelBtn.disabled = false;
       try {
-        await streamJob(url, jobId, H, append);
+        await streamJob('', jobId, H, append);
       } finally {
         activeJob = null;
         activeHeaders = {};

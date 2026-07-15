@@ -4,7 +4,7 @@ Stdlib-only (no pyyaml, no third-party) so even the dependency-free scripts
 (add-page-id.py, rewrite-citations.py) can import these without inheriting a
 yaml dep. Sidecar/frontmatter parsing — which needs pyyaml — lives in
 media_resolver.py instead, which re-exports these for the media front-door
-scripts. The frozen source-identity.py oracle keeps its own copies by design.
+scripts.
 """
 
 from __future__ import annotations

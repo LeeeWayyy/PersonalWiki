@@ -26,77 +26,28 @@ golden-diff of the naming transforms against the original bash `sed`).
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
-import secrets
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
-import time
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _util import die, git_tracked, iso_now, new_ulid, progress, sha256_of, today
+
 SOURCES = Path("sources")  # cwd-relative, exactly like ingest.sh `sources/*.md`
-_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 URL_FETCH_MAX_TIME_S = os.environ.get("PW_SOURCE_FETCH_MAX_TIME_S", "120")
 URL_FETCH_MAX_BYTES = os.environ.get("PW_SOURCE_FETCH_MAX_BYTES", str(100 * 1024 * 1024))
 
 
-def _log_prefix() -> str:
-    run_id = os.environ.get("PW_RUN_ID", "").strip()
-    return f"ingest[{run_id}]" if run_id else "ingest"
-
-
-def die(msg: str) -> None:
-    print(f"{_log_prefix()}: {msg}", file=sys.stderr)
-    raise SystemExit(1)
-
-
-def progress(msg: str) -> None:
-    print(f"{_log_prefix()}: {msg}", file=sys.stderr)
-
-
 def _terminated(_signum, _frame) -> None:
     raise SystemExit(143)
-
-
-def sha256_of(path: Path | str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def new_ulid() -> str:
-    ts = int(time.time() * 1000)
-    n = (ts << 80) | secrets.randbits(80)
-    s = ""
-    for _ in range(26):
-        s = _ULID_ALPHABET[n & 0x1F] + s
-        n >>= 5
-    return s
-
-
-def iso_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def git_tracked(path: str) -> bool:
-    return subprocess.run(
-        ["git", "ls-files", "--error-unmatch", "--", path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ).returncode == 0
 
 
 def _field2(text: str, key: str) -> str:

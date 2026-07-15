@@ -22,7 +22,6 @@ import sys
 import tempfile
 import threading
 import time
-import tomllib
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -79,33 +78,13 @@ def _codex_bin() -> str:
     return _env("PW_CODEX_BIN", "codex")
 
 
-def _codex_config_path() -> Path:
+def _codex_home() -> Path:
     home = _env("CODEX_HOME")
-    root = Path(home).expanduser() if home else Path.home() / ".codex"
-    return root / "config.toml"
+    return Path(home).expanduser() if home else Path.home() / ".codex"
 
 
-def _codex_config() -> dict[str, object]:
-    try:
-        with _codex_config_path().open("rb") as handle:
-            value = tomllib.load(handle)
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
-        return {}
-    return value if type(value) is dict else {}
-
-
-def _codex_config_string(name: str) -> str | None:
-    value = _codex_config().get(name)
-    return value.strip() if type(value) is str and value.strip() else None
-
-
-def _effective_codex_setting(env_name: str, config_name: str, default: str) -> str:
-    env_value = _env(env_name)
-    if env_value:
-        return env_value
-    if not _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True):
-        return _codex_config_string(config_name) or default
-    return default
+def _effective_codex_setting(env_name: str, default: str) -> str:
+    return _env(env_name) or default
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -176,13 +155,8 @@ def model() -> str | None:
         return Path(argv[0]).name if argv else "local-command"
     if codex_configured():
         # The CLI's compiled default is not discoverable without running a
-        # completion. A configured default can be made explicit; otherwise
-        # leave it unset and bind the cache to the Codex binary fingerprint.
-        return (
-            _codex_config_string("model")
-            if not _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True)
-            else None
-        )
+        # completion. Leave it unset and bind the cache to the binary fingerprint.
+        return None
     if _api_enabled() and _api_key():
         return DEFAULT_API_MODEL
     return None
@@ -260,43 +234,15 @@ def _codex_binary_fingerprint() -> str | None:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _codex_config_fingerprint(model_override: str | None = None) -> str | None:
-    """Hash only effective, non-secret Codex config values used by this client."""
-    if _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True):
-        return None
-    relevant: dict[str, str] = {}
-    if not (model_override or "").strip() and not _env("PW_LLM_MODEL"):
-        configured_model = _codex_config_string("model")
-        if configured_model:
-            relevant["model"] = configured_model
-    for env_name, config_name in (
-        ("PW_CODEX_REASONING_EFFORT", "model_reasoning_effort"),
-        ("PW_CODEX_VERBOSITY", "model_verbosity"),
-    ):
-        if not _env(env_name):
-            value = _codex_config_string(config_name)
-            if value:
-                relevant[config_name] = value
-    if not relevant:
-        return None
-    payload = json.dumps(relevant, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
 def _codex_automation_profile() -> dict[str, object]:
     """Return every non-secret Codex automation input that can affect output."""
     profile: dict[str, object] = {
-        "ignore_user_config": _env_bool("PW_CODEX_IGNORE_USER_CONFIG", True),
+        "ignore_user_config": True,
         "ignore_rules": _env_bool("PW_CODEX_IGNORE_RULES", True),
-        "ephemeral": _env_bool("PW_CODEX_EPHEMERAL", False),
         "disable_shell": _env_bool("PW_CODEX_DISABLE_SHELL", False),
-        "service_tier": _env("PW_CODEX_SERVICE_TIER") or None,
     }
-    if not profile["ignore_user_config"]:
-        config = _codex_config_path()
-        profile["user_config"] = _content_fingerprint(config)
     if not profile["ignore_rules"]:
-        rules_dir = _codex_config_path().parent / "rules"
+        rules_dir = _codex_home() / "rules"
         profile["rules"] = [
             {
                 "path": path.relative_to(rules_dir).as_posix(),
@@ -349,14 +295,14 @@ def execution_identity(model_override: str | None = None) -> dict[str, str | Non
         "model": _effective_model(model_override),
         "reasoning": (
             _effective_codex_setting(
-                "PW_CODEX_REASONING_EFFORT", "model_reasoning_effort", "medium"
+                "PW_CODEX_REASONING_EFFORT", "medium"
             )
             if selected_provider == "codex"
             else None
         ),
         "verbosity": (
             _effective_codex_setting(
-                "PW_CODEX_VERBOSITY", "model_verbosity", "low"
+                "PW_CODEX_VERBOSITY", "low"
             )
             if selected_provider == "codex"
             else None
@@ -368,11 +314,7 @@ def execution_identity(model_override: str | None = None) -> dict[str, str | Non
         "codex_binary_fingerprint": (
             _codex_binary_fingerprint() if selected_provider == "codex" else None
         ),
-        "codex_config_fingerprint": (
-            _codex_config_fingerprint(model_override)
-            if selected_provider == "codex"
-            else None
-        ),
+        "codex_config_fingerprint": None,
         "codex_automation_fingerprint": (
             _codex_automation_fingerprint()
             if selected_provider == "codex"
@@ -648,27 +590,21 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
         workdir = tempfile.mkdtemp(prefix="pw-codex-") if own else seeded
         argv = [_codex_bin(), *CODEX_ARGS]
         automation = _codex_automation_profile()
-        if automation["ignore_user_config"]:
-            argv.append("--ignore-user-config")
+        argv.append("--ignore-user-config")
         if automation["ignore_rules"]:
             argv.append("--ignore-rules")
-        if automation["ephemeral"]:
-            argv.append("--ephemeral")
         if automation["disable_shell"]:
             argv += ["--disable", "shell_tool"]
         reasoning = _effective_codex_setting(
-            "PW_CODEX_REASONING_EFFORT", "model_reasoning_effort", "medium"
+            "PW_CODEX_REASONING_EFFORT", "medium"
         )
         if reasoning:
             argv += ["-c", f"model_reasoning_effort={json.dumps(reasoning)}"]
         verbosity = _effective_codex_setting(
-            "PW_CODEX_VERBOSITY", "model_verbosity", "low"
+            "PW_CODEX_VERBOSITY", "low"
         )
         if verbosity:
             argv += ["-c", f"model_verbosity={json.dumps(verbosity)}"]
-        service_tier = automation["service_tier"]
-        if service_tier:
-            argv += ["-c", f"service_tier={json.dumps(service_tier)}"]
         argv += ["-C", workdir, "--sandbox", "workspace-write"]
         model_name = _effective_model(model)
         if model_name:

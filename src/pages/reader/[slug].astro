@@ -111,7 +111,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           // (ふりがな/表示/文法…) are part of the reader's design; only these few
           // status messages are language-switched, via a local EN flag.
           const EN = (localStorage.getItem('pw:lang') || 'zh') === 'en';
-          const BACKEND = localStorage.getItem('backendUrl') || 'http://localhost:8787';
+          const BACKEND = '';
           const TOKEN = localStorage.getItem('backendToken') || '';
           const H = TOKEN ? { 'X-Auth-Token': TOKEN } : {};
           const saved = new Set();

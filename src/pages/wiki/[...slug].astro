@@ -17,7 +17,8 @@ const { pages, backlinks, sourceMap } = loadVault();
 const page = pages.find((p) => p.rel === entry.id);
 const kind = page?.kind ?? 'other';
 // Map H1s are the raw ingest filename; show the source book's clean title instead.
-const mapSource = kind === 'map' && page?.data?.source_id ? sourceMap.get(page.data.source_id) : null;
+const mapSourceId = page?.data?.source_id;
+const mapSource = kind === 'map' && typeof mapSourceId === 'string' ? sourceMap.get(mapSourceId) : null;
 const title = mapSource ? sourceDisplay(mapSource).title : (page?.title ?? entry.id);
 const backHrefs = page ? [...(backlinks.get(page.href) ?? [])] : [];
 const backPages = backHrefs.map((h) => pages.find((p) => p.href === h)).filter(Boolean);

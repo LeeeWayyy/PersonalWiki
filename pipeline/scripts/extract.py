@@ -8,6 +8,7 @@
 #     "trafilatura>=1.12",
 #     "pypdf>=5.0",
 #     "requests>=2.31",
+#     "pyyaml>=6.0",
 #     # MOBI conversion is pinned for the same idempotency class as image
 #     # rasterization: KindleUnpack changes can shift extracted bytes/paths
 #     # and therefore source asset hashes.
@@ -491,8 +492,8 @@ def _apply_source_caption(entry: ImageEntry, caption: str | None, source: str) -
     preferred, so re-extract refreshes stale *vision* captions but keeps the
     first source caption (first-source-wins → byte-identical re-runs).
 
-    On write, clears stale vision-era state so downstream (render-images-block,
-    lint) treats the entry as freshly, validly captioned: a previously-decorative
+    On write, clears stale vision-era state so downstream rendering and lint
+    treat the entry as freshly, validly captioned: a previously-decorative
     or errored entry must lose those, or the new caption is silently filtered
     out. No caption_at — keeps re-runs byte-identical."""
     if not caption or entry.caption_source in ("embedded", "pdf-label"):

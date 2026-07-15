@@ -66,16 +66,15 @@ requiring the exact heading to be typed.
 `backend/app/ingest_runner.py` is the control plane: a single `asyncio.Lock`
 serializes all jobs, `ensure_content_git` auto-initializes a git repo in the
 wiki folder if needed (blocked by `PW_INGEST_NO_AUTO_GIT=1`), and its own
-preflight mirrors ingest.py's dirty-tree scopes (tool-owned wiki pages,
-tracked provenance, staged files, and stale assets; `lang/_reading/` for lang
-jobs) so a doomed run is reported as `blocked`
-up front. It builds the argv (`--profile lang`, `--kind <k>`, or
+preflight invokes `pipeline/ingest.py --preflight`, so the dirty-tree policy has
+one implementation and a doomed run is reported as `blocked` up front. It
+builds the argv (`--profile lang`, `--kind <k>`, or
 `--section '^<escaped heading>$' --section-label=<heading>`; document jobs use
 `--limit 0`), runs `pipeline/ingest.py` in its own process group with an idle
 timeout (2100s of silence), then optionally `REBUILD_CMD`.
 `PW_INGEST_STUB=1` exercises the job
-flow without the real pipeline. `backend/app/serve.py` enforces exactly one
-Uvicorn worker — jobs, locks, and staged uploads are process-local.
+flow without the real pipeline. `backend/app/serve.py` starts Uvicorn with one
+worker because jobs, locks, and staged uploads are process-local.
 
 **CLI.** `python3 pipeline/ingest.py [flags] <path-or-url>` is the same engine
 invoked directly; see [Running It](#running-it).
@@ -300,12 +299,6 @@ so child termination and Git rollback can finish.
 - `verify-ingest-quality.py --intelligence J --source-id ID --section-label L
   [--modified P...] [--existing P...]` — the quality gate as a standalone CLI;
   prints the JSON receipt, exit 0 iff `ok`.
-- `verify-chapter-intelligence-baseline.py <baseline.json> <artifact.json>...`
-  — checks analyzer artifacts against a hand-written
-  `chapter-intelligence-baseline/1` expectation file (required entity/topic
-  alias groups, claim term groups, relation kinds, forbidden/analysis-only
-  concepts) for regression-testing analyzer quality on a known book.
-
 ## Key Files
 
 | File | Role |
@@ -340,7 +333,6 @@ python3 pipeline/ingest.py --kind video 'https://youtube.com/watch?v=...'
 python3 pipeline/ingest.py --kind audio --feed-url FEED --episode-title '...' EPISODE_URL
 python3 pipeline/ingest.py --kind image_note --post-id ID bundle.zip
 python3 pipeline/ingest.py --kind video --retranscribe URL   # supersede + re-ASR
-python3 pipeline/ingest.py --kind video --rerender URL       # re-render committed JSON, no ASR
 
 # other flags
 #   --model M            main diff model;  --analyze-model M  analyzer model

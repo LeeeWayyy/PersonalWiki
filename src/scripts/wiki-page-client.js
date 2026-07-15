@@ -75,7 +75,7 @@ export function installPageOps() {
     setBusy(true);
     status.classList.remove('error');
     status.textContent = t('idx.working');
-    const backend = localStorage.getItem('backendUrl') || 'http://localhost:8787';
+    const backend = '';
     const token = localStorage.getItem('backendToken') || '';
     let rebuilt = false;
     const failed = [];

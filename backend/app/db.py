@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 import sqlite3
 import datetime as dt
-import threading
 import unicodedata
 from pathlib import Path
 
@@ -98,143 +97,12 @@ def local_date_from_iso(value: str) -> dt.date:
     return parsed.astimezone().date()
 
 
-# Additive migrations for tables that predate a column. SQLite has no
-# "ADD COLUMN IF NOT EXISTS", so we attempt and swallow the duplicate-column error.
-_MIGRATIONS = [
-    "ALTER TABLE annotations ADD COLUMN region TEXT",  # P4: image/region selector (JSON)
-    "ALTER TABLE translations ADD COLUMN prompt_version TEXT",
-    "ALTER TABLE translations ADD COLUMN llm_provider TEXT",
-    "ALTER TABLE translations ADD COLUMN llm_model TEXT",
-    "ALTER TABLE translations ADD COLUMN context TEXT",
-]
-
-_INIT_LOCK = threading.Lock()
-_INITIALIZED_DATABASES: set[str] = set()
-
-
-def _db_init_key(path: Path) -> str:
-    return str(path.expanduser().resolve(strict=False))
-
-
-def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (name,),
-    ).fetchone() is not None
-
-
-def _create_reviews_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS reviews (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          item_id INTEGER NOT NULL,
-          grade INTEGER NOT NULL,
-          reviewed TEXT NOT NULL,
-          interval INTEGER,
-          FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
-        )"""
-    )
-
-
-def _copy_valid_reviews(conn: sqlite3.Connection, source_table: str) -> None:
-    conn.execute(
-        f"""INSERT OR IGNORE INTO reviews(id,item_id,grade,reviewed,interval)
-            SELECT r.id,r.item_id,r.grade,r.reviewed,r.interval
-            FROM {source_table} r
-            WHERE EXISTS (SELECT 1 FROM items i WHERE i.id=r.item_id)"""
-    )
-
-
-def _ensure_reviews_foreign_key(conn: sqlite3.Connection) -> None:
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        has_reviews = _table_exists(conn, "reviews")
-        has_fk = has_reviews and conn.execute("PRAGMA foreign_key_list(reviews)").fetchone() is not None
-        legacy_sources: list[str] = []
-
-        if has_reviews and not has_fk:
-            conn.execute("DROP INDEX IF EXISTS idx_reviews_item")
-            migrating = "reviews_legacy_migrating"
-            suffix = 0
-            while _table_exists(conn, migrating):
-                suffix += 1
-                migrating = f"reviews_legacy_migrating_{suffix}"
-            conn.execute(f"ALTER TABLE reviews RENAME TO {migrating}")
-            legacy_sources.append(migrating)
-
-        _create_reviews_table(conn)
-        if _table_exists(conn, "reviews_legacy"):
-            legacy_sources.append("reviews_legacy")
-        for source_table in legacy_sources:
-            _copy_valid_reviews(conn, source_table)
-            conn.execute(f"DROP TABLE {source_table}")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_reviews_item ON reviews(item_id)")
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def _ensure_translation_context(conn: sqlite3.Connection) -> None:
-    """Backfill the generic translations cache discriminator.
-
-    Legacy translate rows stored the target language in `lang`; legacy assist
-    rows stored the assist mode in `lang`. New rows use `context` for the cache
-    context (`translate`, `explain`, `summarize`, `define`) and keep `lang` for
-    actual language.
-    """
-    cols = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(translations)").fetchall()
-    }
-    if "context" not in cols:
-        return
-    conn.execute(
-        """UPDATE translations
-           SET context=lang, lang=NULL
-           WHERE context IS NULL AND COALESCE(prompt_version, '') LIKE 'assist:%'"""
-    )
-    conn.execute(
-        """UPDATE translations
-           SET context='translate'
-           WHERE context IS NULL"""
-    )
-
-
-def _run_schema_migrations(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
-    for stmt in _MIGRATIONS:
-        try:
-            conn.execute(stmt)
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" not in str(e).lower():
-                raise sqlite3.OperationalError(f"migration failed: {stmt}: {e}") from e
-    conn.commit()
-    _ensure_reviews_foreign_key(conn)
-    _ensure_translation_context(conn)
-    conn.commit()
-
-
-def _ensure_initialized(conn: sqlite3.Connection, path: Path) -> None:
-    init_key = _db_init_key(path)
-    if init_key in _INITIALIZED_DATABASES:
-        return
-
-    with _INIT_LOCK:
-        if init_key in _INITIALIZED_DATABASES:
-            return
-
-        _run_schema_migrations(conn)
-        _INITIALIZED_DATABASES.add(init_key)
-
-
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    db_path = Path(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.execute("PRAGMA journal_mode=WAL;")
-    _ensure_initialized(conn, db_path)
+    conn.executescript(SCHEMA)
     return conn

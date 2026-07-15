@@ -107,6 +107,30 @@ def emit(**vars_: str) -> None:
         sys.stdout.write(f"{k}={shlex.quote(v)}\n")
 
 
+def _validate_segments(value, *, label="transcript") -> list[dict]:
+    if not isinstance(value, list) or not value:
+        die(f"{label} has no segments")
+    prev_end = None
+    for segment in value:
+        if not isinstance(segment, dict):
+            die(f"{label} has a non-object segment")
+        text = segment.get("text")
+        if text is not None and not isinstance(text, str):
+            die(f"{label} segment text is not a string")
+        start, end = segment.get("start"), segment.get("end")
+        if (isinstance(start, bool) or isinstance(end, bool)
+                or not isinstance(start, (int, float))
+                or not isinstance(end, (int, float))
+                or not math.isfinite(start) or not math.isfinite(end)):
+            die(f"{label} has segments without finite numeric start/end")
+        if end < start:
+            die(f"{label} has an inverted segment ({end} < {start})")
+        if prev_end is not None and start < prev_end:
+            die(f"{label} segments overlap or are out of order ({start} < {prev_end})")
+        prev_end = end
+    return value
+
+
 # ── identity ────────────────────────────────────────────────────────────────
 
 def extract_video_id(url: str) -> str | None:
@@ -287,136 +311,23 @@ def _asr_recipe_lines(*, speech, lang, meta, transcript_tool, language_quoted=Tr
     ]
 
 
-def _media_resolver_own_orphan(identity, origin_ref):
-    def check(ofm: dict, _dest_json: str) -> bool:
-        try:
-            same_identity = media_resolver.identity_key(ofm) == identity
-        except media_resolver.ResolverError:
-            same_identity = False
-        return ofm.get("origin_ref") == origin_ref and same_identity
-    return check
-
-
-def _git_tracked_under(path: str) -> bool:
-    result = subprocess.run(
-        ["git", "ls-files", "--", f"{path.rstrip('/')}/"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-    )
-    return bool(result.stdout.strip())
-
-
-def _evidence_file_hashes(fm: dict) -> dict[str, str]:
-    artifacts = (fm.get("media") or {}).get("evidence_artifacts") or []
-    if not isinstance(artifacts, list):
-        return {}
-    return {
-        item["path"]: item["sha256"]
-        for item in artifacts
-        if isinstance(item, dict)
-        and isinstance(item.get("path"), str)
-        and isinstance(item.get("sha256"), str)
-        and "bundle_recipe" not in item
-    }
-
-
-def _verify_owned_orphan_paths(*, sidecar: str, fm: dict, dest_md: str,
-                               dest_json: str, dest_assets: str | None) -> None:
-    """Prove every pre-existing untracked payload belongs to this sidecar.
-
-    A matching identity alone is insufficient: a user file can share the
-    deterministic slug. Existing bytes must also match hashes recorded by the
-    coherent sidecar, and asset directories may contain no unlisted files.
-    """
-    expected_md = fm.get("sha256")
-    if Path(dest_md).exists():
-        if not Path(dest_md).is_file() or not isinstance(expected_md, str):
-            die(f"untracked canonical artifact is not verifiably owned: {dest_md}")
-        if sha256_of(dest_md) != expected_md:
-            die(f"untracked canonical artifact does not match its sidecar: {dest_md}")
-
-    evidence = _evidence_file_hashes(fm)
-    media = fm.get("media") or {}
-    expected_json = evidence.get(dest_json) or media.get("transcript_json_sha256")
-    if Path(dest_json).exists():
-        if not Path(dest_json).is_file() or not isinstance(expected_json, str):
-            die(f"untracked audit artifact is not verifiably owned: {dest_json}")
-        if sha256_of(dest_json) != expected_json:
-            die(f"untracked audit artifact does not match its sidecar: {dest_json}")
-
-    if not dest_assets or not Path(dest_assets).exists():
-        return
-    assets = Path(dest_assets)
-    if not assets.is_dir() or assets.is_symlink():
-        die(f"untracked assets path is not a verifiable directory: {dest_assets}")
-    expected_under = {
-        path: digest for path, digest in evidence.items()
-        if Path(path).is_relative_to(assets)
-    }
-    if not expected_under:
-        die(f"untracked assets dir has no ownership evidence in {sidecar}: {dest_assets}")
-    actual: set[str] = set()
-    for path in assets.rglob("*"):
-        if path.is_symlink():
-            die(f"untracked assets dir contains a symlink; refusing to replace: {path}")
-        if not path.is_file():
-            continue
-        rel = path.as_posix()
-        actual.add(rel)
-        expected = expected_under.get(rel)
-        if not expected or sha256_of(path) != expected:
-            die(f"untracked asset is unlisted or does not match its sidecar: {rel}")
-    if actual != set(expected_under):
-        missing = sorted(set(expected_under) - actual)
-        die(f"untracked assets dir is incomplete for its sidecar: {', '.join(missing)}")
-
-
 def _stage_media_artifacts(*, slug, md_path, json_path, sidecar, sidecar_text,
-                           md_suffix, json_suffix, origin_ref, identity=None,
-                           assets_path=None, assets_suffix=None,
-                           own_orphan_check=None) -> None:
-    """Move staged media artifacts into sources/, writing sidecar last.
-
-    The own-orphan rule is shared across media families. Most use resolver
-    identity; the legacy YouTube transcript path keeps its stricter JSON-hash
-    orphan check by passing a custom callback.
-    """
+                           md_suffix, json_suffix, assets_path=None,
+                           assets_suffix=None) -> None:
+    """Move staged media artifacts into sources/, writing sidecar last."""
     dest_md = f"sources/{slug}{md_suffix}"
     dest_json = f"sources/{slug}{json_suffix}"
     dest_assets = f"sources/{slug}{assets_suffix}" if assets_suffix else None
-    targets = (dest_md, dest_json, sidecar)
+    targets = [dest_md, dest_json, sidecar]
+    if dest_assets:
+        targets.append(dest_assets)
     for t in targets:
-        if Path(t).is_symlink():
-            die(f"target is a symlink (refusing to replace or follow it): {t}")
-        if Path(t).exists() and git_tracked(t):
-            die(f"target already tracked (refusing to overwrite): {t}")
-    if dest_assets and Path(dest_assets).exists() and _git_tracked_under(dest_assets):
-        die(f"assets dir has git-tracked files (refusing to clobber): {dest_assets}")
-    existing_payload = any(Path(t).exists() for t in (dest_md, dest_json))
-    existing_payload = existing_payload or bool(dest_assets and Path(dest_assets).exists())
-    if existing_payload and not Path(sidecar).is_file():
-        die("pre-existing untracked media artifacts have no coherent ownership sidecar; "
-            f"refusing to overwrite: {dest_md}")
-    if Path(sidecar).exists():
-        if not Path(sidecar).is_file():
-            die(f"untracked sidecar path is not a file: {sidecar}")
-        ofm = parse_frontmatter(Path(sidecar))
-        check = own_orphan_check or _media_resolver_own_orphan(identity, origin_ref)
-        if not check(ofm, dest_json):
-            die(f"untracked sidecar exists and is not a recognizable own-orphan: {sidecar}")
-        if (ofm.get("type") != "source"
-                or not re.fullmatch(r"[0-9A-Z]{26}", str(ofm.get("source_id", "")))
-                or not re.fullmatch(r"[0-9a-f]{64}", str(ofm.get("sha256", "")))):
-            die(f"untracked sidecar lacks a coherent source identity/hash: {sidecar}")
-        _verify_owned_orphan_paths(
-            sidecar=sidecar, fm=ofm, dest_md=dest_md,
-            dest_json=dest_json, dest_assets=dest_assets,
-        )
+        if Path(t).exists() or Path(t).is_symlink():
+            die(f"leftovers from aborted run; delete and re-run: {t}")
     Path("sources").mkdir(exist_ok=True)
     shutil.move(md_path, dest_md)
     shutil.move(json_path, dest_json)
     if dest_assets:
-        if Path(dest_assets).exists():
-            shutil.rmtree(dest_assets)  # untracked own-orphan partial (guarded above) — replace
         shutil.move(assets_path, dest_assets)
     Path(sidecar).write_text(sidecar_text, encoding="utf-8")  # sidecar LAST = commit marker
 
@@ -500,18 +411,11 @@ def _build_podcast_sidecar(*, source_id, sha, added, origin_ref, title, canon_fe
     )
 
 
-def _stage_into_sources_podcast(slug, md_path, json_path, sidecar, sidecar_text,
-                                identity, origin_ref) -> None:
-    """Podcast analogue of _stage_into_sources: md → json → sidecar(LAST), refusing
-    to clobber a TRACKED file; an untracked sidecar must be a recognizable
-    own-orphan (same origin_ref + same generalized identity). `identity` is the full
-    ``(basis, key)`` pair returned by media_resolver.identity_key (NOT the bare key).
-    A sidecar-less md/json partial (no sidecar) is an incomplete own-orphan from a
-    prior interrupted run → safe to replace."""
+def _stage_into_sources_podcast(slug, md_path, json_path, sidecar, sidecar_text) -> None:
     _stage_media_artifacts(
         slug=slug, md_path=md_path, json_path=json_path, sidecar=sidecar,
         sidecar_text=sidecar_text, md_suffix=".transcript.md",
-        json_suffix=".transcript.json", identity=identity, origin_ref=origin_ref,
+        json_suffix=".transcript.json",
     )
 
 
@@ -638,31 +542,7 @@ def _podcast_main(args) -> int:
         #    with finite, ordered start/end; then the coverage gate.
         if not isinstance(meta, dict):
             die("result.json meta is not an object")
-        segs = doc.get("segments") or []
-        if not isinstance(segs, list) or not segs:
-            die("podcast transcript has no segments")
-        prev_end = None
-        for s in segs:
-            if not isinstance(s, dict):
-                die("transcript has a non-object segment")
-            txt = s.get("text")
-            if txt is not None and not isinstance(txt, str):
-                die("transcript segment text is not a string — refusing")
-            st, en = s.get("start"), s.get("end")
-            # exclude bool (a subclass of int) and non-finite (NaN/inf — NaN would
-            # otherwise slip the coverage gate, since every comparison with NaN is False)
-            if (isinstance(st, bool) or isinstance(en, bool)
-                    or not isinstance(st, (int, float)) or not isinstance(en, (int, float))
-                    or not math.isfinite(st) or not math.isfinite(en)):
-                die("transcript has segments without finite numeric start/end — not timestamp-citable")
-            if en < st:
-                die(f"transcript has an inverted segment ({en} < {st}) — refusing")
-            # globally ordered AND non-overlapping (overlap would over-count speech →
-            # the coverage gate is safe-direction, but it's still malformed ASR output)
-            if prev_end is not None and st < prev_end:
-                die(f"transcript segments overlap or are out of order ({st} < prev end {prev_end}) — "
-                    f"rendered timecodes would not be monotonic")
-            prev_end = en
+        segs = _validate_segments(doc.get("segments"), label="podcast transcript")
         speech = sum(max(0.0, s["end"] - s["start"]) for s in segs)
         chars = sum(len((s.get("text") or "")) for s in segs)
         _lang_raw = doc.get("language")  # untrusted: a non-str would be unhashable in the gate lookup
@@ -778,8 +658,7 @@ def _podcast_main(args) -> int:
                 basis=basis, resolution_source=meta.get("resolution_source"), speech=speech,
                 lang=lang, meta=meta, json_sha=json_sha, supersedes=supersedes_id,
             )
-            _stage_into_sources_podcast(slug, md_path, json_path, sidecar, sidecar_text,
-                                        (basis, key), origin_ref)
+            _stage_into_sources_podcast(slug, md_path, json_path, sidecar, sidecar_text)
         finally:
             shutil.rmtree(stage, ignore_errors=True)  # md/json moved out on success; cleans partials
         progress(f"new source_id={source_id}  {dest}"
@@ -1185,8 +1064,9 @@ def _image_note_main(args) -> int:
                 platform=platform, post_id=post_id, basis=basis, card_count=card_count,
                 bundle_sha=bundle_sha, meta=meta, slug=slug, cards_json_sha=cards_json_sha,
                 card_evidence=card_evidence, supersedes=supersedes_id)
-            _stage_into_sources_image_note(slug, md_tmp, json_tmp, assets_tmp, sidecar,
-                                           sidecar_text, (basis, key), origin_ref)
+            _stage_into_sources_image_note(
+                slug, md_tmp, json_tmp, assets_tmp, sidecar, sidecar_text,
+            )
         finally:
             shutil.rmtree(stage, ignore_errors=True)
         progress(f"new source_id={source_id}  {dest}"
@@ -1203,15 +1083,11 @@ def _image_note_main(args) -> int:
 
 
 def _stage_into_sources_image_note(slug, md_tmp, json_tmp, assets_tmp, sidecar,
-                                   sidecar_text, identity, origin_ref) -> None:
-    """Atomic move into sources/ for image_note: .cards.md → .cards.json → assets/ →
-    sidecar(LAST). Refuses to clobber a tracked file; an untracked sidecar must be a
-    recognizable own-orphan (same origin_ref + same generalized identity)."""
+                                   sidecar_text) -> None:
     _stage_media_artifacts(
         slug=slug, md_path=md_tmp, json_path=json_tmp, assets_path=assets_tmp,
         sidecar=sidecar, sidecar_text=sidecar_text, md_suffix=".cards.md",
         json_suffix=".cards.json", assets_suffix=".cards.md.assets",
-        identity=identity, origin_ref=origin_ref,
     )
 
 
@@ -1274,15 +1150,11 @@ def _build_video_frames_sidecar(*, source_id, sha, added, origin_ref, title, vid
 
 
 def _stage_into_sources_frames(slug, md_tmp, json_tmp, assets_tmp, sidecar,
-                               sidecar_text, identity, origin_ref) -> None:
-    """Atomic move into sources/ for a frames source: .transcript.md → .transcript.json
-    → assets/ (frames.json + frame images) → sidecar(LAST). Same guards as the other
-    media stagers."""
+                               sidecar_text) -> None:
     _stage_media_artifacts(
         slug=slug, md_path=md_tmp, json_path=json_tmp, assets_path=assets_tmp,
         sidecar=sidecar, sidecar_text=sidecar_text, md_suffix=".transcript.md",
         json_suffix=".transcript.json", assets_suffix=".transcript.md.assets",
-        identity=identity, origin_ref=origin_ref,
     )
 
 
@@ -1343,21 +1215,7 @@ def _carry_forward_transcript(head):
         # parity with the fresh path's meta guard — a non-dict meta would otherwise blow up
         # in dict(a_doc["meta"]) downstream with a raw TypeError instead of a clean die.
         die(f"carry-forward transcript.json meta is not an object: {audit}")
-    segs = doc.get("segments")
-    if not isinstance(segs, list) or not segs:
-        die(f"carry-forward transcript has no segments — unfit to add frames to: {audit}")
-    prev_end = None
-    for s in segs:
-        if not isinstance(s, dict):
-            die(f"carry-forward transcript has a non-object segment: {audit}")
-        st, en = s.get("start"), s.get("end")
-        if (isinstance(st, bool) or isinstance(en, bool)
-                or not isinstance(st, (int, float)) or not isinstance(en, (int, float))
-                or not math.isfinite(st) or not math.isfinite(en)):
-            die(f"carry-forward transcript has non-finite segment start/end: {audit}")
-        if en < st or (prev_end is not None and st < prev_end):
-            die(f"carry-forward transcript segments are inverted/out of order: {audit}")
-        prev_end = en
+    _validate_segments(doc.get("segments"), label="carry-forward transcript")
     # A's actual transcript tool is authoritative for B (B's transcript IS A's); default to
     # transcript-remote only if A predates the field. It is emitted RAW into B's sidecar, so a
     # hand-edited non-token value (e.g. one with a `:`) must NOT be silently sanitized into a
@@ -1436,23 +1294,7 @@ def _video_frames_main(args) -> int:
         if carry is None:
             # FRESH path: validate the run's transcript (finite, ordered) + coverage and
             # let it drive the sidecar's transcript provenance.
-            segs = doc.get("segments") or []
-            if not isinstance(segs, list) or not segs:
-                die("video transcript has no segments")
-            prev_end = None
-            for s in segs:
-                if not isinstance(s, dict):
-                    die("transcript has a non-object segment")
-                st, en = s.get("start"), s.get("end")
-                if (isinstance(st, bool) or isinstance(en, bool)
-                        or not isinstance(st, (int, float)) or not isinstance(en, (int, float))
-                        or not math.isfinite(st) or not math.isfinite(en)):
-                    die("transcript has segments without finite numeric start/end")
-                if en < st:
-                    die(f"transcript has an inverted segment ({en} < {st})")
-                if prev_end is not None and st < prev_end:
-                    die(f"transcript segments overlap or are out of order ({st} < {prev_end})")
-                prev_end = en
+            segs = _validate_segments(doc.get("segments"), label="video transcript")
             speech = sum(max(0.0, s["end"] - s["start"]) for s in segs)
             chars = sum(len((s.get("text") or "")) for s in segs)
             _lang_raw = doc.get("language")  # untrusted: a non-str would be unhashable in the gate lookup
@@ -1577,8 +1419,9 @@ def _video_frames_main(args) -> int:
                 frame_evidence=frame_evidence, bundle_sha=bundle_sha, frame_count=len(fjson),
                 supersedes=supersedes_id,
                 transcript_tool=(carry["transcript_tool"] if carry else "extract-remote"))
-            _stage_into_sources_frames(slug, md_tmp, json_tmp, assets_tmp, sidecar,
-                                       sidecar_text, ("youtube_video_id", (video_id,)), origin_ref)
+            _stage_into_sources_frames(
+                slug, md_tmp, json_tmp, assets_tmp, sidecar, sidecar_text,
+            )
         finally:
             shutil.rmtree(stage, ignore_errors=True)
         progress(f"new frames source_id={source_id}  {dest}"
@@ -1712,26 +1555,7 @@ def main() -> int:
             f"(redirect or wrong URL) — refusing to cite a different video than transcribed")
 
     # 5. validate — timing HARD gate, then coverage gate
-    segs = doc.get("segments") or []
-    if not segs:
-        die("transcript has no segments")
-    prev_end = None
-    for s in segs:
-        st, en = (s.get("start"), s.get("end")) if isinstance(s, dict) else (None, None)
-        if (isinstance(st, bool) or isinstance(en, bool)
-                or not isinstance(st, (int, float)) or not isinstance(en, (int, float))
-                or not math.isfinite(st) or not math.isfinite(en)):
-            die("transcript has segments without finite numeric start/end — "
-                "not timestamp-citable (cannot --force past this)")
-        # ordering guards (parity with the podcast/frames paths): render_markdown emits
-        # in input order without sorting, so an inverted/out-of-order segment would commit
-        # non-monotonic timecodes that can't be citation-pinned. Valid (ordered)
-        # transcripts are unaffected → committed output stays byte-identical.
-        if en < st:
-            die(f"transcript has an inverted segment ({en} < {st})")
-        if prev_end is not None and st < prev_end:
-            die(f"transcript segments overlap or are out of order ({st} < {prev_end})")
-        prev_end = en
+    segs = _validate_segments(doc.get("segments"))
     speech = sum(max(0.0, s["end"] - s["start"]) for s in segs)
     chars = sum(len((s.get("text") or "")) for s in segs)
     lang_raw = doc.get("language")
@@ -1781,9 +1605,8 @@ def main() -> int:
         json_sha=json_sha, supersedes=supersedes_id,
     )
 
-    # 8. atomic move into sources/ (sidecar LAST), own-orphan rule
-    _stage_into_sources(slug, md_path, json_path, sidecar, sidecar_text,
-                        video_id, args.source)
+    # 8. atomic move into sources/ (sidecar LAST); leftovers require manual cleanup
+    _stage_into_sources(slug, md_path, json_path, sidecar, sidecar_text)
 
     progress(f"new source_id={source_id}  {dest}"
              + (f" (supersedes {supersedes_id})" if supersedes_id else ""))
@@ -1849,24 +1672,11 @@ def _build_sidecar(*, source_id, sha, added, origin_type, origin_ref, title,
     )
 
 
-def _stage_into_sources(slug, md_path, json_path, sidecar, sidecar_text,
-                        video_id, origin_ref) -> None:
-    """Move temp artifacts into sources/ in order md → json → sidecar(LAST).
-    Refuse to clobber a tracked or non-own-orphan file (§7.2 step 8)."""
-    def own_orphan(ofm: dict, dest_json: str) -> bool:
-        omedia = ofm.get("media") or {}
-        return (
-            ofm.get("origin_ref") == origin_ref
-            and omedia.get("video_id") == video_id
-            and omedia.get("transcript_json_sha256")
-            == (sha256_of(dest_json) if Path(dest_json).is_file() else None)
-        )
-
+def _stage_into_sources(slug, md_path, json_path, sidecar, sidecar_text) -> None:
     _stage_media_artifacts(
         slug=slug, md_path=md_path, json_path=json_path, sidecar=sidecar,
         sidecar_text=sidecar_text, md_suffix=".transcript.md",
-        json_suffix=".transcript.json", origin_ref=origin_ref,
-        own_orphan_check=own_orphan,
+        json_suffix=".transcript.json",
     )
 
 

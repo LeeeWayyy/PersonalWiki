@@ -34,25 +34,6 @@ class RuntimeConfig:
     messages: list[str] = field(default_factory=list)
 
 
-def require_single_worker(
-    uvicorn_args: Sequence[str],
-    environ: MutableMapping[str, str] | None = None,
-) -> None:
-    # ponytail: presence scan only — exec_uvicorn force-appends `--workers 1`
-    # after user args, so any worker flag or non-1 env count is simply refused.
-    env = os.environ if environ is None else environ
-    cli_workers = any(
-        arg in ("--workers", "-w") or arg.startswith(("--workers=", "-w="))
-        for arg in uvicorn_args
-    )
-    env_count = (env.get("UVICORN_WORKERS") or env.get("WEB_CONCURRENCY") or "1").strip()
-    if cli_workers or env_count not in ("", "1"):
-        raise ServeConfigError(
-            "backend: exactly one Uvicorn worker is required; ingest jobs, locks, "
-            "and staged-upload recovery are process-local"
-        )
-
-
 def configure_environment(
     root: Path = ROOT,
     environ: MutableMapping[str, str] | None = None,
@@ -119,7 +100,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     uvicorn_args = list(sys.argv[1:] if argv is None else argv)
     try:
         config = configure_environment()
-        require_single_worker(uvicorn_args)
     except ServeConfigError as exc:
         print(exc, file=sys.stderr)
         return 1

@@ -148,9 +148,11 @@ build_prompt() {
   local operation="$3"
   local image_block="$TMP/image-block"
   if [[ -f "${DEST}.assets/_manifest.md" ]]; then
-    "$TOOLING_ROOT"/scripts/render-images-block.py "${DEST}.assets/_manifest.md" "$DEST" \
-      > "$image_block" 2>/dev/null \
-      || printf '(images-block render failed; LLM proceeds without image table)\n' > "$image_block"
+    cat > "$image_block" <<'IMAGES'
+| path | caption | dimensions |
+|---|---|---|
+| sources/test.epub.assets/fig1.png | Test figure caption | 640×480 |
+IMAGES
   else
     printf '(no images extracted from this source)\n' > "$image_block"
   fi

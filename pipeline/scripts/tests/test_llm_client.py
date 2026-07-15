@@ -124,40 +124,6 @@ class LlmClientTests(unittest.TestCase):
             self.assertRegex(identity["codex_binary_fingerprint"], r"^[0-9a-f]{64}$")
             self.assertIsNone(identity["command_fingerprint"])
 
-    def test_codex_config_default_is_explicit_runtime_and_cache_identity(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bin_dir = root / "bin"
-            codex_home = root / "codex-home"
-            bin_dir.mkdir()
-            codex_home.mkdir()
-            write_executable(bin_dir / "codex", _fake_codex())
-            (codex_home / "config.toml").write_text(
-                'model = "gpt-config-default"\n'
-                'model_reasoning_effort = "high"\n'
-                'model_verbosity = "medium"\n'
-                'api_key = "must-not-leak"\n',
-                encoding="utf-8",
-            )
-            env = {
-                "PW_LLM_PROVIDER": "codex",
-                "PW_CODEX_IGNORE_USER_CONFIG": "0",
-                "CODEX_HOME": str(codex_home),
-                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-            }
-            with patch.dict(os.environ, env, clear=True):
-                identity = llm_client.execution_identity()
-                out = llm_client.complete_command("hello", timeout=5)
-
-            self.assertEqual(identity["model"], "gpt-config-default")
-            self.assertEqual(identity["reasoning"], "high")
-            self.assertEqual(identity["verbosity"], "medium")
-            self.assertRegex(identity["codex_config_fingerprint"], r"^[0-9a-f]{64}$")
-            self.assertNotIn("must-not-leak", json.dumps(identity))
-            self.assertIn("-m gpt-config-default", out)
-            self.assertIn('model_reasoning_effort="high"', out)
-            self.assertIn('model_verbosity="medium"', out)
-
     def test_ignored_user_config_cannot_leak_model_or_xhigh_reasoning(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -222,65 +188,6 @@ class LlmClientTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertNotIn("secret", json.dumps(first))
 
-    def test_codex_config_falls_back_to_dot_codex_under_home(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bin_dir = root / "bin"
-            config_dir = root / ".codex"
-            bin_dir.mkdir()
-            config_dir.mkdir()
-            write_executable(bin_dir / "codex", _fake_codex())
-            (config_dir / "config.toml").write_text(
-                'model = "home-config-model"\n', encoding="utf-8"
-            )
-            env = {
-                "PW_LLM_PROVIDER": "codex",
-                "PW_CODEX_IGNORE_USER_CONFIG": "0",
-                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-            }
-            with (
-                patch.dict(os.environ, env, clear=True),
-                patch.object(llm_client.Path, "home", return_value=root),
-            ):
-                identity = llm_client.execution_identity()
-
-            self.assertEqual(identity["model"], "home-config-model")
-            self.assertRegex(identity["codex_config_fingerprint"], r"^[0-9a-f]{64}$")
-
-    def test_blank_codex_env_settings_fall_back_to_config_and_defaults(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bin_dir = root / "bin"
-            codex_home = root / "codex-home"
-            bin_dir.mkdir()
-            codex_home.mkdir()
-            write_executable(bin_dir / "codex", _fake_codex())
-            (codex_home / "config.toml").write_text(
-                'model = "config-model"\n'
-                'model_reasoning_effort = "high"\n',
-                encoding="utf-8",
-            )
-            env = {
-                "PW_LLM_PROVIDER": "codex",
-                "PW_CODEX_IGNORE_USER_CONFIG": "0",
-                "PW_LLM_MODEL": "  ",
-                "PW_CODEX_REASONING_EFFORT": " ",
-                "PW_CODEX_VERBOSITY": "",
-                "CODEX_HOME": str(codex_home),
-                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-            }
-            with patch.dict(os.environ, env, clear=True):
-                identity = llm_client.execution_identity()
-                out = llm_client.complete_command("hello", timeout=5)
-
-            self.assertEqual(identity["model"], "config-model")
-            self.assertEqual(identity["reasoning"], "high")
-            self.assertEqual(identity["verbosity"], "low")
-            self.assertRegex(identity["codex_config_fingerprint"], r"^[0-9a-f]{64}$")
-            self.assertIn("-m config-model", out)
-            self.assertIn('model_reasoning_effort="high"', out)
-            self.assertIn('model_verbosity="low"', out)
-
     def test_api_identity_redacts_credentials_and_query(self):
         env = {
             "PW_LLM_PROVIDER": "api",
@@ -339,11 +246,8 @@ class LlmClientTests(unittest.TestCase):
                 first = llm_client.execution_identity("model")
             changed = {
                 **base,
-                "PW_CODEX_IGNORE_USER_CONFIG": "0",
                 "PW_CODEX_IGNORE_RULES": "0",
-                "PW_CODEX_EPHEMERAL": "1",
                 "PW_CODEX_DISABLE_SHELL": "1",
-                "PW_CODEX_SERVICE_TIER": "priority",
             }
             with patch.dict(os.environ, changed, clear=True):
                 second = llm_client.execution_identity("model")
@@ -352,7 +256,7 @@ class LlmClientTests(unittest.TestCase):
                 second["codex_automation_fingerprint"],
             )
 
-    def test_enabled_codex_config_and_rules_are_fingerprinted(self):
+    def test_enabled_codex_rules_are_fingerprinted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bin_dir = root / "bin"
@@ -361,20 +265,16 @@ class LlmClientTests(unittest.TestCase):
             bin_dir.mkdir()
             rules.mkdir(parents=True)
             write_executable(bin_dir / "codex", _fake_codex())
-            config = codex_home / "config.toml"
             rule = rules / "default.rules"
-            config.write_text('model = "one"\n', encoding="utf-8")
             rule.write_text("allow one\n", encoding="utf-8")
             env = {
                 "PW_LLM_PROVIDER": "codex",
-                "PW_CODEX_IGNORE_USER_CONFIG": "0",
                 "PW_CODEX_IGNORE_RULES": "0",
                 "CODEX_HOME": str(codex_home),
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             }
             with patch.dict(os.environ, env, clear=True):
                 first = llm_client.execution_identity("model")
-                config.write_text('model = "different"\n', encoding="utf-8")
                 rule.write_text("allow different behavior\n", encoding="utf-8")
                 second = llm_client.execution_identity("model")
             self.assertNotEqual(
@@ -533,31 +433,26 @@ class LlmClientTests(unittest.TestCase):
             self.assertIn("-m cheap-keyword-model", out)
             self.assertNotIn("expensive-ingest-model", out)
 
-    def test_codex_automation_profile_can_be_overridden(self):
+    def test_codex_automation_profile_flags(self):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp) / "bin"
             bin_dir.mkdir()
             write_executable(bin_dir / "codex", _fake_codex())
             env = {
                 "PW_LLM_PROVIDER": "codex",
-                "PW_CODEX_IGNORE_USER_CONFIG": "0",
                 "PW_CODEX_IGNORE_RULES": "0",
-                "PW_CODEX_EPHEMERAL": "1",
                 "PW_CODEX_DISABLE_SHELL": "1",
                 "PW_CODEX_REASONING_EFFORT": "low",
                 "PW_CODEX_VERBOSITY": "medium",
-                "PW_CODEX_SERVICE_TIER": "priority",
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             }
             with patch.dict(os.environ, env, clear=True):
                 out = llm_client.complete_command("hello", timeout=5)
-            self.assertNotIn("--ignore-user-config", out)
+            self.assertIn("--ignore-user-config", out)
             self.assertNotIn("--ignore-rules", out)
-            self.assertIn("--ephemeral", out)
             self.assertIn("--disable shell_tool", out)
             self.assertIn('model_reasoning_effort="low"', out)
             self.assertIn('model_verbosity="medium"', out)
-            self.assertIn('service_tier="priority"', out)
 
     def test_codex_reuses_seeded_workdir_without_deleting_it(self):
         # When ingest seeds a workdir (candidate pages), codex must run there and

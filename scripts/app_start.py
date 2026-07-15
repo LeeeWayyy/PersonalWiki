@@ -3,7 +3,7 @@
 
 This replaces the process-management logic that used to live in top-level
 run.sh. Shell remains as a compatibility wrapper; this module owns config
-loading, dependency checks, port cleanup, backend launch, site build/serve, and
+loading, dependency checks, port cleanup, site build/backend launch, and
 shutdown.
 """
 from __future__ import annotations
@@ -79,7 +79,7 @@ def build_config(
     environ: MutableMapping[str, str] | None = None,
 ) -> StartConfig:
     parser = argparse.ArgumentParser(description="Start the local Personal Wiki app")
-    parser.add_argument("--dev", action="store_true", help="run Astro dev server instead of build+static serve")
+    parser.add_argument("--dev", action="store_true", help="run Astro dev server instead of a production build")
     parser.add_argument("--open", action="store_true", help="open the site URL after startup")
     parser.add_argument("--no-open", action="store_true", help="do not open the site URL")
     parser.add_argument(
@@ -109,7 +109,7 @@ def build_config(
 
     return StartConfig(
         root=root,
-        mode="dev" if args.dev else "preview",
+        mode="dev" if args.dev else "production",
         site_host=site_host,
         site_port=site_port,
         backend_host=backend_host,
@@ -327,25 +327,29 @@ def start_app(config: StartConfig, log: Callable[[str], None] = _log_default) ->
     except ValueError:
         pass  # not on the main thread (e.g. a test harness) — nothing to install
 
-    node, npm = ensure_node(config.env)
+    _node, npm = ensure_node(config.env)
     ensure_site_deps(config, npm, log)
     backend_python = ensure_backend_deps(config, log)
 
-    free_port(config.backend_host, config.backend_port, "backend", config.kill_ports, log)
-    free_port(config.site_host, config.site_port, "site", config.kill_ports, log)
+    free_port(config.backend_host, config.backend_port, "app", config.kill_ports, log)
+    if config.mode == "dev":
+        free_port(config.site_host, config.site_port, "dev site", config.kill_ports, log)
 
     log(f"Personal Wiki starting ({config.mode} mode)")
     processes: list[tuple[str, subprocess.Popen]] = []
     try:
+        if config.mode != "dev":
+            log("building site (sync + astro + pagefind)")
+            _run_checked([npm, "run", "build"], config.root, config.env, "site build")
+
         backend = start_process(
-            "backend",
+            "app",
             [str(backend_python), "-m", "app.serve"],
             config.root / "backend",
             config.env,
         )
-        processes.append(("backend", backend))
+        processes.append(("app", backend))
         wait_for_health(f"http://{config.backend_host}:{config.backend_port}/health", backend)
-        log(f"backend is up (http://localhost:{config.backend_port})")
 
         if config.mode == "dev":
             site = start_process(
@@ -354,22 +358,12 @@ def start_app(config: StartConfig, log: Callable[[str], None] = _log_default) ->
                 config.root,
                 config.env,
             )
-        else:
-            log("building site (sync + astro + pagefind)")
-            _run_checked([npm, "run", "build"], config.root, config.env, "site build")
-            site = start_process(
-                "site",
-                [node, "scripts/serve.mjs", "--host", config.site_host, "--port", str(config.site_port)],
-                config.root,
-                config.env,
-            )
-        processes.append(("site", site))
+            processes.append(("site", site))
 
-        site_url = f"http://localhost:{config.site_port}"
+        site_url = f"http://localhost:{config.site_port if config.mode == 'dev' else config.backend_port}"
         log("")
-        log(f"site     {site_url}")
-        log(f"backend  http://localhost:{config.backend_port}")
-        log("Ctrl-C to stop both")
+        log(f"app  {site_url}")
+        log("Ctrl-C to stop")
         if config.open_ui:
             webbrowser.open(site_url)
         return supervise(processes)

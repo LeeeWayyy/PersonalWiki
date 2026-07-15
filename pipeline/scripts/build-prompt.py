@@ -1,6 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
+# dependencies = ["pyyaml>=6.0"]
 # ///
 """
 Assemble the main ingest prompt. This keeps the deterministic
@@ -23,8 +24,7 @@ Inputs (all from ingest.py variables / files):
 Reads from the content repo ($VAULT_CONTENT_DIR): wiki/_taxonomy.md. Reads from
 the tooling repo (TOOLING_ROOT): prompts/ingest.md and
 prompts/schema-ingest.md. Selects schema rule blocks for the current operation.
-Shells out to scripts/page-digest.py and scripts/render-images-block.py (also
-tooling).
+Shells out to scripts/page-digest.py.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ import sys
 from pathlib import Path
 
 import chapter_intelligence as ci
+from asset_manifest import read_manifest
 from source_citations import source_citation
 
 from _util import default_vault_root
@@ -151,13 +152,21 @@ def _render_images_block(dest: str) -> str:
     manifest = Path(f"{dest}.assets") / "_manifest.md"
     if not manifest.is_file():
         return "(no images extracted from this source)\n"
-    res = subprocess.run(
-        [str(SCRIPTS / "render-images-block.py"), str(manifest), dest],
-        capture_output=True, text=True,
-    )
-    if res.returncode == 0:
-        return res.stdout
-    return "(images-block render failed; LLM proceeds without image table)\n"
+    rows = [entry for entry in read_manifest(manifest.parent)[1]
+            if not entry.decorative and entry.caption is not None]
+    if not rows:
+        return "(no captioned non-decorative images for this source)\n"
+    lines = ["| path | caption | dimensions |", "|---|---|---|"]
+    for entry in rows:
+        path = (manifest.parent / entry.file).resolve()
+        try:
+            path = path.relative_to(VAULT_ROOT)
+        except ValueError:
+            pass
+        caption = (entry.caption or "").replace("|", r"\|").replace("\n", " ")
+        dims = f"{entry.dimensions[0]}×{entry.dimensions[1]}" if len(entry.dimensions) >= 2 else "?"
+        lines.append(f"| {path.as_posix()} | {caption} | {dims} |")
+    return "\n".join(lines) + "\n"
 
 
 def _image_block_has_rows(block: str) -> bool:

@@ -86,8 +86,6 @@ const idxArgs = JSON.stringify({ n: content.length, m: tagPills.length });
     </div>
 
     <div id="be-settings" style="display:none;gap:12px;flex-wrap:wrap;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:14px">
-      <label style="flex:1;min-width:200px;font-size:11.5px;color:var(--text-3)"><span data-i18n="be.url">{t('be.url')}</span>
-        <input id="be-url" class="field" style="width:100%;margin-top:4px;font-family:var(--mono);font-size:12.5px;padding:7px 10px" placeholder="http://localhost:8787" /></label>
       <label style="flex:1;min-width:200px;font-size:11.5px;color:var(--text-3)"><span data-i18n="be.token">{t('be.token')}</span>
         <input id="be-token" type="password" class="field" style="width:100%;margin-top:4px;font-family:var(--mono);font-size:12.5px;padding:7px 10px" /></label>
       <button id="be-save" class="btn-quiet" style="align-self:flex-end" data-i18n="act.save">{t('act.save')}</button>
@@ -298,9 +296,8 @@ const idxArgs = JSON.stringify({ n: content.length, m: tagPills.length });
     // 待复习 count from the study backend (best-effort; leaves '·' if offline)
     (async () => {
       try {
-        const base = localStorage.getItem('backendUrl') || 'http://localhost:8787';
         const token = localStorage.getItem('backendToken') || '';
-        const r = await fetch(base + '/review/stats', { headers: token ? { 'X-Auth-Token': token } : {} });
+        const r = await fetch('/review/stats', { headers: token ? { 'X-Auth-Token': token } : {} });
         if (!r.ok) return;
         const s = await r.json();
         const el = document.getElementById('due-count'); if (el) el.textContent = String(Number(s.due ?? 0));
@@ -320,7 +317,7 @@ const idxArgs = JSON.stringify({ n: content.length, m: tagPills.length });
 
     // ---- Ingest console ----
     mount({
-      urlId: 'be-url', tokenId: 'be-token', statusId: 'be-status', saveId: 'be-save',
+      tokenId: 'be-token', statusId: 'be-status', saveId: 'be-save',
       toggleId: 'be-toggle', settingsId: 'be-settings',
       segUrlId: 'seg-url', segFileId: 'seg-file',
       urlRowId: 'ingest-url', fileRowId: 'ingest-file-row',

@@ -8,7 +8,7 @@ source_id to another across the wiki, preserving the anchor:
 `[src:<old>#mm:ss]` → `[src:<new>#mm:ss]`, and the frontmatter `sources:` entry.
 
 This is NOT `rewire.py` (which renames `[[wikilinks]]` on page moves and never
-touches `[src:]`). Used by `--rerender` (§7.5) to migrate live citations to a
+touches `[src:]`). Used by media supersession to migrate live citations to a
 superseding source_id.
 
 Both ids are 26-char ULIDs — globally unique tokens — so a plain text replace of

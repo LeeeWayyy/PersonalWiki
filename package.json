@@ -17,7 +17,6 @@
     "study:restore": "python3 scripts/study_db.py restore",
     "audit": "npm audit --audit-level=moderate",
     "preview": "astro preview",
-    "serve": "node scripts/serve.mjs",
     "astro": "astro"
   },
   "dependencies": {

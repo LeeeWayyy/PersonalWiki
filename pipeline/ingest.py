@@ -612,6 +612,7 @@ def resolve_vault_root(profile: str) -> Path:
 # ── preflight ─────────────────────────────────────────────────────────────────
 CHAPTER_INTELLIGENCE_CACHE_IGNORE = ".wiki/chapter-intelligence-cache/"
 INGEST_LOCK_IGNORE = ".wiki/ingest.lock"
+_LEFTOVER_RX = re.compile(r"\.(rejected|failed(\.\d+)?|apply-err(\.\d+)?)$")
 
 
 def ensure_local_cache_ignore() -> None:
@@ -662,83 +663,85 @@ def ensure_wiki_scaffold(profile: str = "wiki") -> list[str]:
     return [taxonomy.as_posix()]
 
 
-def preflight(profile: str = "wiki", allowed_untracked: list[str] | None = None) -> None:
-    allowed = set(allowed_untracked or [])
-    staged = git_capture("diff", "--cached", "--name-only").strip()
-    if staged:
-        eout("refusing to run with a non-empty git index.")
-        eout("  Currently staged:")
-        for ln in staged.splitlines():
-            print(f"    {ln}", file=sys.stderr)
-        eout("  Either commit/stash these changes, or `git restore --staged .`")
-        sys.exit(1)
-    # The wiki-page dirty-guard is wiki-only (the LLM rewrites those pages); the
-    # lang generator preserves its pages' human-zone from the working tree, so
-    # it needs no such guard. (cwd is content/lang under --profile lang, where
-    # wiki/ doesn't exist anyway.)
-    if profile == "wiki":
-        tracked = git_capture("diff", "--name-only", "--", *WIKI_PATHSPEC).strip()
-        untracked = "\n".join(
-            line
-            for line in git_capture("ls-files", "--others", "--exclude-standard", "--", *WIKI_PATHSPEC).splitlines()
-            if line and line not in allowed
+def _status_paths(line: str) -> list[str]:
+    path = line[3:].strip()
+    return [part.strip() for part in path.split(" -> ", 1) if part.strip()]
+
+
+def _expand_status_path(content: Path, path: str) -> list[str]:
+    target = content / path
+    if not path.endswith("/") or not target.is_dir():
+        return [path]
+    files = [p.relative_to(content).as_posix() for p in target.rglob("*") if p.is_file()]
+    return sorted(files) or [path]
+
+
+def preflight_report(profile: str = "wiki", allowed_untracked: list[str] | None = None,
+                     content_root: Path | None = None) -> tuple[bool, str, list[str]]:
+    """Structured dirty-tree gate shared by CLI ingest and the web backend."""
+    content = (content_root or (VAULT_ROOT.parent if profile == "lang" else VAULT_ROOT)).resolve()
+    if not content.is_dir():
+        return False, f"wiki folder not found at {content}", []
+    if not (content / ".git").exists():
+        return False, f"wiki folder is not a git repo ({content})", []
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(content), "-c", "core.quotepath=false", "status",
+             "--porcelain", "--untracked-files=all"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
         )
-        if tracked or untracked:
-            eout("refusing to run with local changes under wiki/.")
-            eout("  Scope: wiki/entities/, wiki/topics/, wiki/_index/, wiki/_maps/, wiki/_taxonomy.md")
-            if tracked:
-                eout("  Modified (tracked):")
-                for ln in tracked.splitlines():
-                    print(f"    {ln}", file=sys.stderr)
-            if untracked:
-                eout("  Untracked:")
-                for ln in untracked.splitlines():
-                    print(f"    {ln}", file=sys.stderr)
-            eout("  Commit, stash, or remove these before running ingest — the")
-            eout("  vault-wide autolink sweep + bulk `git add` would otherwise")
-            eout("  pull them into the ingest commit.")
-            sys.exit(1)
-    else:
-        generated_dirty = git_capture(
-            "status", "--porcelain", "--", "_reading/"
-        ).strip()
-        if generated_dirty:
-            eout("refusing to run with local changes under lang/_reading/.")
-            for line in generated_dirty.splitlines():
-                print(f"    {line}", file=sys.stderr)
-            eout("  Commit, stash, or remove these tool-owned outputs before ingest.")
-            sys.exit(1)
-    # Provenance files the terminal `git add` sweeps up regardless of the LLM
-    # diff: the ingest log + this run's source asset/sidecar. An unstaged edit
-    # to an existing (tracked) one would be silently folded into the ingest
-    # commit, corrupting provenance. (Only TRACKED-modified matters: ingest
-    # adds specific paths, never a blanket `git add sources/`, so unrelated
-    # untracked files — e.g. leftovers from a failed run — are never swept in.)
-    prov_tracked = git_capture("diff", "--name-only", "--", ".wiki/log.md", "sources/").strip()
-    if prov_tracked:
-        eout("refusing to run with unstaged edits under .wiki/log.md or sources/.")
-        eout("  Modified (tracked):")
-        for ln in prov_tracked.splitlines():
-            print(f"    {ln}", file=sys.stderr)
-        eout("  The ingest commit `git add`s the log + source asset + sidecar;")
-        eout("  commit, stash, or restore these first so they aren't swept in.")
-        sys.exit(1)
-    # The terminal commit blanket-`git add`s the source's <dest>.assets/ dir,
-    # so stale UNTRACKED files left under a sources/*.assets/ dir by an aborted
-    # prior run would be swept in. (Top-level untracked sources/*.md are added
-    # by specific path, never swept, so they're allowed — a failed run stays
-    # retryable.) Refuse only stale untracked asset files.
-    stale_assets = [
-        p for p in git_capture("ls-files", "--others", "--exclude-standard", "--", "sources/").splitlines()
-        if ".assets/" in p
-    ]
-    if stale_assets:
-        eout("refusing to run with untracked files under an existing sources/*.assets/ dir.")
-        for p in stale_assets:
-            print(f"    {p}", file=sys.stderr)
-        eout("  The asset-dir `git add` would sweep these into the ingest commit;")
-        eout("  remove or commit them first (likely leftovers from an aborted run).")
-        sys.exit(1)
+    except Exception as exc:
+        return False, f"git status failed: {exc}", []
+    if result.returncode:
+        detail = (result.stderr or result.stdout or f"exit code {result.returncode}").strip().splitlines()[-1]
+        return False, f"git status failed: {detail}", []
+
+    prefix = "lang/" if profile == "lang" else ""
+    allowed = set(allowed_untracked or [])
+    taxonomy = content / TAXONOMY_PATH
+    if (not allowed_untracked and taxonomy.is_file()
+            and taxonomy.read_text(encoding="utf-8", errors="replace") == TAXONOMY_PLACEHOLDER):
+        allowed.add(TAXONOMY_PATH)
+    offending: list[str] = []
+    leftovers: list[str] = []
+    for line in result.stdout.splitlines():
+        status = line[:2]
+        for path in _status_paths(line):
+            staged = status[0] not in {" ", "?"}
+            untracked = status == "??"
+            wiki_dirty = profile == "wiki" and any(
+                path.startswith(scope) or path == scope.rstrip("/") for scope in WIKI_PATHSPEC
+            )
+            generated_dirty = profile == "lang" and (
+                path.startswith("lang/_reading/") or path == "lang/_reading"
+            )
+            provenance_dirty = not untracked and (
+                path == f"{prefix}.wiki/log.md" or path.startswith(f"{prefix}sources/")
+            )
+            stale_asset = untracked and path.startswith(f"{prefix}sources/") and ".assets/" in path
+            ignored = untracked and (path == f"{prefix}{INGEST_LOCK_IGNORE}" or path in allowed)
+            if not ignored and (staged or wiki_dirty or generated_dirty or provenance_dirty or stale_asset):
+                offending.extend(_expand_status_path(content, path))
+            if _LEFTOVER_RX.search(path):
+                leftovers.append(path)
+    offending = list(dict.fromkeys(offending))
+    leftovers = list(dict.fromkeys(leftovers))
+    if offending or leftovers:
+        message = "Vault tree is not clean — ingest preflight would refuse."
+        if leftovers:
+            message += f" Leftover artifacts: {', '.join(leftovers)}."
+        return False, message, offending + leftovers
+    return True, "clean", []
+
+
+def preflight(profile: str = "wiki", allowed_untracked: list[str] | None = None) -> None:
+    ok, message, offending = preflight_report(profile, allowed_untracked)
+    if ok:
+        return
+    eout(message)
+    for path in offending:
+        print(f"    {path}", file=sys.stderr)
+    raise SystemExit(1)
 
 
 def check_deps() -> None:
@@ -1538,7 +1541,7 @@ def _should_auto_chapter(args) -> bool:
         return False
     if args.profile != "wiki" or args.kind or args.section or args.section_label:
         return False
-    if args.images_only or args.rerender or _is_http_url(args.input):
+    if args.images_only or _is_http_url(args.input):
         return False
     input_path = _resolve_input_path(args.input)
     return input_path.is_file() and input_path.suffix.lower() in CHAPTERED_EXTS
@@ -1791,8 +1794,7 @@ def run_chaptered(args) -> int:
     for flag, on in (("--section", bool(args.section)),
                      ("--section-label", bool(args.section_label)),
                      ("--images-only", args.images_only),
-                     ("--kind", bool(args.kind)),
-                     ("--rerender", args.rerender)):
+                     ("--kind", bool(args.kind))):
         if on:
             die(f"--chapters cannot be combined with {flag}")
     if args.profile != "wiki":
@@ -1907,6 +1909,8 @@ def main() -> int:
     global _ROLLBACK_ON_FAILURE
     os.environ.setdefault("PW_LLM_PROVIDER", "codex")
     ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--preflight", action="store_true",
+                    help="print the structured dirty-tree report as JSON and exit")
     ap.add_argument("--section", default="")
     ap.add_argument("--section-label", default="")
     ap.add_argument("--limit", default="100000")
@@ -1946,13 +1950,19 @@ def main() -> int:
     # video frames (§8.3)
     ap.add_argument("--frames", action="store_true", help="video: also extract keyframes")
     ap.add_argument("--cadence", default="", help="video frames: fixed cadence (seconds)")
-    ap.add_argument("--rerender", action="store_true",
-                    help="media: re-render markdown from committed JSON after a render_format_version bump (no ASR)")
     ap.add_argument("--profile", choices=["wiki", "lang"], default="wiki",
                     help="ingest destination: wiki synthesis (default) or isolated "
                          "language study/vocab/grammar pages under content/lang/")
-    ap.add_argument("input")
+    ap.add_argument("input", nargs="?")
     args = ap.parse_args()
+    if args.preflight:
+        active_root = resolve_vault_root(args.profile)
+        content_root = active_root.parent if args.profile == "lang" else active_root
+        ok, message, offending = preflight_report(args.profile, content_root=content_root)
+        print(json.dumps({"ok": ok, "message": message, "offending": offending}, ensure_ascii=False))
+        return 0
+    if not args.input:
+        ap.error("input is required unless --preflight is used")
     section_label = validate_section_label(args.section_label)
     args.section_label = section_label
     try:
@@ -1993,7 +2003,7 @@ def main() -> int:
         platform_explicit = any(a == "--platform" or a.startswith("--platform=")
                                 for a in sys.argv[1:])
         forbidden = [f for f, on in (
-            ("--kind", bool(args.kind)), ("--rerender", args.rerender),
+            ("--kind", bool(args.kind)),
             ("--images-only", args.images_only), ("--retranscribe", args.retranscribe),
             ("--reocr", args.reocr), ("--frames", args.frames),
             ("--chapters", args.chapters),
@@ -2048,13 +2058,6 @@ def main() -> int:
     if chapter_mode:
         release_content_ingest_lock()
         return run_chaptered(args)
-
-    # ── media --rerender (§7.5): a self-contained migration (no ASR, no LLM
-    #    diff) — re-render from the committed JSON + supersede + rewire citations.
-    if args.rerender:
-        if not args.kind:
-            die("--rerender requires --kind video|audio")
-        sys.exit(subprocess.run([f"{SCRIPTS}/rerender-media.py", args.input]).returncode)
 
     # ── §1 fetch / canonicalize identity ──
     if args.kind:

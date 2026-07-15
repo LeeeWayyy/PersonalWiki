@@ -9,12 +9,12 @@ from __future__ import annotations
 import logging
 import mimetypes
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 
-from . import ingest_runner, settings
+from . import ingest_runner
 from .routers import annotations, health, ingest, llm, study
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -30,12 +30,18 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Personal Wiki backend", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins(),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.update({
+        "X-Frame-Options": "DENY",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+        "Cross-Origin-Opener-Policy": "same-origin",
+    })
+    return response
 
 mimetypes.add_type("audio/mp4", ".m4a")  # default guess audio/mp4a-latm breaks <audio>
 
@@ -53,3 +59,7 @@ app.include_router(ingest.router)
 app.include_router(study.router)
 app.include_router(llm.router)
 app.include_router(annotations.router)
+
+# Keep this last: API routes win before the catch-all static mount.
+app.mount("/", StaticFiles(directory=Path(__file__).resolve().parents[2] / "dist",
+                           html=True, check_dir=False), name="site")

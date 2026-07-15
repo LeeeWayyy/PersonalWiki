@@ -10,7 +10,7 @@ export function installWikiNote() {
   const art = document.querySelector('article[data-wiki-rel]');
   if (!art) return;
   const rel = art.dataset.wikiRel;
-  const BACKEND = localStorage.getItem('backendUrl') || 'http://localhost:8787';
+  const BACKEND = '';
   const TOKEN = localStorage.getItem('backendToken') || '';
   const H = { 'Content-Type': 'application/json', ...(TOKEN ? { 'X-Auth-Token': TOKEN } : {}) };
   const prose = art.querySelector('.prose');
