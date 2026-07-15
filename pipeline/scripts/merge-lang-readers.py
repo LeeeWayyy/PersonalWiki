@@ -136,44 +136,103 @@ STRICT RULES:
 """
 
 
-def _calibrate_batch(sents, base, asr, suffix, sha, source_id, refresh) -> dict:
-    """One LLM call for a sentence batch (cached, 2 attempts). `base` is the
-    global 1-based number of sents[0]. Returns {global_num: calibrated_jp};
-    empty dict on persistent failure (caller keeps originals)."""
-    cache_dir = glp.CACHE_DIR / "merge"
-    cached = None if refresh else dl.load_cache(cache_dir, CAL_VERSION, source_id, sha, suffix)
-    if cached is None:
-        numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(sents, base))
-        prompt = CAL_PROMPT.format(sents=numbered, asr=asr or "(none)")
-        for attempt in (1, 2):
-            try:
-                cached = dl.extract_json(dl.call_llm(prompt, CAL_TIMEOUT))
-                break
-            except ValueError:
-                print(f"    batch {suffix}: unparseable (attempt {attempt}/2)", file=sys.stderr)
-        if cached is None:
-            return {}                                  # give up → keep originals
-        dl.save_cache(cache_dir, CAL_VERSION, source_id, sha, cached, suffix)
+_OBJ_RX = re.compile(r'\{\s*"s"\s*:\s*(\d+)\s*,\s*"jp"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}')
+
+
+def _parse_calibrated(raw: str) -> dict:
+    """Best-effort {global_num: jp} from an LLM reply. Strict JSON first, then
+    salvage every well-formed {"s":N,"jp":"…"} object so ONE malformed entry
+    (e.g. a dropped closing quote) can't lose its whole batch — jp values use
+    「」, never ASCII quotes, so the object regex is unambiguous."""
+    try:
+        obj = dl.extract_json(raw)
+        return {int(o["s"]): str(o.get("jp") or "").strip()
+                for o in (obj.get("calibrated") or []) if isinstance(o, dict) and "s" in o}
+    except ValueError:
+        pass
+    out = {}
+    for m in _OBJ_RX.finditer(raw):
+        try:                                            # decode \n \" etc. in the value
+            jp = json.loads(f'"{m.group(2)}"')
+        except ValueError:
+            jp = m.group(2)
+        out[int(m.group(1))] = jp.strip()
+    return out
+
+
+def _calibrate_call(sents, nums, asr) -> dict:
+    """One LLM calibration call over sentences numbered by `nums` (parallel to
+    `sents`). Tolerant-parsed; 2 attempts. Returns {num: jp} (may be partial)."""
+    numbered = "\n".join(f"{n}. {s}" for n, s in zip(nums, sents))
+    prompt = CAL_PROMPT.format(sents=numbered, asr=asr or "(none)")
+    got = {}
+    for attempt in (1, 2):
+        got = _parse_calibrated(dl.call_llm(prompt, CAL_TIMEOUT))
+        if got:
+            break
+        print(f"    calibration call {nums[0]}–{nums[-1]}: nothing parseable "
+              f"(attempt {attempt}/2)", file=sys.stderr)
+    return got
+
+
+def _cache_to_map(cached: dict) -> dict:
+    """{num: jp} from either the current {"map":…} or legacy {"calibrated":[…]}."""
+    if "map" in cached:
+        return {int(k): v for k, v in (cached["map"] or {}).items()}
     return {int(o["s"]): str(o.get("jp") or "").strip()
             for o in (cached.get("calibrated") or []) if isinstance(o, dict) and "s" in o}
 
 
+def _calibrate_batch(sents, base, asr, suffix, sha, source_id, refresh) -> dict:
+    """One cached batch. `base` is the global 1-based number of sents[0]."""
+    cache_dir = glp.CACHE_DIR / "merge"
+    cached = None if refresh else dl.load_cache(cache_dir, CAL_VERSION, source_id, sha, suffix)
+    if cached is None:
+        cached = {"map": {str(k): v for k, v in
+                          _calibrate_call(sents, list(range(base, base + len(sents))), asr).items()}}
+        dl.save_cache(cache_dir, CAL_VERSION, source_id, sha, cached, suffix)
+    return _cache_to_map(cached)
+
+
 def calibrate_chapter(idx, chap, sentences, asr, sha, source_id, refresh):
-    """LLM kana→kanji for a chapter, batched at BATCH_SENTS (big completions
-    truncate). Guard: keep the original whenever the calibrated reading drifts.
-    Returns (list[str], kept, drift)."""
+    """LLM kana→kanji for a chapter, batched at BATCH_SENTS. Any sentence no
+    batch produced (malformed JSON) is recovered in a tiny retry call; anything
+    still missing keeps the original kana AND is logged — never silent. Guard:
+    keep the original whenever the calibrated reading drifts. Returns
+    (list[str], kept_missing, drift)."""
     slug = dl.fs_safe_slug(chap, fallback="chap")
+    N = len(sentences)
     by_s: dict[int, str] = {}
-    for lo in range(0, len(sentences), glp.BATCH_SENTS):
-        hi = min(lo + glp.BATCH_SENTS, len(sentences))
+    for lo in range(0, N, glp.BATCH_SENTS):
         suffix = f"{idx:02d}-{slug}-b{lo:04d}"
-        by_s.update(_calibrate_batch(sentences[lo:hi], lo + 1, asr, suffix,
-                                     sha, source_id, refresh))
+        by_s.update(_calibrate_batch(sentences[lo:min(lo + glp.BATCH_SENTS, N)],
+                                     lo + 1, asr, suffix, sha, source_id, refresh))
+
+    # Recover sentences no batch returned (a malformed entry skipped by salvage),
+    # re-asking in small chunks where a completion almost never malforms. Cached.
+    missing = [i for i in range(1, N + 1) if i not in by_s]
+    if missing:
+        cache_dir = glp.CACHE_DIR / "merge"
+        rsuffix = f"{idx:02d}-{slug}-retry"
+        rec = None if refresh else dl.load_cache(cache_dir, CAL_VERSION, source_id, sha, rsuffix)
+        if rec is None:
+            got = {}
+            for c in range(0, len(missing), 8):
+                chunk = missing[c:c + 8]
+                got.update(_calibrate_call([sentences[i - 1] for i in chunk], chunk, asr))
+            rec = {"map": {str(k): v for k, v in got.items()}}
+            dl.save_cache(cache_dir, CAL_VERSION, source_id, sha, rec, rsuffix)
+        by_s.update({int(k): v for k, v in (rec.get("map") or {}).items()})
+        still = [i for i in missing if i not in by_s]
+        if still:
+            print(f"    ⚠ ch{idx:02d} {chap!r}: kept ORIGINAL kana for {len(still)} "
+                  f"un-calibratable sentence(s): {still}", file=sys.stderr)
+
     out, kept, drift = [], 0, 0
     for i, orig in enumerate(sentences, 1):
         cal = by_s.get(i, "")
         if not cal:
-            out.append(orig); kept += 1; continue
+            out.append(orig); kept += 1; continue      # logged above
         sim = SequenceMatcher(None, reading_of(orig), reading_of(cal)).ratio()
         if sim < READING_GUARD:
             out.append(orig); drift += 1               # reject: pronunciation moved
