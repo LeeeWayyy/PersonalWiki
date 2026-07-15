@@ -73,7 +73,7 @@ const sections = order.map((g) => ({ name: g, items: items.filter((i) => i.group
       <div>
         {sections.map((sec) => (
           <section class="et-section" data-group={sec.name}>
-            <div class="et-shead"><span class="nm" data-i18n={groupI18n[sec.name]}>{sec.name}</span><span class="c">{sec.items.length}</span><span class="rule"></span></div>
+            <div class="et-shead"><span class="nm" data-i18n={groupI18n[sec.name]}>{sec.name}</span><span class="c">{sec.items.length}</span><span class="rule"></span>{sec.name === '语言' && (<a href="/reader" style="flex:none;font-size:11px;color:var(--text-3);text-decoration:none;white-space:nowrap">Merge / delete →</a>)}</div>
             <div class="et-cards">
               {sec.items.map((it) => (
                 <a href={it.href} class="et-card" data-group={it.group} data-t={it.title} data-search={it.search}>

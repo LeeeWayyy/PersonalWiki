@@ -39,6 +39,19 @@ export function installLangOps() {
 
   cards.forEach((c) => c.querySelector('input')?.addEventListener('change', sync));
 
+  // Deep link from /sources: /reader?select=<id> pre-checks that reader.
+  const wanted = new URLSearchParams(location.search).getAll('select');
+  if (wanted.length) {
+    let first = null;
+    cards.forEach((c) => {
+      if (wanted.includes(c.dataset.id)) {
+        const box = c.querySelector('input');
+        if (box) { box.checked = true; first = first || c; }
+      }
+    });
+    first?.scrollIntoView({ block: 'center' });
+  }
+
   mergeBtn.addEventListener('click', async () => {
     const sel = picked();
     const book = ofKind(sel, 'book')[0];
