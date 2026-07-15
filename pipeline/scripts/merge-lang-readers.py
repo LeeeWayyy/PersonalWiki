@@ -305,6 +305,9 @@ def main() -> int:
     ap.add_argument("--commit", action="store_true",
                     help="write into the real lang vault (_reading/) and git-commit")
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--no-calibrate", action="store_true",
+                    help="text is already natural kanji (a hand-calibrated transcript): "
+                         "align to the audio timeline only, skip the kana→kanji LLM pass")
     ap.add_argument("--limit", type=int, default=0, help="calibrate only first N chapters (debug)")
     args = ap.parse_args()
     if not args.commit and not args.out_dir:
@@ -327,23 +330,29 @@ def main() -> int:
     sha = meta["sha256"]
     total_up = total_kept = total_drift = 0
     samples = []
-    for idx, (chap, d) in enumerate(per_chapter, 1):
-        if args.limit and idx > args.limit:
-            break
-        sents = [s["jp"] for s in d["sentences"]]
-        times = [(s.get("t0"), s.get("t1")) for s in d["sentences"]]
-        t0s = [t for t, _ in times if t is not None]
-        t1s = [t for _, t in times if t is not None]
-        asr = asr_reference(segs, min(t0s), max(t1s)) if t0s else ""
-        cal, kept, drift = calibrate_chapter(idx, chap, sents, asr, sha, args.book_id, args.refresh)
-        for s, new in zip(d["sentences"], cal):
-            up = kanji_upgrades(s["jp"], new)
-            total_up += up
-            if up and len(samples) < 10 and s["jp"] != new:
-                samples.append((s["jp"], new))
-            s["jp"] = new                               # <-- swap in calibrated kanji
-        total_kept += kept; total_drift += drift
-        print(f"  ch{idx:02d} {chap[:24]:24} sents={len(sents):3} kept={kept} drift-rejected={drift}")
+    # --no-calibrate: the text is already a hand-calibrated transcript (natural
+    # kanji). Alignment above already stamped the timeline; there's nothing for the
+    # kana→kanji LLM to add, so keep the sentences verbatim and skip the ~30-min pass.
+    if args.no_calibrate:
+        print("calibration skipped (--no-calibrate): text kept verbatim, timing from audio")
+    else:
+        for idx, (chap, d) in enumerate(per_chapter, 1):
+            if args.limit and idx > args.limit:
+                break
+            sents = [s["jp"] for s in d["sentences"]]
+            times = [(s.get("t0"), s.get("t1")) for s in d["sentences"]]
+            t0s = [t for t, _ in times if t is not None]
+            t1s = [t for _, t in times if t is not None]
+            asr = asr_reference(segs, min(t0s), max(t1s)) if t0s else ""
+            cal, kept, drift = calibrate_chapter(idx, chap, sents, asr, sha, args.book_id, args.refresh)
+            for s, new in zip(d["sentences"], cal):
+                up = kanji_upgrades(s["jp"], new)
+                total_up += up
+                if up and len(samples) < 10 and s["jp"] != new:
+                    samples.append((s["jp"], new))
+                s["jp"] = new                           # <-- swap in calibrated kanji
+            total_kept += kept; total_drift += drift
+            print(f"  ch{idx:02d} {chap[:24]:24} sents={len(sents):3} kept={kept} drift-rejected={drift}")
 
     # If --limit, drop uncalibrated chapters so the demo page is coherent
     if args.limit:

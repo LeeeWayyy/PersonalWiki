@@ -1151,6 +1151,12 @@ def test_build_argv_lang_merge_routes_to_merge_script():
     assert "--refresh" not in argv
     assert "--refresh" in ir._build_argv(
         "", {"kind": "lang-merge", "book_id": "a", "audio_id": "b", "refresh": True})
+    # calibrate flag: default calibrates; explicit False → timing-only alignment
+    assert "--no-calibrate" not in argv
+    assert "--no-calibrate" in ir._build_argv(
+        "", {"kind": "lang-merge", "book_id": "a", "audio_id": "b", "calibrate": False})
+    assert "--no-calibrate" not in ir._build_argv(
+        "", {"kind": "lang-merge", "book_id": "a", "audio_id": "b", "calibrate": True})
 
 
 def test_lang_merge_preflight_uses_lang_profile(monkeypatch):

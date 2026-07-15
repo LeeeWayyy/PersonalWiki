@@ -295,6 +295,8 @@ def _build_argv(target: str, options: dict, transcript_out: str | None = None) -
                 "--audio-id", str(options["audio_id"]), "--commit"]
         if (options or {}).get("refresh"):
             argv.append("--refresh")
+        if (options or {}).get("calibrate") is False:
+            argv.append("--no-calibrate")
         return argv
     # A media URL under lang must be transcribed, not web-scraped. Route it
     # through fetch-transcript.py (ASR → .transcript.json → ingest.py). It writes

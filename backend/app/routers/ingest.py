@@ -105,8 +105,11 @@ async def lang_merge(request: Request):
         raise HTTPException(400, "book_id and audio_id must be valid source ids")
     if book_id == audio_id:
         raise HTTPException(400, "book_id and audio_id must differ")
+    # calibrate=False → the "book" is a hand-calibrated transcript (already natural
+    # kanji): align to the audio timeline only, skip the kana→kanji LLM pass.
     opts = {"kind": "lang-merge", "book_id": book_id, "audio_id": audio_id,
-            "refresh": bool(body.get("refresh"))}
+            "refresh": bool(body.get("refresh")),
+            "calibrate": body.get("calibrate") is not False}
     return {"job_id": ir.start_job("", opts)}
 
 

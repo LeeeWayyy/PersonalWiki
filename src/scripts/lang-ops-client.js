@@ -9,6 +9,8 @@ export function installLangOps() {
   const mergeBtn = document.getElementById('lang-merge-btn');
   const deleteBtn = document.getElementById('lang-delete-btn');
   const count = document.getElementById('lang-sel-count');
+  const nocalWrap = document.getElementById('lang-nocal-wrap');
+  const nocal = document.getElementById('lang-nocal');
   const dlg = document.getElementById('lang-op-dialog');
   const title = document.getElementById('lang-op-title');
   const hint = document.getElementById('lang-op-hint');
@@ -26,6 +28,7 @@ export function installLangOps() {
     mergeBtn.disabled = !mergeable;
     mergeBtn.title = mergeable ? 'Merge into a new reader'
       : 'Select exactly one book reader and one audio reader';
+    if (nocalWrap) nocalWrap.hidden = !mergeable;
     deleteBtn.disabled = sel.length === 0;
   }
 
@@ -57,12 +60,14 @@ export function installLangOps() {
     const book = ofKind(sel, 'book')[0];
     const audio = ofKind(sel, 'audio')[0];
     if (!book || !audio) return;
+    const calibrate = !nocal?.checked;
     const append = startDialog('Merging readers', true);
-    append(`Merging "${book.dataset.title}" + "${audio.dataset.title}" …`);
+    append(`Merging "${book.dataset.title}" + "${audio.dataset.title}" …`
+      + (calibrate ? '' : ' (timing only, no re-calibration)'));
     try {
       const res = await api('/lang/merge', {
         method: 'POST',
-        json: { book_id: book.dataset.id, audio_id: audio.dataset.id },
+        json: { book_id: book.dataset.id, audio_id: audio.dataset.id, calibrate },
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload.detail || res.statusText);

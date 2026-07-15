@@ -36,6 +36,7 @@ const kindOf = (l: any) => (l.reading?.merged ? 'merged' : l.reading?.audio ? 'a
 
   <div id="lang-actions" hidden>
     <span><b id="lang-sel-count">0</b> selected</span>
+    <label id="lang-nocal-wrap" class="muted small" hidden title="The text is already natural kanji (a hand-calibrated transcript): align to the audio timeline only, skip the ~30-min kana→kanji LLM pass"><input type="checkbox" id="lang-nocal" /> already calibrated</label>
     <button id="lang-merge-btn" class="btn" disabled title="Select one book reader and one audio reader">Merge → new reader</button>
     <button id="lang-delete-btn" class="btn danger">Delete</button>
   </div>
