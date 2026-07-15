@@ -37,7 +37,7 @@ Used by `ingest.py` and the `scripts/`. All present on this machine.
 | `shasum` | sha256 of sources | (system) | `shasum -a 256 <f>` |
 | `python3` | scripts runtime (≥3.11) | `brew install python@3.11` / pyenv | `python3 --version` |
 | `uv` | runs `scripts/*.py` + manages their inline deps | `curl -LsSf https://astral.sh/uv/install.sh \| sh` | `uv --version` |
-| an **LLM provider** | ingest diff + mind-map extraction | see below | `codex --version` |
+| an **LLM provider** | ingest diff + mind-map extraction | see below | `codex --version`, `claude --version`, or `agy --version` |
 
 ### LLM provider
 
@@ -46,6 +46,17 @@ shared Python LLM client. Default local provider: `PW_LLM_PROVIDER=codex`, which
 invokes `codex exec` directly without a shell adapter. This is the agentic,
 subscription-backed mode: Codex can inspect and edit the isolated workdir seeded
 by ingest.
+
+Claude and Agy are first-class local alternatives:
+
+```bash
+PW_LLM_PROVIDER=claude-cli PW_LLM_MODEL=sonnet python3 ingest.py <path-or-url>
+PW_LLM_PROVIDER=agy-cli PW_LLM_MODEL='<model>' python3 ingest.py <path-or-url>
+```
+
+`claude`/`agy` are accepted aliases. Both receive the prompt on stdin and run in
+plan/sandboxed modes without application or transcript secrets. Use Agy 1.1.2+
+for reliable non-interactive stdin/OAuth behavior.
 
 For non-agentic single-completion mode, set `PW_LLM_PROVIDER=api` (or `openai`)
 with `PW_LLM_API_KEY`; `PW_LLM_MODEL` selects the chat-completions model and
@@ -56,7 +67,7 @@ configured, but the provider value is the clearer way to choose API mode.
 `LLM_CMD` is still available as an advanced custom stdin-to-stdout command:
 
 ```bash
-LLM_CMD="gemini -p" python3 ingest.py <path-or-url>
+LLM_CMD="/path/to/custom-client" python3 ingest.py <path-or-url>
 ```
 
 Ingest's expansion pass and its single apply-failure retry rebuild and re-send
@@ -165,9 +176,10 @@ which needs none of the above fetchers — only the OCR/ASR step.
 ## Quick verification
 
 ```bash
-for t in git rg curl shasum python3 uv codex yt-dlp; do
+for t in git rg curl shasum python3 uv yt-dlp; do
   printf '%-10s ' "$t"; command -v "$t" >/dev/null && echo OK || echo MISSING
 done
+printf 'LLM        '; { command -v codex || command -v claude || command -v agy; } >/dev/null && echo OK || echo MISSING
 ```
 
 `ffmpeg`, a whisper backend, and an OCR engine will show `MISSING` until

@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Shared LLM client for pipeline and backend runtime.
 
-The default local provider is Codex, invoked directly as argv with the prompt as
-a positional argument. `LLM_CMD` remains supported as an advanced override for
-custom stdin/stdout commands, but the old `llm-codex.sh` command name is treated
-as a legacy command string for the direct Codex provider so existing backend/.env
-files stop depending on shell.
+Built-in Codex, Claude, and Agy providers are invoked directly as argv with the
+prompt on stdin. `LLM_CMD` remains an advanced custom stdin/stdout override; the
+old `llm-codex.sh` command name maps to the direct Codex provider.
 """
 from __future__ import annotations
 
@@ -763,9 +761,9 @@ def _twice(call):
 def complete(prompt: str, timeout: int = 60, *, model: str | None = None) -> str | None:
     """Run one completion.
 
-    `PW_LLM_PROVIDER=codex` is the agentic, subscription-backed path used by the
-    app default. `PW_LLM_PROVIDER=api` or `openai` is non-agentic: one chat
-    completion over the OpenAI-compatible API. For compatibility,
+    `PW_LLM_PROVIDER=codex`, `claude-cli`, or `agy-cli` selects a built-in local
+    CLI. `PW_LLM_PROVIDER=api` or `openai` is non-agentic: one chat completion
+    over the OpenAI-compatible API. For compatibility,
     `PW_LLM_API_ENABLED=1` still acts as an API fallback when no local provider
     is configured, and `LLM_CMD` remains an advanced local command override.
     """

@@ -108,7 +108,7 @@ async def translate(request: Request):
         prompt_version=settings.TRANSLATE_PROMPT_VERSION, prompt=prompt,
         hash_parts=("translate", settings.TRANSLATE_PROMPT_VERSION, settings.TRANSLATE_LANG),
         unavailable=(
-            "(translation needs an LLM - set PW_LLM_PROVIDER=codex, configure a custom LLM_CMD, "
+            "(translation needs an LLM - configure PW_LLM_PROVIDER or a custom LLM_CMD, "
             "or explicitly enable the API fallback with PW_LLM_API_ENABLED=1 and "
             "PW_LLM_API_KEY in backend/.env)"
         ),
@@ -147,7 +147,7 @@ async def assist(request: Request):
         prompt_version=settings.ASSIST_PROMPT_VERSION, prompt=prompt,
         hash_parts=("assist", settings.ASSIST_PROMPT_VERSION, mode, lang),
         unavailable=(
-            "(AI assist needs an LLM - set PW_LLM_PROVIDER=codex, configure a custom LLM_CMD, "
+            "(AI assist needs an LLM - configure PW_LLM_PROVIDER or a custom LLM_CMD, "
             "or explicitly enable the API fallback with PW_LLM_API_ENABLED=1 and "
             "PW_LLM_API_KEY in backend/.env)"
         ),
