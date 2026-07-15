@@ -70,11 +70,16 @@ PROMPT_VERSION = "v5"  # v5: grammar explanations bilingual (English + PW_TRANSL
 TARGET_LANG = os.environ.get("PW_TRANSLATE_LANG", "Simplified Chinese")
 SOURCE_CHAR_LIMIT = 300_000
 LLM_TIMEOUT_S = 900
-# A chapter bigger than this is annotated in several LLM calls: one prompt
-# asking for 1600+ translations (a heading-less transcript arrives as ONE
-# "whole" chapter) exceeds what a single completion can return — the model
-# answers with a near-empty object and the page renders without annotations.
-BATCH_SENTS = int(os.environ.get("PW_LANG_BATCH_SENTS", "120"))
+# A chapter bigger than this is annotated in several LLM calls. Two reasons to
+# keep batches small: (1) one prompt asking for 1600+ translations (a heading-
+# less transcript arrives as ONE "whole" chapter) exceeds what a single
+# completion can return — the model answers with a near-empty object; (2) the
+# "3-10 grammar points" ask below is PER CALL, so a coarse batch starves grammar
+# coverage — at 120 a whole-transcript reader got ~110 points where the same
+# book split into ~12-sentence chapters got ~350. 40 keeps completions safe AND
+# each batch small enough that per-batch grammar sums to book-parity coverage
+# (measured on あのときの王子くん: audio 297 vs book 353 points).
+BATCH_SENTS = int(os.environ.get("PW_LANG_BATCH_SENTS", "40"))
 WHOLE_LABEL = "whole"  # synthetic chapter for heading-less assets (transcripts)
 
 # fugashi pos1 values to DROP (function words, symbols, whitespace). Everything
