@@ -2,7 +2,10 @@
 // logic behind the .et-* list pages (Entities & Topics, Sources).
 import { t } from '../lib/i18n.mjs';
 
-export const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+export const esc = (s) => String(s).replace(
+  /[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
+);
 
 export function hl(text, q) {
   if (!q) return esc(text);

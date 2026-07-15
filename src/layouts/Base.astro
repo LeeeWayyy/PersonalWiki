@@ -191,7 +191,7 @@ const csp = [
         const k = kindStyle[d.kind];
         const sub = d.sub ? `<span class="s">${hl(d.sub, q)}</span>` : '';
         const meta = typeof d.meta === 'object' && d.meta ? t(d.meta.k, { n: d.meta.n }) : (d.meta || '');
-        return `<a class="cmdk-row${i === sel ? ' sel' : ''}" href="${d.href}" data-i="${i}"><span class="g" style="color:${k.c};background:${k.bg}">${d.glyph}</span><span style="min-width:0"><span class="t">${hl(d.title, q)}</span>${sub}</span><span class="rt"><span class="m">${esc(meta)}</span><span class="k" style="color:${k.c};border-color:${k.bd}">${k.label}</span></span></a>`;
+        return `<a class="cmdk-row${i === sel ? ' sel' : ''}" href="${esc(d.href)}" data-i="${i}"><span class="g" style="color:${k.c};background:${k.bg}">${d.glyph}</span><span style="min-width:0"><span class="t">${hl(d.title, q)}</span>${sub}</span><span class="rt"><span class="m">${esc(meta)}</span><span class="k" style="color:${k.c};border-color:${k.bd}">${k.label}</span></span></a>`;
       }).join('');
     }
     function scrollSel() { resultsEl?.querySelector('.cmdk-row.sel')?.scrollIntoView({ block: 'nearest' }); }
