@@ -28,7 +28,6 @@ ROOT = Path(__file__).resolve().parent.parent
 MIN_NODE = (22, 12)
 MIN_PYTHON = (3, 11)
 TRUTHY = {"1", "true", "yes", "on"}
-FALSY = {"0", "false", "no", "off"}
 
 
 class AppStartError(RuntimeError):
@@ -56,10 +55,6 @@ def _log_default(message: str) -> None:
 
 def _truthy(value: str | None) -> bool:
     return bool(value and value.strip().lower() in TRUTHY)
-
-
-def _falsy(value: str | None) -> bool:
-    return bool(value and value.strip().lower() in FALSY)
 
 
 def parse_node_version(value: str) -> tuple[int, int]:
@@ -118,10 +113,16 @@ def build_config(
     parser.add_argument("--dev", action="store_true", help="run Astro dev server instead of a production build")
     parser.add_argument("--open", action="store_true", help="open the site URL after startup")
     parser.add_argument("--no-open", action="store_true", help="do not open the site URL")
-    parser.add_argument(
+    port_group = parser.add_mutually_exclusive_group()
+    port_group.add_argument(
+        "--kill-ports",
+        action="store_true",
+        help="stop existing listeners on the configured ports",
+    )
+    port_group.add_argument(
         "--no-kill-ports",
         action="store_true",
-        help="fail on busy ports instead of stopping existing listeners",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args(list(argv))
 
@@ -141,7 +142,7 @@ def build_config(
     env["PW_HOST"] = backend_host
 
     open_ui = (args.open or _truthy(env.get("PW_OPEN_UI"))) and not args.no_open
-    kill_ports = not args.no_kill_ports and not _falsy(env.get("PW_KILL_PORTS"))
+    kill_ports = (args.kill_ports or _truthy(env.get("PW_KILL_PORTS"))) and not args.no_kill_ports
 
     return StartConfig(
         root=root,

@@ -60,6 +60,7 @@ class AppStartTests(unittest.TestCase):
             self.assertEqual(config.site_port, 4555)
             self.assertEqual(config.env["PW_AUTH_TOKEN"], "backend-token")
             self.assertEqual(config.env["PW_CONTENT_DIR"], str((root / "wiki").resolve()))
+            self.assertFalse(config.kill_ports)
 
     def test_build_config_preserves_explicit_env_and_dev_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,7 +70,7 @@ class AppStartTests(unittest.TestCase):
             write_content(explicit)
 
             config = app_start.build_config(
-                ["--dev", "--open", "--no-kill-ports"],
+                ["--dev", "--open", "--kill-ports"],
                 root,
                 {
                     "PW_AUTH_TOKEN": "explicit-token",
@@ -81,7 +82,7 @@ class AppStartTests(unittest.TestCase):
 
             self.assertEqual(config.mode, "dev")
             self.assertTrue(config.open_ui)
-            self.assertFalse(config.kill_ports)
+            self.assertTrue(config.kill_ports)
             self.assertEqual(config.env["PW_AUTH_TOKEN"], "explicit-token")
             self.assertEqual(config.content_dir, explicit.resolve())
 

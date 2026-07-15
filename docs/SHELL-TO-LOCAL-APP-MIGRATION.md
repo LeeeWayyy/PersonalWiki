@@ -58,7 +58,7 @@ configuration and Uvicorn launch while `backend/run.sh` remains as a developer
 dependency-bootstrap wrapper.
 
 Phase 3 has started with `scripts/app_start.py`, which owns local startup,
-dependency checks, port cleanup, build/backend or dev-server launch, health
+dependency checks, busy-port checks and opt-in cleanup, build/backend or dev-server launch, health
 checks, and shutdown while top-level `run.sh` remains a compatibility wrapper.
 
 Phase 4 has started with `pipeline/scripts/llm_client.py`, which gives backend

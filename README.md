@@ -85,6 +85,8 @@ when missing, enables the local Codex provider, and generates `PW_AUTH_TOKEN`
 automatically. If you are not using `./content`, set `PW_CONTENT_DIR` to your
 wiki folder. Use `--open` or
 `PW_OPEN_UI=1` to open the site automatically after startup.
+Busy ports fail safely by default; use `--kill-ports` or `PW_KILL_PORTS=1` to
+stop their existing listeners during startup.
 
 Or run the pieces separately:
 
