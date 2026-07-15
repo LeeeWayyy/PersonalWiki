@@ -1,16 +1,19 @@
 import { api, streamJob } from './backend-client.js';
 
-// Reader-index selection → merge a book reader + an audio reader into a new one.
-// Merge is a long backend job; we stream its log into a dialog, then reload.
-// ponytail: hardcoded English strings + delete deferred to Phase 2.
+// Reader-index selection → merge (book + audio → new reader) or delete readers.
+// Merge is a long streamed job; delete is a fast synchronous call per reader.
+// ponytail: hardcoded English strings; native confirm() gates delete.
 export function installLangOps() {
   const cards = [...document.querySelectorAll('.reader-card')];
   const bar = document.getElementById('lang-actions');
   const mergeBtn = document.getElementById('lang-merge-btn');
+  const deleteBtn = document.getElementById('lang-delete-btn');
   const count = document.getElementById('lang-sel-count');
-  const dlg = document.getElementById('lang-merge-dialog');
+  const dlg = document.getElementById('lang-op-dialog');
+  const title = document.getElementById('lang-op-title');
+  const hint = document.getElementById('lang-op-hint');
   const log = dlg?.querySelector('.log');
-  if (!cards.length || !bar || !mergeBtn || !count || !dlg || !log) return;
+  if (!cards.length || !bar || !mergeBtn || !deleteBtn || !count || !dlg || !log) return;
 
   const picked = () => cards.filter((c) => c.querySelector('input')?.checked);
   const ofKind = (list, k) => list.filter((c) => c.dataset.kind === k);
@@ -19,10 +22,19 @@ export function installLangOps() {
     const sel = picked();
     bar.hidden = sel.length === 0;
     count.textContent = String(sel.length);
-    const ok = sel.length === 2 && ofKind(sel, 'book').length === 1 && ofKind(sel, 'audio').length === 1;
-    mergeBtn.disabled = !ok;
-    mergeBtn.title = ok ? 'Merge into a new reader'
+    const mergeable = sel.length === 2 && ofKind(sel, 'book').length === 1 && ofKind(sel, 'audio').length === 1;
+    mergeBtn.disabled = !mergeable;
+    mergeBtn.title = mergeable ? 'Merge into a new reader'
       : 'Select exactly one book reader and one audio reader';
+    deleteBtn.disabled = sel.length === 0;
+  }
+
+  function startDialog(heading, withHint) {
+    title.textContent = heading;
+    hint.hidden = !withHint;
+    log.textContent = '';
+    dlg.showModal();
+    return (line) => { log.textContent += line + '\n'; log.scrollTop = log.scrollHeight; };
   }
 
   cards.forEach((c) => c.querySelector('input')?.addEventListener('change', sync));
@@ -32,9 +44,7 @@ export function installLangOps() {
     const book = ofKind(sel, 'book')[0];
     const audio = ofKind(sel, 'audio')[0];
     if (!book || !audio) return;
-    log.textContent = '';
-    const append = (line) => { log.textContent += line + '\n'; log.scrollTop = log.scrollHeight; };
-    dlg.showModal();
+    const append = startDialog('Merging readers', true);
     append(`Merging "${book.dataset.title}" + "${audio.dataset.title}" …`);
     try {
       const res = await api('/lang/merge', {
@@ -49,6 +59,37 @@ export function installLangOps() {
     } catch (error) {
       append('error: ' + (error instanceof Error ? error.message : String(error)));
     }
+  });
+
+  deleteBtn.addEventListener('click', async () => {
+    const sel = picked();
+    if (!sel.length) return;
+    const names = sel.map((c) => c.dataset.title).join(', ');
+    if (!confirm(`Delete ${sel.length} reader(s)?\n\n${names}\n\nThis removes their pages and cannot be undone.`)) return;
+    const append = startDialog('Deleting readers', false);
+    let anyRebuilt = false;
+    const failed = [];
+    // ponytail: one reader per call — bulk fans out sequentially.
+    for (const c of sel) {
+      append(`Deleting "${c.dataset.title}" …`);
+      try {
+        const res = await api('/lang/source/remove', {
+          method: 'POST',
+          json: { source_id: c.dataset.id, confirmation: c.dataset.id },
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload.detail || res.statusText);
+        anyRebuilt = anyRebuilt || !!payload.rebuilt;
+        if (payload.rebuild_warning) append(`  ⚠ rebuild: ${payload.rebuild_warning}`);
+        append('  removed ✓');
+      } catch (error) {
+        failed.push(c.dataset.title);
+        append('  error: ' + (error instanceof Error ? error.message : String(error)));
+      }
+    }
+    if (failed.length) { append(`— ${failed.length} failed —`); return; }
+    if (anyRebuilt) { append('— done · reloading —'); location.reload(); }
+    else append('— done · rebuild the site to see the change —');
   });
 
   sync();

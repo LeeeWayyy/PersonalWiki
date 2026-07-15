@@ -1181,3 +1181,20 @@ def test_source_id_validation_rejects_bad_ids():
     assert not _SOURCE_ID_RX.fullmatch("../etc")
     assert not _SOURCE_ID_RX.fullmatch("has space")
     assert not _SOURCE_ID_RX.fullmatch("")
+
+
+def test_lang_merge_endpoint_validates(client, auth):
+    # equal ids rejected before any job is started
+    r = client.post("/lang/merge", headers=auth, json={"book_id": "01X", "audio_id": "01X"})
+    assert r.status_code == 400
+    r = client.post("/lang/merge", headers=auth, json={"book_id": "../etc", "audio_id": "01Y"})
+    assert r.status_code == 400
+
+
+def test_lang_source_remove_requires_matching_confirmation(client, auth):
+    r = client.post("/lang/source/remove", headers=auth,
+                    json={"source_id": "01ABC", "confirmation": "nope"})
+    assert r.status_code == 400
+    r = client.post("/lang/source/remove", headers=auth,
+                    json={"source_id": "bad space", "confirmation": "bad space"})
+    assert r.status_code == 400

@@ -37,11 +37,12 @@ const kindOf = (l: any) => (l.reading?.merged ? 'merged' : l.reading?.audio ? 'a
   <div id="lang-actions" hidden>
     <span><b id="lang-sel-count">0</b> selected</span>
     <button id="lang-merge-btn" class="btn" disabled title="Select one book reader and one audio reader">Merge → new reader</button>
+    <button id="lang-delete-btn" class="btn danger">Delete</button>
   </div>
 
-  <dialog id="lang-merge-dialog">
-    <h3 style="margin:0 0 8px">Merging readers</h3>
-    <p class="muted small" style="margin:0 0 8px">Book text &amp; grammar, upgraded to natural kanji, on the audio timeline. This runs the LLM and can take a while.</p>
+  <dialog id="lang-op-dialog">
+    <h3 id="lang-op-title" style="margin:0 0 8px">Working…</h3>
+    <p id="lang-op-hint" class="muted small" style="margin:0 0 8px">Book text &amp; grammar, upgraded to natural kanji, on the audio timeline. This runs the LLM and can take a while.</p>
     <pre class="log"></pre>
     <form method="dialog" style="text-align:right;margin-top:8px"><button class="btn">Close</button></form>
   </dialog>
@@ -57,8 +58,9 @@ const kindOf = (l: any) => (l.reading?.merged ? 'merged' : l.reading?.audio ? 'a
     border: 1px solid var(--border, #ccc); border-radius: 10px;
     background: var(--bg-elev, rgba(127,127,127,0.08)); backdrop-filter: blur(4px);
   }
-  #lang-merge-dialog { max-width: 640px; width: 90vw; border-radius: 12px; border: 1px solid var(--border, #ccc); }
-  #lang-merge-dialog .log {
+  .btn.danger { color: #b3261e; border-color: currentColor; }
+  #lang-op-dialog { max-width: 640px; width: 90vw; border-radius: 12px; border: 1px solid var(--border, #ccc); }
+  #lang-op-dialog .log {
     max-height: 50vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
     font: 12px/1.5 ui-monospace, monospace; margin: 0; padding: 10px;
     background: rgba(127,127,127,0.1); border-radius: 8px;

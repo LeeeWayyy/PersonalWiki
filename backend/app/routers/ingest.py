@@ -5,6 +5,7 @@ import asyncio
 import datetime as dt
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -107,6 +108,51 @@ async def lang_merge(request: Request):
     opts = {"kind": "lang-merge", "book_id": book_id, "audio_id": audio_id,
             "refresh": bool(body.get("refresh"))}
     return {"job_id": ir.start_job("", opts)}
+
+
+_DELETE_LANG_SCRIPT = ir.REPO / "pipeline" / "scripts" / "delete-lang-source.py"
+
+
+@router.post("/lang/source/remove")
+async def lang_source_remove(request: Request):
+    """Delete one lang reader (its pages + sidecar/asset) after a confirmation.
+
+    Fast (rm + commit), so it runs synchronously under the ingest lock like
+    /wiki/page/remove, then rebuilds the site.
+    """
+    body = await json_object(request)
+    source_id = optional_string(body.get("source_id"), "source_id").strip()
+    confirmation = optional_string(body.get("confirmation"), "confirmation").strip()
+    if not _SOURCE_ID_RX.fullmatch(source_id):
+        raise HTTPException(400, "source_id must be a valid source id")
+    if confirmation != source_id:
+        raise HTTPException(400, "confirmation must exactly match source_id")
+
+    async with ir.LOCK:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ["uv", "run", str(_DELETE_LANG_SCRIPT), "--source-id", source_id],
+            capture_output=True, text=True, timeout=ir.JOB_TIMEOUT_S, cwd=str(ir.CONTENT_DIR),
+            env={**os.environ, "PW_CONTENT_DIR": str(ir.CONTENT_DIR),
+                 "VAULT_CONTENT_DIR": str(ir.CONTENT_DIR)},
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "delete failed").strip().splitlines()
+            raise HTTPException(422, detail[-1] if detail else "delete failed")
+
+        rebuilt = False
+        rebuild_warning = None
+        if ir.REBUILD_CMD:
+            rebuild = await asyncio.to_thread(
+                subprocess.run, ir.REBUILD_CMD, shell=True,
+                capture_output=True, text=True, timeout=ir.JOB_TIMEOUT_S,
+            )
+            rebuilt = rebuild.returncode == 0
+            if not rebuilt:
+                lines = (rebuild.stderr or rebuild.stdout or "site rebuild failed").strip().splitlines()
+                rebuild_warning = lines[-1] if lines else "site rebuild failed"
+    return {"removed": source_id, "rebuilt": rebuilt,
+            **({"rebuild_warning": rebuild_warning} if rebuild_warning else {})}
 
 
 _EXTRACT_SCRIPT = ir.REPO / "pipeline" / "scripts" / "extract.py"
