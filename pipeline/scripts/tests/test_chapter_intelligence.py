@@ -597,6 +597,13 @@ class CacheAndPromptTests(unittest.TestCase):
                 "model_identity": {
                     "provider": "fake",
                     "model": "m1",
+                    "binary_fingerprint": "6" * 64,
+                }
+            },
+            {
+                "model_identity": {
+                    "provider": "fake",
+                    "model": "m1",
                     "codex_binary_fingerprint": "4" * 64,
                 }
             },

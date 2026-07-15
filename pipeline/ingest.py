@@ -141,7 +141,7 @@ def mktempdir() -> str:
 
 
 def _seed_workset(workdir: str, candidates_file: str, expand_file: str) -> None:
-    """Copy the candidate/expanded wiki pages into codex's isolated workdir so
+    """Copy the candidate/expanded wiki pages into the LLM's isolated workdir so
     it can read/modify the exact files the prompt references — without seeing
     the whole vault (context overflow) or dirtying the real tree (it edits
     copies; ingest applies the emitted diff). Idempotent: mirrors the CURRENT
@@ -2301,15 +2301,15 @@ def main() -> int:
     _DIFF_RAW.append(diff_raw)
     prompt_file = mktemp()
 
-    # codex runs isolated in this dir (see llm_client): seed it with the exact
+    # The LLM CLI runs isolated in this dir (see llm_client): seed it with the exact
     # candidate pages so it can modify existing entries, not the whole vault.
-    codex_workdir = mktempdir()
-    os.environ["PW_CODEX_WORKDIR"] = codex_workdir
+    llm_workdir = mktempdir()
+    os.environ["PW_LLM_WORKDIR"] = llm_workdir
 
     build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file,
                  renderer_intelligence_file, section_label, "digest")
     out(f"calling LLM (digest mode, {Path(prompt_file).stat().st_size} bytes)...")
-    _seed_workset(codex_workdir, candidates_file, expand_file)
+    _seed_workset(llm_workdir, candidates_file, expand_file)
     write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
 
     run_stream([f"{SCRIPTS}/apply-diff.py", "detect-expand", diff_raw, expand_file])
@@ -2321,7 +2321,7 @@ def main() -> int:
         build_prompt(expand_file, prompt_file, all_source_ids, text_file, candidates_file,
                      renderer_intelligence_file, section_label, "expand")
         out(f"re-calling LLM with expanded content ({Path(prompt_file).stat().st_size} bytes)...")
-        _seed_workset(codex_workdir, candidates_file, expand_file)
+        _seed_workset(llm_workdir, candidates_file, expand_file)
         write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
 
     handle_no_changes_or_continue(
@@ -2343,7 +2343,7 @@ def main() -> int:
                 eout("diff format invalid; auto-retry with git-format instructions...")
             build_prompt(expand_file, prompt_file, all_source_ids, text_file,
                          candidates_file, renderer_intelligence_file, section_label, "retry")
-            _seed_workset(codex_workdir, candidates_file, expand_file)
+            _seed_workset(llm_workdir, candidates_file, expand_file)
             write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))
             handle_no_changes_or_continue(
                 diff_raw, section_label, source_intelligence_file, candidates_file
@@ -2444,7 +2444,7 @@ def main() -> int:
         eout(f"patch failed; auto-retry with {len(retry_set)} expanded path(s)...")
         build_prompt(expand_file, prompt_file, all_source_ids, text_file,
                      candidates_file, renderer_intelligence_file, section_label, "retry")
-        _seed_workset(codex_workdir, candidates_file, expand_file)
+        _seed_workset(llm_workdir, candidates_file, expand_file)
         write(diff_raw, final_newline(llm(read(prompt_file), soft=False)))  # bash: || die "LLM call failed (retry)"
         handle_no_changes_or_continue(
             diff_raw, section_label, source_intelligence_file, candidates_file

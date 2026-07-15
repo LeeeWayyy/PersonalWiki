@@ -32,6 +32,12 @@ DEFAULT_API_MODEL = "gpt-4o-mini"
 CODEX_ARGS = ("exec", "--skip-git-repo-check", "--color", "never")
 API_PROVIDERS = {"api", "openai"}
 CODEX_PROVIDERS = {"codex"}
+CLI_PROVIDER_ALIASES = {
+    "claude": "claude-cli",
+    "claude-cli": "claude-cli",
+    "agy": "agy-cli",
+    "agy-cli": "agy-cli",
+}
 _STDOUT_DONE = object()
 _CLI_ENV_KEYS = {
     "HOME", "PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE",
@@ -94,6 +100,37 @@ def _codex_bin() -> str:
     return _env("PW_CODEX_BIN", "codex")
 
 
+def _claude_bin() -> str:
+    return _env("PW_CLAUDE_BIN", "claude")
+
+
+def _agy_bin() -> str:
+    return _env("PW_AGY_BIN", "agy")
+
+
+def _requested_cli_provider() -> str | None:
+    choice = _provider_choice()
+    if choice in CODEX_PROVIDERS:
+        return "codex"
+    if choice in CLI_PROVIDER_ALIASES:
+        return CLI_PROVIDER_ALIASES[choice]
+    if _legacy_codex_bridge(raw_command()):
+        return "codex"
+    return None
+
+
+def _cli_bin(provider_name: str) -> str:
+    return {
+        "codex": _codex_bin,
+        "claude-cli": _claude_bin,
+        "agy-cli": _agy_bin,
+    }[provider_name]()
+
+
+def _llm_workdir() -> str:
+    return _env("PW_LLM_WORKDIR") or _env("PW_CODEX_WORKDIR")
+
+
 def _codex_home() -> Path:
     home = _env("CODEX_HOME")
     return Path(home).expanduser() if home else Path.home() / ".codex"
@@ -119,15 +156,15 @@ def cli_env(provider_name: str) -> dict[str, str]:
 def codex_requested() -> bool:
     if _api_requested():
         return False
-    return _provider_choice() in CODEX_PROVIDERS or _legacy_codex_bridge(raw_command())
+    return _requested_cli_provider() == "codex"
 
 
 def _provider_error() -> str | None:
     choice = _provider_choice()
-    if choice and choice not in API_PROVIDERS | CODEX_PROVIDERS:
+    if choice and choice not in API_PROVIDERS | CODEX_PROVIDERS | set(CLI_PROVIDER_ALIASES):
         return (
             f"unsupported PW_LLM_PROVIDER={choice!r}; "
-            "use 'codex' for agentic Codex or 'api'/'openai' for API single-completion mode"
+            "use 'codex', 'claude-cli', 'agy-cli', or 'api'/'openai'"
         )
     if _api_requested() and not _api_key():
         return "PW_LLM_PROVIDER=api/openai requires PW_LLM_API_KEY"
@@ -138,10 +175,15 @@ def codex_configured() -> bool:
     return codex_requested() and shutil.which(_codex_bin()) is not None
 
 
+def _cli_provider() -> str | None:
+    selected = _requested_cli_provider()
+    return selected if selected and shutil.which(_cli_bin(selected)) is not None else None
+
+
 def command_configured() -> bool:
     if _api_requested():
         return False
-    return bool(command() or codex_configured())
+    return bool(command() or _cli_provider())
 
 
 def configured() -> bool:
@@ -155,8 +197,8 @@ def provider() -> str | None:
         return "api"
     if command():
         return "command"
-    if codex_configured():
-        return "codex"
+    if selected := _cli_provider():
+        return selected
     if _api_enabled() and _api_key():
         return "api"
     return None
@@ -175,7 +217,7 @@ def model() -> str | None:
         except ValueError:
             return "local-command"
         return Path(argv[0]).name if argv else "local-command"
-    if codex_configured():
+    if _cli_provider():
         # The CLI's compiled default is not discoverable without running a
         # completion. Leave it unset and bind the cache to the binary fingerprint.
         return None
@@ -246,14 +288,18 @@ def _command_fingerprint() -> str | None:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _codex_binary_fingerprint() -> str | None:
-    path = _resolved_file(_codex_bin())
+def _binary_fingerprint(binary: str) -> str | None:
+    path = _resolved_file(binary)
     if path is None:
         return None
     payload = json.dumps(
         _file_fingerprint(path), sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _codex_binary_fingerprint() -> str | None:
+    return _binary_fingerprint(_codex_bin())
 
 
 def _codex_automation_profile() -> dict[str, object]:
@@ -273,7 +319,7 @@ def _codex_automation_profile() -> dict[str, object]:
             for path in sorted(rules_dir.rglob("*"))
             if path.is_file()
         ] if rules_dir.is_dir() else []
-    workdir = _env("PW_CODEX_WORKDIR")
+    workdir = _llm_workdir()
     configured_workdir = Path(workdir).expanduser() if workdir else None
     root = (
         configured_workdir.resolve()
@@ -332,6 +378,11 @@ def execution_identity(model_override: str | None = None) -> dict[str, str | Non
         "api_base_url": _public_api_base_url(),
         "command_fingerprint": (
             _command_fingerprint() if selected_provider == "command" else None
+        ),
+        "binary_fingerprint": (
+            _binary_fingerprint(_cli_bin(selected_provider))
+            if selected_provider in {"claude-cli", "agy-cli"}
+            else None
         ),
         "codex_binary_fingerprint": (
             _codex_binary_fingerprint() if selected_provider == "codex" else None
@@ -394,6 +445,35 @@ def _run_local(argv_or_cmd: list[str] | str, prompt: str, timeout: int, *, shell
         detail = err[-500:] if err else f"exit code {proc.returncode}"
         raise RuntimeError(f"LLM command failed: {detail}")
     return (stdout or "").strip() or None
+
+
+def _run_plain_cli(provider_name: str, prompt: str, timeout: int,
+                   model_override: str | None) -> str | None:
+    short_name = provider_name.removesuffix("-cli")
+    configured = _llm_workdir()
+    own = not (configured and Path(configured).is_dir())
+    workdir = tempfile.mkdtemp(prefix=f"pw-{short_name}-") if own else configured
+    model_name = _effective_model(model_override)
+    if provider_name == "claude-cli":
+        argv = [
+            _claude_bin(), "--safe-mode", "--print", "--output-format", "text",
+            "--no-session-persistence", "--permission-mode", "plan", "--tools", "",
+        ]
+    else:
+        argv = [
+            _agy_bin(), "--print", "--mode", "plan", "--sandbox",
+            "--print-timeout", f"{timeout}s",
+        ]
+    if model_name:
+        argv += ["--model", model_name]
+    try:
+        return _run_local(
+            argv, prompt, timeout, shell=False, cwd=workdir,
+            env=cli_env(short_name),
+        )
+    finally:
+        if own:
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _codex_heartbeat_interval() -> float:
@@ -581,7 +661,7 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
 
 
 def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None) -> str | None:
-    """Run a local LLM provider only: custom `LLM_CMD`, then direct Codex."""
+    """Run a custom command or one of the built-in local CLI providers."""
     cmd = command()
     if cmd:
         env = None
@@ -591,13 +671,16 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
         return _run_local(
             cmd, prompt, timeout, shell=True, cwd=_command_cwd(), env=env
         )
-    if codex_configured():
+    selected_provider = _cli_provider()
+    if selected_provider in {"claude-cli", "agy-cli"}:
+        return _run_plain_cli(selected_provider, prompt, timeout, model)
+    if selected_provider == "codex":
         # Isolate codex from the content repo: it runs in a small working root
         # (-C) holding ONLY the pages the prompt references — never the whole
         # vault. That starves the agentic repo-exploration that otherwise piles
         # ~200k tokens onto a book-chapter prompt and overflows the window, and
         # keeps codex from dirtying the real tree (it edits copies; ingest
-        # applies the emitted diff). PW_CODEX_WORKDIR, when set, is that seeded
+        # applies the emitted diff). PW_LLM_WORKDIR, when set, is that seeded
         # dir — ingest owns/cleans it and pre-populates the candidate pages so
         # codex can MODIFY existing entries (an empty root stalls it: it can't
         # find the file it's told to edit). Unset (e.g. the keyword pre-pass,
@@ -607,7 +690,7 @@ def complete_command(prompt: str, timeout: int = 60, *, model: str | None = None
         # ponytail: seed = candidate pages only; widen only if a diff legitimately
         # needs a page outside the candidate window (the expand loop covers that).
         # PW_LLM_MODEL pins the ingest/text model; unset → codex's own default.
-        seeded = _env("PW_CODEX_WORKDIR")
+        seeded = _llm_workdir()
         own = not (seeded and Path(seeded).is_dir())
         workdir = tempfile.mkdtemp(prefix="pw-codex-") if own else seeded
         argv = [_codex_bin(), *CODEX_ARGS]

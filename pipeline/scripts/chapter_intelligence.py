@@ -116,6 +116,7 @@ MODEL_IDENTITY_FIELDS = (
     "verbosity",
     "api_base_url",
     "command_fingerprint",
+    "binary_fingerprint",
     "codex_binary_fingerprint",
     "codex_config_fingerprint",
     "codex_automation_fingerprint",

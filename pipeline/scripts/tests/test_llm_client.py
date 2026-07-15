@@ -71,6 +71,17 @@ def _env_echo_codex() -> str:
     )
 
 
+def _fake_plain_cli() -> str:
+    return (
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "keys = ('PW_AUTH_TOKEN', 'TRANSCRIPT_REMOTE_TOKEN', 'PW_LLM_API_KEY', "
+        "'ANTHROPIC_API_KEY', 'GEMINI_API_KEY')\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read(), "
+        "'cwd': os.getcwd(), 'env': {key: os.environ.get(key) for key in keys}}))\n"
+    )
+
+
 def _silent_codex() -> str:
     return "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
 
@@ -437,6 +448,70 @@ class LlmClientTests(unittest.TestCase):
             self.assertIsNone(seen["PW_LLM_API_KEY"])
             self.assertEqual(seen["OPENAI_API_KEY"], "provider-secret")
             self.assertEqual(seen["CODEX_HOME"], env["CODEX_HOME"])
+
+    def test_claude_cli_alias_uses_safe_plain_text_argv_and_scrubbed_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            workdir = root / "workset"
+            bin_dir.mkdir()
+            workdir.mkdir()
+            write_executable(bin_dir / "claude", _fake_plain_cli())
+            env = {
+                "PW_LLM_PROVIDER": "claude",
+                "PW_LLM_MODEL": "sonnet",
+                "PW_LLM_WORKDIR": str(workdir),
+                "PW_AUTH_TOKEN": "app-secret",
+                "TRANSCRIPT_REMOTE_TOKEN": "transcript-secret",
+                "PW_LLM_API_KEY": "fallback-secret",
+                "ANTHROPIC_API_KEY": "claude-secret",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(llm_client.provider(), "claude-cli")
+                identity = llm_client.execution_identity()
+                seen = json.loads(llm_client.complete_command("hello", timeout=5))
+            self.assertEqual(seen["stdin"], "hello")
+            self.assertEqual(os.path.realpath(seen["cwd"]), os.path.realpath(workdir))
+            self.assertEqual(seen["argv"], [
+                "--safe-mode", "--print", "--output-format", "text",
+                "--no-session-persistence", "--permission-mode", "plan",
+                "--tools", "", "--model", "sonnet",
+            ])
+            self.assertIsNone(seen["env"]["PW_AUTH_TOKEN"])
+            self.assertIsNone(seen["env"]["TRANSCRIPT_REMOTE_TOKEN"])
+            self.assertIsNone(seen["env"]["PW_LLM_API_KEY"])
+            self.assertEqual(seen["env"]["ANTHROPIC_API_KEY"], "claude-secret")
+            self.assertRegex(identity["binary_fingerprint"], r"^[0-9a-f]{64}$")
+
+    def test_agy_cli_alias_honors_override_timeout_and_legacy_workdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            workdir = root / "legacy-workset"
+            bin_dir.mkdir()
+            workdir.mkdir()
+            write_executable(bin_dir / "agy", _fake_plain_cli())
+            env = {
+                "PW_LLM_PROVIDER": "agy-cli",
+                "PW_CODEX_WORKDIR": str(workdir),
+                "GEMINI_API_KEY": "agy-secret",
+                "PW_AUTH_TOKEN": "app-secret",
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(llm_client.provider(), "agy-cli")
+                seen = json.loads(llm_client.complete_command(
+                    "hello", timeout=7, model="flash"
+                ))
+            self.assertEqual(seen["stdin"], "hello")
+            self.assertEqual(os.path.realpath(seen["cwd"]), os.path.realpath(workdir))
+            self.assertEqual(seen["argv"], [
+                "--print", "--mode", "plan", "--sandbox",
+                "--print-timeout", "7s", "--model", "flash",
+            ])
+            self.assertIsNone(seen["env"]["PW_AUTH_TOKEN"])
+            self.assertEqual(seen["env"]["GEMINI_API_KEY"], "agy-secret")
 
     def test_codex_uses_pw_llm_model_when_set(self):
         with tempfile.TemporaryDirectory() as tmp:
