@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import shutil
 import sys
@@ -1227,6 +1228,37 @@ def extract_text_file(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+# Silence longer than this between segments opens a new paragraph.
+TRANSCRIPT_PARA_GAP_S = 2.0
+
+
+def extract_transcript_json(path: Path) -> str:
+    """Transcript-server JSON (`{segments: [{text, start, end, speaker, …}]}`,
+    the script_generation `-f json` format) → plain text. One line per segment;
+    a blank line (paragraph break) on speaker change or a silence gap >
+    TRANSCRIPT_PARA_GAP_S, so paragraph structure mirrors the audio. No `## `
+    headings are emitted — downstream treats a transcript as one whole unit.
+    Timestamps are NOT rendered here; the lang generator reads them from the
+    JSON directly to time-align sentences."""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    lines: list[str] = []
+    prev_speaker = None
+    prev_end: float | None = None
+    for seg in doc.get("segments") or []:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        start = seg.get("start")
+        gap = (start - prev_end) if (start is not None and prev_end is not None) else 0.0
+        if lines and (seg.get("speaker") != prev_speaker or gap > TRANSCRIPT_PARA_GAP_S):
+            lines.append("")
+        lines.append(text)
+        prev_speaker = seg.get("speaker")
+        end = seg.get("end")
+        prev_end = end if end is not None else prev_end
+    return "\n".join(lines) + "\n"
+
+
 def dispatch(source: str, *, write_assets: bool = False,
              source_id: str | None = None,
              base_url: str | None = None) -> str:
@@ -1248,6 +1280,9 @@ def dispatch(source: str, *, write_assets: bool = False,
     if write_assets and source_id is None:
         # Try to read source_id from the sidecar.
         source_id = _read_source_id(path)
+
+    if path.name.lower().endswith(".transcript.json"):
+        return extract_transcript_json(path)
 
     ext = path.suffix.lower()
     if ext == ".epub":

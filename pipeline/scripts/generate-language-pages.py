@@ -70,6 +70,11 @@ PROMPT_VERSION = "v5"  # v5: grammar explanations bilingual (English + PW_TRANSL
 TARGET_LANG = os.environ.get("PW_TRANSLATE_LANG", "Simplified Chinese")
 SOURCE_CHAR_LIMIT = 300_000
 LLM_TIMEOUT_S = 900
+# A chapter bigger than this is annotated in several LLM calls: one prompt
+# asking for 1600+ translations (a heading-less transcript arrives as ONE
+# "whole" chapter) exceeds what a single completion can return — the model
+# answers with a near-empty object and the page renders without annotations.
+BATCH_SENTS = int(os.environ.get("PW_LANG_BATCH_SENTS", "120"))
 WHOLE_LABEL = "whole"  # synthetic chapter for heading-less assets (transcripts)
 
 # fugashi pos1 values to DROP (function words, symbols, whitespace). Everything
@@ -236,13 +241,112 @@ def split_paragraphs(text: str) -> list[list[str]]:
     return [split_sentences_in(p) for p in paragraphs_of(text)]
 
 
-def build_prompt(sentences: list[str], words: list[dict], title: str, chapter: str) -> str:
-    sent_lines = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, 1))
+# ─── transcript timing (audio-synced reading pages) ─────────────────────────
+# A `<name>.transcript.json` asset (script_generation server output) carries
+# segment- and word-level timestamps. The sentence split derives from the same
+# segment text (via extract.py), so the non-whitespace char streams match 1:1
+# and each sentence can be mapped back to a [start, end] time range.
+
+
+def _segment_char_times(seg: dict) -> list[tuple[str, float, float]]:
+    """(char, t_start, t_end) for each non-whitespace char of one segment's
+    text. Word-level times when the segment carries aligned words (chars
+    matched greedily against the word stream; unmatched chars — punctuation the
+    aligner drops — inherit the previous word's end); segment-level otherwise."""
+    text = (seg.get("text") or "").strip()
+    s0 = float(seg.get("start") or 0.0)
+    s1 = float(seg.get("end") or s0)
+    words = seg.get("words") or []
+    wchars: list[tuple[str, float, float]] = []
+    last = s0
+    for w in words:
+        w0 = float(w["start"]) if w.get("start") is not None else last
+        w1 = float(w["end"]) if w.get("end") is not None else w0
+        wchars.extend((ch, w0, w1) for ch in (w.get("word") or "") if not ch.isspace())
+        last = w1
+    out: list[tuple[str, float, float]] = []
+    wi = 0
+    last = s0
+    for ch in text:
+        if ch.isspace():
+            continue
+        if not wchars:
+            out.append((ch, s0, s1))
+            continue
+        # ponytail: 3-char lookahead resync; enough for punctuation drift, a
+        # word stream that truly diverges from segment text degrades to t=last.
+        hit = next((j for j in range(wi, min(wi + 3, len(wchars)))
+                    if wchars[j][0] == ch), None)
+        if hit is None:
+            out.append((ch, last, last))
+        else:
+            _, t0, t1 = wchars[hit]
+            wi = hit + 1
+            last = t1
+            out.append((ch, t0, t1))
+    return out
+
+
+def align_sentence_times(doc: dict, per_chapter: list[tuple[str, dict]]) -> int:
+    """Mutate each sentence dict with `t0`/`t1` (seconds, 2 dp — byte-stable
+    output) aligned against the transcript's timestamps, walking sentences and
+    the char/time stream in lockstep. A bounded lookahead skips past any local
+    drift; sentences that match nothing stay untimed. Returns timed count."""
+    stream: list[tuple[str, float, float]] = []
+    for seg in doc.get("segments") or []:
+        stream.extend(_segment_char_times(seg))
+    p = 0
+    timed = 0
+    for _chap, data in per_chapter:
+        for sent in data["sentences"]:
+            t0 = t1 = None
+            total = matched = 0
+            for ch in sent["jp"]:
+                if ch.isspace():
+                    continue
+                total += 1
+                q = next((j for j in range(p, min(p + 40, len(stream)))
+                          if stream[j][0] == ch), None)
+                if q is None:
+                    continue
+                p = q + 1
+                matched += 1
+                if t0 is None:
+                    t0 = stream[q][1]
+                t1 = stream[q][2]
+            # A sparse match (e.g. punctuation only) would pin a bogus range;
+            # require most of the sentence to have matched before timing it.
+            if t0 is not None and matched * 2 >= total:
+                sent["t0"], sent["t1"] = round(t0, 2), round(t1, 2)
+                timed += 1
+    return timed
+
+
+def audio_src_for(asset: Path, doc: dict) -> str | None:
+    """Relative URL (from _reading/) of the audio blob under the gitignored
+    sources/.media/. fetch-transcript.py records the extension in meta.audio_ext
+    (checked first so the render is stable before the blob lands); a sibling
+    scan covers hand-placed audio. None → page renders without a player."""
+    stem = asset.name[: -len(".transcript.json")]
+    ext = ((doc.get("meta") or {}).get("audio_ext") or "").lstrip(".")
+    if not ext:
+        media = asset.parent / ".media"
+        found = sorted(media.glob(f"{stem}.*")) if media.is_dir() else []
+        if not found:
+            return None
+        ext = found[0].suffix.lstrip(".")
+    return f"../sources/.media/{stem}.{ext}"
+
+
+def build_prompt(sentences: list[str], words: list[dict], title: str, chapter: str,
+                 s_base: int = 1, w_base: int = 1) -> str:
+    sent_lines = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, s_base))
     # Number the words so the LLM keys meanings by INDEX, not lemma — two rows
     # can share a lemma (different POS/reading), so a lemma key would be
-    # ambiguous; the index is 1:1 with the fugashi word list.
+    # ambiguous; the index is 1:1 with the fugashi word list. s_base/w_base keep
+    # the numbering GLOBAL when a huge chapter is annotated in batches.
     lemma_lines = "\n".join(
-        f"{i}. {w['lemma']}（{w['reading']}）[{w['pos']}]" for i, w in enumerate(words, 1)
+        f"{i}. {w['lemma']}（{w['reading']}）[{w['pos']}]" for i, w in enumerate(words, w_base)
     )
     return f"""You are helping a learner study Japanese. Below is a chapter of
 Japanese text, split into NUMBERED sentences, plus a NUMBERED list of the
@@ -341,8 +445,66 @@ def validate(obj: dict, sentences: list[str], words: list[dict],
     return {"sentences": sents, "words": merged, "grammar_points": grammar}
 
 
+def annotate(sentences: list[str], words: list[dict], title: str, chapter: str,
+             jobs: int = 1, cache: tuple[str, str, int] | None = None) -> dict:
+    """LLM annotations for one chapter — a single call, or several batched
+    calls (global sentence/word numbering preserved) when the chapter exceeds
+    BATCH_SENTS. Word batches are sliced proportionally: content_words() lists
+    words in first-appearance order, so slice N roughly covers sentence slice N.
+    `cache` (source_id, sha, chapter idx) persists each parsed batch, so a
+    failed batch never throws away its finished siblings across a re-run."""
+    if len(sentences) <= BATCH_SENTS:
+        return dl.extract_json(dl.call_llm(
+            build_prompt(sentences, words, title, chapter), LLM_TIMEOUT_S))
+    spans = []
+    for lo in range(0, len(sentences), BATCH_SENTS):
+        hi = min(lo + BATCH_SENTS, len(sentences))
+        spans.append((lo, hi, len(words) * lo // len(sentences),
+                      len(words) * hi // len(sentences)))
+
+    def one(span: tuple[int, int, int, int]) -> dict:
+        lo, hi, wlo, whi = span
+        bsuffix = f"{cache[2]:02d}-b{lo:04d}" if cache else None
+        if cache:
+            hit = dl.load_cache(CACHE_DIR, PROMPT_VERSION, cache[0], cache[1], bsuffix)
+            if hit is not None:
+                return hit
+        prompt = build_prompt(sentences[lo:hi], words[wlo:whi], title,
+                              f"{chapter} · 文{lo + 1}–{hi}", s_base=lo + 1, w_base=wlo + 1)
+        last = ""
+        for attempt in (1, 2):  # one retry: a flaky completion shouldn't sink 15 batches
+            raw = dl.call_llm(prompt, LLM_TIMEOUT_S)
+            try:
+                obj = dl.extract_json(raw)
+            except ValueError:
+                last = raw.strip()[:400]
+                print(f"  batch 文{lo + 1}–{hi}: unparseable LLM output "
+                      f"(attempt {attempt}/2)", file=sys.stderr)
+                continue
+            if cache:
+                dl.save_cache(CACHE_DIR, PROMPT_VERSION, cache[0], cache[1], obj, bsuffix)
+            return obj
+        raise RuntimeError(f"batch 文{lo + 1}–{hi}: no parseable JSON after 2 "
+                           f"attempts; last output started: {last!r}")
+
+    print(f"  chapter {chapter!r}: {len(sentences)} sentences → "
+          f"{len(spans)} LLM batches (jobs={jobs})", file=sys.stderr)
+    if jobs > 1:
+        # ponytail: nested pool if a multi-chapter source also has huge chapters
+        # (jobs² LLM calls in flight); today only 1-chapter transcripts batch.
+        with ThreadPoolExecutor(max_workers=min(jobs, len(spans))) as ex:
+            objs = list(ex.map(one, spans))
+    else:
+        objs = [one(s) for s in spans]
+    merged: dict = {"sentences": [], "words": [], "grammar_points": []}
+    for o in objs:
+        for k in merged:
+            merged[k] += o.get(k) or []
+    return merged
+
+
 def chapter_data(meta: dict, idx: int, chapter: str, section: str | None,
-                 refresh: bool, dry_run: bool) -> dict:
+                 refresh: bool, dry_run: bool, jobs: int = 1) -> dict:
     """fugashi + LLM (cached) for one chapter. Returns {sentences, words,
     grammar_points}. The cache suffix carries the chapter ORDINAL `idx` (stable:
     the source sha in the key already pins the chapter set/order), so two
@@ -364,8 +526,15 @@ def chapter_data(meta: dict, idx: int, chapter: str, section: str | None,
     paras = split_paragraphs(text)
     sentences = [s for p in paras for s in p]  # flat for prompt/word numbering
     words = content_words(text)
-    raw = dl.call_llm(build_prompt(sentences, words, meta["title"], chapter), LLM_TIMEOUT_S)
-    data = validate(dl.extract_json(raw), sentences, words, paras)
+    obj = annotate(sentences, words, meta["title"], chapter, jobs,
+                   cache=None if refresh else (meta["source_id"], sha, idx))
+    data = validate(obj, sentences, words, paras)
+    # An all-empty merge means the LLM returned nothing usable (e.g. a refusal
+    # on an oversized prompt). Caching it would poison every future re-run with
+    # a silently annotation-less page — fail loudly instead.
+    if not any(s["en"] for s in data["sentences"]):
+        raise RuntimeError(f"chapter {chapter!r}: LLM returned no usable "
+                           f"annotations for {len(sentences)} sentences — not caching")
     dl.save_cache(CACHE_DIR, PROMPT_VERSION, meta["source_id"], sha, data, suffix)
     return data
 
@@ -420,7 +589,8 @@ def render_tokens(jp: str, meanings: dict[str, dict], seen: set[str]) -> str:
 
 def render_reading_html(display: str, source_id: str,
                         per_chapter: list[tuple[str, dict]],
-                        meanings: dict[str, dict]) -> str:
+                        meanings: dict[str, dict],
+                        audio_src: str | None = None) -> str:
     seen: set[str] = set()
     chapters: list[str] = []
     for chap, data in per_chapter:
@@ -432,8 +602,9 @@ def render_reading_html(display: str, source_id: str,
             toks = render_tokens(sent["jp"], meanings, seen)
             g_here = by_s.get(si, [])
             en = f'<div class="en">{esc(sent["en"])}</div>' if sent.get("en") else ""
+            t = f' data-t="{sent["t0"]},{sent["t1"]}"' if "t0" in sent else ""
             sents.append(
-                f'<div class="sent" data-g=\'{att(json.dumps(g_here, ensure_ascii=False))}\'>'
+                f'<div class="sent"{t} data-g=\'{att(json.dumps(g_here, ensure_ascii=False))}\'>'
                 f'<div class="jp">{toks}</div>{en}</div>'
             )
         gitems = "".join(
@@ -451,9 +622,12 @@ def render_reading_html(display: str, source_id: str,
             f'<!-- {cite(source_id, chap)} -->\n'
             + "".join(sents) + details + "</section>"
         )
+    audio = (f'<div id="ab"><audio id="au" controls preload="metadata" '
+             f'src="{att(audio_src)}"></audio></div>' if audio_src else "")
     return (PAGE
             .replace("__TITLE__", esc(display))
             .replace("__SRC__", esc(source_cite(source_id)))
+            .replace("__AUDIO__", audio)
             .replace("__CHAPTERS__", "\n".join(chapters)))
 
 
@@ -478,6 +652,10 @@ h1 { font-size: 1.5rem; line-height: 1.4; margin: 0 0 .3rem; }
 .chap h2 { font-size: 1.15rem; border-bottom: 1px solid #e6e1d5; padding-bottom: .3rem; }
 .sent { padding: .5rem .6rem; margin: .1rem -.6rem; border-radius: .4rem; cursor: pointer; }
 .sent:hover { background: #f2efe6; }
+.sent.playing { background: #efe9d4; }
+#ab { position: sticky; top: 0; z-index: 2; background: #fbfaf7;
+  padding: .6rem 0; margin-bottom: 1rem; }
+#ab audio { width: 100%; display: block; }
 .jp { font-size: 1.35rem; }
 ruby rt { font-size: .55em; color: #9a8f78; font-family: system-ui, sans-serif; font-weight: 400; }
 .w { cursor: pointer; border-bottom: 1px dotted #c3b9a3; }
@@ -502,6 +680,8 @@ ruby rt { font-size: .55em; color: #9a8f78; font-family: system-ui, sans-serif; 
   body { color: #e8e4da; background: #16150f; }
   .chap h2 { border-color: #35322a; }
   .sent:hover { background: #23211a; }
+  .sent.playing { background: #2a2618; }
+  #ab { background: #16150f; }
   ruby rt { color: #8f866f; }
   .w { border-bottom-color: #55503f; }
   .w:hover { background: #2c2920; }
@@ -514,11 +694,32 @@ ruby rt { font-size: .55em; color: #9a8f78; font-family: system-ui, sans-serif; 
 <body><main>
 <h1>__TITLE__</h1>
 <div class="hint">Tap a <b>word</b> for its meaning · tap a <b>sentence</b> for grammar · <span style="background:#fff2b8;color:#000">highlighted</span> = first time it appears</div>
+__AUDIO__
 __CHAPTERS__
 </main>
 <div id="p"><div id="pb"></div></div>
 <script>
 var panel = document.getElementById('p'), pb = document.getElementById('pb');
+var audio = document.getElementById('au');
+if (audio) {
+  var timed = [].slice.call(document.querySelectorAll('.sent[data-t]'));
+  var cur = -1;
+  audio.addEventListener('timeupdate', function(){
+    var t = audio.currentTime, i = -1;
+    for (var k = 0; k < timed.length; k++) {
+      if (parseFloat(timed[k].dataset.t) <= t) i = k; else break;
+    }
+    if (i === cur) return;
+    if (cur >= 0) timed[cur].classList.remove('playing');
+    cur = i;
+    if (i >= 0) {
+      timed[i].classList.add('playing');
+      var r = timed[i].getBoundingClientRect();
+      if (r.top > -200 && r.bottom < innerHeight + 200)  // follow only if reading along
+        timed[i].scrollIntoView({block: 'center', behavior: 'smooth'});
+    }
+  });
+}
 function E(s){ return (s+'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function show(h){ pb.innerHTML = h; panel.classList.add('on'); }
 document.addEventListener('click', function(e){
@@ -530,6 +731,7 @@ document.addEventListener('click', function(e){
   }
   var s = e.target.closest('.sent');
   if (s) {
+    if (audio && s.dataset.t) audio.currentTime = parseFloat(s.dataset.t);
     var g = []; try { g = JSON.parse(s.dataset.g || '[]'); } catch (_) {}
     show(g.length
       ? g.map(function(x){ return '<b>' + E(x.pattern) + '</b><div>' + E(x.explanation) + '</div>' + (x.explanation_tr ? '<div>' + E(x.explanation_tr) + '</div>' : '') +
@@ -577,7 +779,8 @@ def tokenize_json(jp: str, meanings: dict[str, dict], seen: set[str]) -> list[di
 
 def build_reading_json(display: str, source_id: str,
                        per_chapter: list[tuple[str, dict]],
-                       meanings: dict[str, dict]) -> dict:
+                       meanings: dict[str, dict],
+                       audio_src: str | None = None) -> dict:
     seen: set[str] = set()
     chapters = []
     for chap, data in per_chapter:
@@ -596,6 +799,7 @@ def build_reading_json(display: str, source_id: str,
             para_map[pi].append({
                 "jp": sent["jp"],
                 "en": sent.get("en", ""),
+                **({"start": sent["t0"], "end": sent["t1"]} if "t0" in sent else {}),
                 "tokens": tokenize_json(sent["jp"], meanings, seen),
                 "grammar": by_s.get(si, []),
             })
@@ -605,7 +809,9 @@ def build_reading_json(display: str, source_id: str,
             "grammar": data["grammar_points"],
         })
     return {"schema": "reading/2", "source_id": source_id, "title": display,
-            "lang": "ja", "prompt_version": PROMPT_VERSION, "chapters": chapters}
+            "lang": "ja", "prompt_version": PROMPT_VERSION,
+            **({"audio": audio_src} if audio_src else {}),
+            "chapters": chapters}
 
 
 def generate(source_id: str, refresh: bool, dry_run: bool, jobs: int = 1) -> list[Path]:
@@ -636,14 +842,19 @@ def generate(source_id: str, refresh: bool, dry_run: bool, jobs: int = 1) -> lis
     # Per-chapter fugashi + LLM (cached), in document order. Each chapter is
     # independent until the final render/log pass, so callers can opt into a
     # small thread pool without changing output order.
-    def load_one(item: tuple[int, tuple[str, str | None]]) -> tuple[str, dict]:
-        idx, (label, section) = item
-        data = chapter_data(meta, idx, label, section, refresh, dry_run)
-        return chapter_key(label), data
-
     per_chapter: list[tuple[str, dict]] = []
     work = list(enumerate(chapters, start=1))
-    jobs = max(1, min(jobs, len(work) or 1))
+    chapter_jobs = max(1, min(jobs, len(work) or 1))
+    # Leftover parallelism goes to within-chapter LLM batches (a 1-chapter
+    # transcript gets the whole budget; many small chapters get none).
+    batch_jobs = max(1, jobs // chapter_jobs)
+
+    def load_one(item: tuple[int, tuple[str, str | None]]) -> tuple[str, dict]:
+        idx, (label, section) = item
+        data = chapter_data(meta, idx, label, section, refresh, dry_run, batch_jobs)
+        return chapter_key(label), data
+
+    jobs = chapter_jobs
     if jobs == 1:
         for item in work:
             per_chapter.append(load_one(item))
@@ -663,13 +874,22 @@ def generate(source_id: str, refresh: bool, dry_run: bool, jobs: int = 1) -> lis
         for w in data["words"]:
             meanings.setdefault(w["key"], w)
 
+    # Timed transcript asset → per-sentence audio timestamps + player.
+    audio_src = None
+    if meta["asset"].name.endswith(".transcript.json"):
+        doc = json.loads(meta["asset"].read_text(encoding="utf-8"))
+        timed = align_sentence_times(doc, per_chapter)
+        audio_src = audio_src_for(meta["asset"], doc)
+        print(f"  timed {timed} sentences against the transcript"
+              + (f" (audio: {audio_src})" if audio_src else " (no audio blob)"))
+
     # Per-source slug carries a short source_id so two DISTINCT sources sharing a
     # title (e.g. a re-downloaded edition) can't overwrite each other's page.
     slug = f"{dl.fs_safe_slug(dl.source_slug(meta['title'], source_id), fallback=source_id)}-{source_id[:8]}"
     display = dl.clean_title(meta["title"])
     path = READING_DIR / f"{slug}.html"
 
-    html = render_reading_html(display, source_id, per_chapter, meanings)
+    html = render_reading_html(display, source_id, per_chapter, meanings, audio_src)
     wrote = dl.atomic_write(path, html, dry_run)
     rendered = [path]
 
@@ -677,7 +897,7 @@ def generate(source_id: str, refresh: bool, dry_run: bool, jobs: int = 1) -> lis
     # Miraa-style reader + word bank). Byte-stable like the HTML, so a no-change
     # re-run stays a no-op.
     json_path = READING_DIR / f"{slug}.reading.json"
-    reading = build_reading_json(display, source_id, per_chapter, meanings)
+    reading = build_reading_json(display, source_id, per_chapter, meanings, audio_src)
     dl.atomic_write(json_path, json.dumps(reading, ensure_ascii=False) + "\n", dry_run)
     rendered.append(json_path)
 

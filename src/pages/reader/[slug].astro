@@ -28,6 +28,8 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
     #rd.trans-tap .sent.reveal .en { display: block; }
     #rd .sent { padding: 9px 12px; margin: 2px -12px; border-radius: 10px; }
     #rd .sent:hover { background: var(--bg-1); }
+    #rd .sent.playing { background: color-mix(in srgb, var(--amber) 12%, var(--bg-1)); box-shadow: inset 2px 0 0 var(--amber); }
+    #rd-audio { flex-basis: 100%; width: 100%; height: 34px; }
     #rd .word:hover { filter: brightness(1.35); }
     #rd-toolbar button { font-family: var(--sans); }
     /* ponytail: native offscreen virtualization — browser skips layout/paint for paragraphs out of view */
@@ -73,6 +75,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             <span style="font-size:12px;font-family:var(--mono);color:var(--amber)"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:color-mix(in srgb,var(--amber) 60%,transparent);border:1px solid var(--amber);margin-right:5px;vertical-align:middle"></span><span id="c-new">0</span> <span data-i18n="reader.new">{t('reader.new')}</span></span>
             <span style="font-size:12px;font-family:var(--mono);color:var(--sage)">★ <span id="c-saved">0</span> <span data-i18n="reader.saved">{t('reader.saved')}</span></span>
           </div>
+          {reading.audio && <audio id="rd-audio" controls preload="metadata"></audio>}
         </div>
 
         <div id="pos-legend" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:22px;align-items:center">
@@ -134,6 +137,8 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           }
           function esc(s){return (s+'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
           function att(s){return esc(s).replace(/"/g,'&quot;');}
+          const tokenReading = (t) => ((t.key || '').split('\x1f')[1] || t.rt || t.t)
+            .replace(/[\u30a1-\u30f6]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
 
           // POS legend
           const legend = document.getElementById('pos-legend');
@@ -148,6 +153,31 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
           const rd = document.getElementById('rd');
           const sheet = document.getElementById('rd-sheet');
           const sheetBody = document.getElementById('sheet-body');
+
+          // Timed transcript → synced player. The blob lives in the gitignored
+          // lang/sources/.media/ (not in the Astro build), served by the backend.
+          const audio = document.getElementById('rd-audio');
+          let timedEls = [], lastPlaying = null;  // refreshed by render()
+          if (audio) {
+            audio.src = `${BACKEND}/media/${encodeURIComponent((reading.audio || '').split('/').pop())}`;
+            audio.addEventListener('timeupdate', () => {
+              const t = audio.currentTime;
+              let hit = null;
+              for (const el of timedEls) {
+                const [a, b] = el.dataset.t.split(',').map(Number);
+                if (a > t) break;
+                if (t < b + 0.35) hit = el;
+              }
+              if (hit === lastPlaying) return;
+              lastPlaying?.classList.remove('playing');
+              hit?.classList.add('playing');
+              lastPlaying = hit;
+              if (hit) { // follow along only if the reader is near the playhead
+                const r = hit.getBoundingClientRect();
+                if (r.top > -200 && r.bottom < innerHeight + 200) hit.scrollIntoView({ block: 'center', behavior: 'smooth' });
+              }
+            });
+          }
 
           async function loadKnown() {
             try { const r = await fetch(`${BACKEND}/vocab?kind=word`, { headers: H }); if (r.ok) (await r.json()).forEach((i) => saved.add(i.lemma)); } catch {}
@@ -168,7 +198,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             const ruby = t.rt ? `<ruby>${esc(t.t)}<rt>${esc(t.rt)}</rt></ruby>` : esc(t.t);
             if (!t.w || !t.m) return ruby;
             const isNew = t.new && !saved.has(t.w);
-            return `<span class="word" data-w="${att(t.w)}" data-r="${att(t.rt || t.t)}" data-m="${att(t.m)}" data-n="${att(t.n || '')}" data-p="${att(t.pos || '')}" style="${posStyle(t.pos, isNew)}">${ruby}</span>`;
+            return `<span class="word" data-w="${att(t.w)}" data-r="${att(tokenReading(t))}" data-m="${att(t.m)}" data-n="${att(t.n || '')}" data-p="${att(t.pos || '')}" style="${posStyle(t.pos, isNew)}">${ruby}</span>`;
           }
 
           function countNew() {
@@ -191,6 +221,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
                 for (const s of para.sentences) {
                   const tokens = tokensOf(s);
                   const el = document.createElement('div'); el.className = 'sent';
+                  if (audio && s.start != null) el.dataset.t = s.start + ',' + (s.end ?? s.start);
                   const jp = document.createElement('div'); jp.className = 'jp'; jp.style.fontSize = fontSize + 'px';
                   jp.innerHTML = tokens.map(tokenHtml).join('');
                   el.appendChild(jp);
@@ -205,7 +236,7 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
                   }
                   const en = document.createElement('div'); en.className = 'en'; en.textContent = s.en || ''; en.dataset.jp = s.jp || s.text || tokens.map((t) => t.t || '').join('');
                   el.appendChild(en);
-                  el.addEventListener('click', () => onSentence(el, en));
+                  el.addEventListener('click', (e) => onSentence(el, en, e));
                   pEl.appendChild(el);
                 }
                 rd.appendChild(pEl);
@@ -214,6 +245,8 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             updateNewCount();
             applyModes();
             updatePager();
+            timedEls = audio ? [...rd.querySelectorAll('.sent[data-t]')] : [];
+            lastPlaying = null;
           }
 
           function updatePager() {
@@ -229,7 +262,12 @@ const readingPayload = reading ? JSON.stringify({ reading, sourceId: lang.id }).
             rd.className = (furi ? '' : 'furi-off') + (trans === 'hide' ? ' trans-hide' : '') + (trans === 'tap' ? ' trans-tap' : '');
           }
 
-          async function onSentence(el, en) {
+          async function onSentence(el, en, e) {
+            // Timed transcript sentence → seek the player (word taps excluded:
+            // saving vocab shouldn't yank the audio position around).
+            if (audio && el.dataset.t && !e?.target?.closest?.('.word')) {
+              audio.currentTime = parseFloat(el.dataset.t);
+            }
             if (trans === 'tap') el.classList.toggle('reveal');
             if (!en.textContent) {
               en.textContent = '…';

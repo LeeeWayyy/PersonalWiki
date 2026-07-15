@@ -2014,6 +2014,15 @@ def main() -> int:
             die(f"--profile lang does not support {', '.join(forbidden)} "
                 "(v1 = text/document sources only, generator owns chapter slicing; "
                 "audio/video transcription is v2)")
+        # A URL under --profile lang would be web-scraped as an HTML page (the
+        # source-identity default), turning a YouTube link into 700KB of page
+        # chrome tokenized as "Japanese". Media URLs go through the transcription
+        # front door instead; refuse the scrape so it can't silently commit junk.
+        if _is_http_url(args.input):
+            die("--profile lang does not ingest URLs directly (a YouTube/media URL "
+                "would be scraped as a web page, not transcribed). Run "
+                "scripts/fetch-transcript.py <url> to transcribe first; it feeds the "
+                "resulting .transcript.json back into this path.")
         for d in (VAULT_ROOT, VAULT_ROOT / "sources", VAULT_ROOT / ".wiki"):
             d.mkdir(parents=True, exist_ok=True)
 

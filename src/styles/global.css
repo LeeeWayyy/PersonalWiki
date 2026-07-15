@@ -489,7 +489,7 @@ pre.mermaid .edgePath path, pre.mermaid .flowchart-link { stroke: var(--border-s
 .rd-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; }
 .rd-layout > #rd { border-right: 1px solid var(--border); padding-right: 28px; }
 /* top clears the sticky #rd-toolbar (top:52px) so the tabs don't sit under it */
-.rd-rail { position: sticky; top: 112px; align-self: start; padding: 16px 0 20px 22px; background: linear-gradient(180deg, #1a1610, #151109); border-radius: 0 0 14px 0; }
+.rd-rail { position: sticky; top: 112px; align-self: start; max-height: calc(100vh - 112px); overflow-y: auto; padding: 16px 0 20px 22px; background: linear-gradient(180deg, #1a1610, #151109); border-radius: 0 0 14px 0; }
 .rd-tabs { display: flex; gap: 3px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 9px; padding: 3px; margin-bottom: 14px; }
 .rd-tabs button { flex: 1; border: 1px solid transparent; background: transparent; color: var(--text-3); border-radius: 7px; padding: 6px 0; font-size: 12px; cursor: pointer; font-family: var(--sans); }
 .rd-tabs button.on { background: var(--bg-3); color: var(--text); border-color: var(--border-strong); }

@@ -25,6 +25,7 @@ import uuid
 import asyncio
 import logging
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -47,6 +48,9 @@ from vendor_content import init_git_snapshot, init_empty_content  # noqa: E402
 CONTENT_DIR = app_config.content_dir(REPO).expanduser().resolve(strict=False)      # local wiki folder
 DEFAULT_INGEST_SCRIPT = REPO / "pipeline" / "ingest.py"
 INGEST_CMD = os.environ.get("INGEST_CMD", f"python3 {shlex.quote(str(DEFAULT_INGEST_SCRIPT))}")
+# Lang ingest of a media URL transcribes first (ASR via the transcript server),
+# then feeds the resulting .transcript.json into ingest.py itself.
+FETCH_TRANSCRIPT_SCRIPT = REPO / "pipeline" / "scripts" / "fetch-transcript.py"
 REBUILD_CMD = os.environ.get("REBUILD_CMD", "")  # e.g. "npm --prefix /path/to/personal_wiki run build"
 JOB_TIMEOUT_S = int(os.environ.get("PW_INGEST_IDLE_TIMEOUT_S", "2100"))
 PROCESS_CLEANUP_TIMEOUT_S = 10
@@ -338,8 +342,16 @@ def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
 
 
 def _build_argv(target: str, options: dict) -> list[str]:
-    argv = shlex.split(INGEST_CMD)
     kind = (options or {}).get("kind", "auto")
+    # A media URL under lang must be transcribed, not web-scraped. Route it
+    # through fetch-transcript.py (ASR → .transcript.json → ingest.py). It writes
+    # its intermediates to a temp dir so nothing lands in the content repo; the
+    # audio blob it produces is copied into the gitignored lang/sources/.media/.
+    if kind == "lang" and urlparse(target).scheme:
+        out_dir = tempfile.mkdtemp(prefix="pw-transcript-")
+        return ["python3", str(FETCH_TRANSCRIPT_SCRIPT), target, "--out", out_dir]
+
+    argv = shlex.split(INGEST_CMD)
     if kind == "lang":
         argv += ["--profile", "lang"]
     else:

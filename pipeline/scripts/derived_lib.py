@@ -70,7 +70,8 @@ def find_sources(sources_dir: Path) -> dict[str, dict]:
 def clean_title(title: str) -> str:
     """Strip the ingest date prefix and asset extension for display."""
     s = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", title.strip())
-    s = re.sub(r"\.(epub|mobi|azw3?|pdf|html?|txt|md)$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\.(epub|mobi|azw3?|pdf|html?|txt|md|transcript\.json)$", "", s,
+               flags=re.IGNORECASE)
     return s.strip() or title
 
 

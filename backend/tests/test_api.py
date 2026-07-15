@@ -358,6 +358,25 @@ def test_build_argv_leaves_document_chaptering_to_ingest():
     assert argv("/stage/book.epub", kind="wiki")[-1] == "/stage/book.epub"
 
 
+def test_build_argv_routes_lang_url_through_fetch_transcript():
+    from app import ingest_runner as ir
+
+    # A media URL under lang must be transcribed, not web-scraped: route to
+    # fetch-transcript.py (ASR → .transcript.json → ingest.py), never ingest.py
+    # directly on the URL (which would scrape the page as HTML).
+    url_argv = ir._build_argv("https://youtube.com/watch?v=x", {"kind": "lang"})
+    assert url_argv[0] == "python3"
+    assert url_argv[1].endswith("fetch-transcript.py")
+    assert url_argv[2] == "https://youtube.com/watch?v=x"
+    assert "--out" in url_argv
+    assert "--profile" not in url_argv  # not the scrape path
+
+    # A local transcript file (what fetch-transcript feeds back) still goes
+    # straight to the lang generator.
+    file_argv = ir._build_argv("/stage/vid.transcript.json", {"kind": "lang"})
+    assert file_argv[-3:] == ["--profile", "lang", "/stage/vid.transcript.json"]
+
+
 def test_preflight_is_profile_aware_for_lang(client, auth, content_dir):
     dirty = content_dir / "lang" / "scratch.tmp"
     reading = content_dir / "lang" / "_reading" / "partial.md"
