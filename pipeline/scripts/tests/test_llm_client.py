@@ -76,7 +76,7 @@ def _fake_plain_cli() -> str:
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
         "keys = ('PW_AUTH_TOKEN', 'TRANSCRIPT_REMOTE_TOKEN', 'PW_LLM_API_KEY', "
-        "'ANTHROPIC_API_KEY', 'GEMINI_API_KEY')\n"
+        "'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'GEMINI_API_KEY')\n"
         "print(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read(), "
         "'cwd': os.getcwd(), 'env': {key: os.environ.get(key) for key in keys}}))\n"
     )
@@ -465,6 +465,7 @@ class LlmClientTests(unittest.TestCase):
                 "TRANSCRIPT_REMOTE_TOKEN": "transcript-secret",
                 "PW_LLM_API_KEY": "fallback-secret",
                 "ANTHROPIC_API_KEY": "claude-secret",
+                "ANTHROPIC_AUTH_TOKEN": "claude-token",
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             }
             with patch.dict(os.environ, env, clear=True):
@@ -482,6 +483,7 @@ class LlmClientTests(unittest.TestCase):
             self.assertIsNone(seen["env"]["TRANSCRIPT_REMOTE_TOKEN"])
             self.assertIsNone(seen["env"]["PW_LLM_API_KEY"])
             self.assertEqual(seen["env"]["ANTHROPIC_API_KEY"], "claude-secret")
+            self.assertEqual(seen["env"]["ANTHROPIC_AUTH_TOKEN"], "claude-token")
             self.assertRegex(identity["binary_fingerprint"], r"^[0-9a-f]{64}$")
 
     def test_agy_cli_alias_honors_override_timeout_and_legacy_workdir(self):
