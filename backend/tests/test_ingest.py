@@ -61,7 +61,7 @@ def test_build_argv_routes_lang_url_through_fetch_transcript():
     # fetch-transcript.py (ASR → .transcript.json → ingest.py), never ingest.py
     # directly on the URL (which would scrape the page as HTML).
     url_argv = ir._build_argv("https://youtube.com/watch?v=x", {"kind": "lang"})
-    assert url_argv[0] == "python3"
+    assert url_argv[0] == sys.executable
     assert url_argv[1].endswith("fetch-transcript.py")
     assert url_argv[2] == "https://youtube.com/watch?v=x"
     assert "--out" in url_argv

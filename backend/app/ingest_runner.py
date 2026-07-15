@@ -47,7 +47,10 @@ from vendor_content import init_git_snapshot, init_empty_content  # noqa: E402
 
 CONTENT_DIR = app_config.content_dir(REPO).expanduser().resolve(strict=False)      # local wiki folder
 DEFAULT_INGEST_SCRIPT = REPO / "pipeline" / "ingest.py"
-INGEST_CMD = os.environ.get("INGEST_CMD", f"python3 {shlex.quote(str(DEFAULT_INGEST_SCRIPT))}")
+INGEST_CMD = os.environ.get(
+    "INGEST_CMD",
+    shlex.join([sys.executable, str(DEFAULT_INGEST_SCRIPT)]),
+)
 # Lang ingest of a media URL transcribes first (ASR via the transcript server),
 # then feeds the resulting .transcript.json into ingest.py itself.
 FETCH_TRANSCRIPT_SCRIPT = REPO / "pipeline" / "scripts" / "fetch-transcript.py"
@@ -286,7 +289,7 @@ def _build_argv(target: str, options: dict) -> list[str]:
     # audio blob it produces is copied into the gitignored lang/sources/.media/.
     if kind == "lang" and urlparse(target).scheme:
         out_dir = tempfile.mkdtemp(prefix="pw-transcript-")
-        return ["python3", str(FETCH_TRANSCRIPT_SCRIPT), target, "--out", out_dir]
+        return [sys.executable, str(FETCH_TRANSCRIPT_SCRIPT), target, "--out", out_dir]
 
     argv = shlex.split(INGEST_CMD)
     if kind == "lang":

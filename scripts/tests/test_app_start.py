@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,6 +34,15 @@ class AppStartTests(unittest.TestCase):
         self.assertTrue(app_start.node_version_ok((22, 12)))
         self.assertTrue(app_start.node_version_ok((23, 0)))
         self.assertFalse(app_start.node_version_ok((22, 11)))
+
+    def test_select_python_skips_incompatible_default(self):
+        versions = {"/python3": (3, 9), "/python3.11": (3, 11)}
+        with patch.object(app_start.sys, "executable", "/python3"), patch.object(
+            app_start.shutil,
+            "which",
+            side_effect=lambda name: name if name in versions else f"/{name}" if f"/{name}" in versions else None,
+        ), patch.object(app_start, "python_version", side_effect=lambda name, _env: versions.get(name)):
+            self.assertEqual(app_start.select_python({}), "/python3.11")
 
     def test_build_config_loads_env_and_resolves_content(self):
         with tempfile.TemporaryDirectory() as tmp:

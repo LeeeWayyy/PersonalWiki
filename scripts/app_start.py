@@ -26,6 +26,7 @@ import app_config
 
 ROOT = Path(__file__).resolve().parent.parent
 MIN_NODE = (22, 12)
+MIN_PYTHON = (3, 11)
 TRUTHY = {"1", "true", "yes", "on"}
 FALSY = {"0", "false", "no", "off"}
 
@@ -71,6 +72,41 @@ def parse_node_version(value: str) -> tuple[int, int]:
 
 def node_version_ok(version: tuple[int, int]) -> bool:
     return version >= MIN_NODE
+
+
+def python_version(executable: str, env: dict[str, str] | None = None) -> tuple[int, int] | None:
+    try:
+        result = subprocess.run(
+            [executable, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        major, minor = result.stdout.strip().split(".", 1)
+        return (int(major), int(minor)) if result.returncode == 0 else None
+    except (OSError, ValueError):
+        return None
+
+
+def select_python(env: dict[str, str]) -> str:
+    candidates = [
+        env.get("PYTHON"),
+        sys.executable,
+        *(f"python3.{minor}" for minor in range(14, 10, -1)),
+        "python3",
+        "python",
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = shutil.which(candidate) if candidate else None
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        version = python_version(resolved, env)
+        if version and version >= MIN_PYTHON:
+            return resolved
+    raise AppStartError("Python 3.11+ is required; install python@3.11 or set PYTHON to a compatible interpreter")
 
 
 def build_config(
@@ -158,13 +194,20 @@ def _venv_python(root: Path) -> Path:
     return root / "backend" / ".venv" / "bin" / "python"
 
 
-def ensure_backend_deps(config: StartConfig, log: Callable[[str], None] = _log_default) -> Path:
+def ensure_backend_deps(
+    config: StartConfig,
+    base_python: str,
+    log: Callable[[str], None] = _log_default,
+) -> Path:
     backend_dir = config.root / "backend"
     venv_dir = backend_dir / ".venv"
     python = _venv_python(config.root)
+    if python.exists() and (python_version(str(python), config.env) or (0, 0)) < MIN_PYTHON:
+        log("recreating backend virtualenv with Python 3.11+")
+        shutil.rmtree(venv_dir)
     if not python.exists():
         log("creating backend virtualenv")
-        _run_checked([sys.executable, "-m", "venv", str(venv_dir)], backend_dir, config.env, "backend venv setup")
+        _run_checked([base_python, "-m", "venv", str(venv_dir)], backend_dir, config.env, "backend venv setup")
 
     probe = subprocess.run(
         [str(python), "-c", "import uvicorn, fastapi, multipart"],
@@ -327,9 +370,10 @@ def start_app(config: StartConfig, log: Callable[[str], None] = _log_default) ->
     except ValueError:
         pass  # not on the main thread (e.g. a test harness) — nothing to install
 
+    base_python = select_python(config.env)
     _node, npm = ensure_node(config.env)
     ensure_site_deps(config, npm, log)
-    backend_python = ensure_backend_deps(config, log)
+    backend_python = ensure_backend_deps(config, base_python, log)
 
     free_port(config.backend_host, config.backend_port, "app", config.kill_ports, log)
     if config.mode == "dev":

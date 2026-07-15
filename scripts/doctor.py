@@ -34,8 +34,14 @@ def _run(cmd: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False)
 
 
-def _python_bin() -> str:
-    return os.environ.get("PYTHON") or shutil.which("python3") or shutil.which("python") or ""
+def _python_bin(root: Path, env: dict[str, str]) -> str:
+    venv_python = app_start._venv_python(root)
+    if venv_python.exists() and (app_start.python_version(str(venv_python), env) or (0, 0)) >= app_start.MIN_PYTHON:
+        return str(venv_python)
+    try:
+        return app_start.select_python(env)
+    except app_start.AppStartError:
+        return ""
 
 
 def _load_env(root: Path) -> dict[str, str]:
@@ -70,7 +76,7 @@ def run_doctor(root: Path = ROOT) -> int:
     else:
         reporter.fail("npm is not installed")
 
-    py = _python_bin()
+    py = _python_bin(root, env)
     if py:
         version = _run([py, "--version"], root).stdout.strip()
         if subprocess.run(
