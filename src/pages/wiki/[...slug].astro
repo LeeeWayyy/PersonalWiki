@@ -99,7 +99,7 @@ const opCards = pages
     <div class="gph-overlay" id="graph-overlay" hidden>
       <div class="gph-backdrop" data-gph-close></div>
       <div class="gph-panel"></div>
-      <script type="application/json" id="graph-data" set:html={graphJson}></script>
+      <script is:inline type="application/json" id="graph-data" set:html={graphJson}></script>
     </div>
   ) : null}
 
