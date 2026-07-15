@@ -69,6 +69,8 @@ jobs:
         run: pip install beautifulsoup4
       - name: Run pipeline Python tests
         run: python -m unittest discover -s pipeline/scripts/tests -p 'test_*.py'
+      - name: Run application script tests
+        run: python -m unittest discover -s scripts/tests -p 'test_*.py'
       - name: Run the pipeline shell suite
         run: |
           fail=0
