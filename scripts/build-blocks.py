@@ -1,4 +1,11 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pypdf>=5.0",
+#     "mobi==0.4.1",
+# ]
+# ///
 """build-blocks.py — extract readable source documents into the Source-Reader
 block contract documented in pipeline/schema.md.
 
@@ -19,8 +26,7 @@ Full-text guard: on a PUBLIC build (PW_PUBLIC_BUILD=1) this refuses to emit book
 text unless PW_ALLOW_FULL_TEXT=1. Local builds are unaffected.
 
 Run after `sync` (blocks live under the regenerated vault/, keyed by source_id).
-No third-party deps for epub/markdown; mobi/azw and pdf use mobi/pypdf if
-available.
+No third-party deps for epub/markdown; uv supplies mobi/pypdf for mobi/azw/pdf.
 """
 from __future__ import annotations
 import os, re, sys, json, html, hashlib, zipfile, posixpath, shutil
@@ -237,8 +243,8 @@ def extract_epub(path: Path, sid: str) -> list[dict]:
 def extract_pdf(path: Path) -> list[dict]:
     try:
         import pypdf
-    except Exception:  # noqa
-        return []
+    except ImportError as exc:
+        raise RuntimeError("PDF extraction requires pypdf; run this script with uv") from exc
     r = pypdf.PdfReader(str(path))
     raw = []
     for i, page in enumerate(r.pages, 1):
@@ -273,8 +279,8 @@ def extract_html(path: Path) -> list[dict]:
 def extract_mobi(asset: Path, sid: str) -> list[dict]:
     try:
         import mobi
-    except Exception:  # noqa
-        return []
+    except ImportError as exc:
+        raise RuntimeError("MOBI extraction requires mobi; run this script with uv") from exc
 
     tempdir: str | None = None
     try:
@@ -286,10 +292,8 @@ def extract_mobi(asset: Path, sid: str) -> list[dict]:
         if ext in {".html", ".htm", ".xhtml"}:
             return extract_html(converted)
         if ext == ".pdf":
-            print(f"build-blocks: {asset.name}: MOBI Print Replica converted to PDF; skipping")
-            return []
-        print(f"build-blocks: {asset.name}: MOBI converted to unsupported file type {ext or '(none)'}")
-        return []
+            return extract_pdf(converted)
+        raise RuntimeError(f"MOBI converted to unsupported file type {ext or '(none)'}")
     finally:
         if tempdir:
             shutil.rmtree(tempdir, ignore_errors=True)
@@ -371,6 +375,7 @@ def main() -> int:
         print("build-blocks: PUBLIC build without PW_ALLOW_FULL_TEXT — skipping full-text extraction"); return 0
     OUT.mkdir(parents=True, exist_ok=True)
     made = 0
+    failures = 0
     for sidecar in sorted(SOURCES.glob("*.md")):
         data = parse_frontmatter(sidecar.read_text(encoding="utf-8", errors="replace"))
         sid = data.get("source_id")
@@ -390,7 +395,9 @@ def main() -> int:
             else:
                 raw = []
         except Exception as e:  # noqa
-            print(f"build-blocks: {asset.name}: extract failed ({e})"); continue
+            failures += 1
+            print(f"build-blocks: {asset.name}: extract failed ({e})", file=sys.stderr)
+            continue
         blocks = to_blocks(raw)
         if not blocks:
             continue
@@ -401,7 +408,7 @@ def main() -> int:
         print(f"build-blocks: {asset.name} → {len(blocks)} blocks ({sid})")
     if not made:
         print("build-blocks: no readable source files to extract")
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

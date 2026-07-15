@@ -2,11 +2,13 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -61,6 +63,20 @@ class SyncContentTests(unittest.TestCase):
 
             with self.assertRaisesRegex(sync_content.SyncError, "unsafe filesystem entry"):
                 sync_content._copy_asset_dirs(root / "sources", root / "public", Path())
+
+    def test_post_builder_uses_uv_and_propagates_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_blocks = root / "scripts" / "build-blocks.py"
+            build_blocks.parent.mkdir()
+            build_blocks.touch()
+            result = subprocess.CompletedProcess([], 4)
+            with patch.object(sync_content.shutil, "which", return_value="/usr/bin/uv"), patch.object(
+                sync_content.subprocess, "run", return_value=result
+            ) as run:
+                with self.assertRaisesRegex(sync_content.SyncError, "exit code 4"):
+                    sync_content._run_post_builders(root, root / "vault", {})
+            self.assertEqual(run.call_args.args[0], ["/usr/bin/uv", "run", "--script", str(build_blocks)])
 
     def test_refuses_to_delete_generated_vault_when_used_as_source(self):
         with tempfile.TemporaryDirectory() as tmp:

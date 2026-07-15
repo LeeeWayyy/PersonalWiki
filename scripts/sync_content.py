@@ -196,23 +196,17 @@ def _write_sync_meta(vault: Path, commit: str, source: Path) -> None:
     )
 
 
-def _run_best_effort(
-    cmd: list[str],
-    env: Mapping[str, str],
-    skipped_message: str,
-    log: Callable[[str], None],
-) -> None:
-    res = subprocess.run(cmd, env=dict(env), check=False)
-    if res.returncode != 0:
-        log(skipped_message)
-
-
-def _run_post_builders(root: Path, vault: Path, env: Mapping[str, str], log: Callable[[str], None]) -> None:
+def _run_post_builders(root: Path, vault: Path, env: Mapping[str, str]) -> None:
     builder_env = dict(env)
     builder_env["PW_VAULT"] = str(vault)
 
     build_blocks = root / "scripts" / "build-blocks.py"
-    _run_best_effort([sys.executable, str(build_blocks)], builder_env, "sync: build-blocks skipped", log)
+    uv = shutil.which("uv")
+    if not uv:
+        raise SyncError("sync: uv is required to build source-reader blocks")
+    result = subprocess.run([uv, "run", "--script", str(build_blocks)], env=builder_env, check=False)
+    if result.returncode != 0:
+        raise SyncError(f"sync: build-blocks failed with exit code {result.returncode}")
 
 
 def sync_content(
@@ -260,7 +254,7 @@ def sync_content(
     log(f"sync: done (wiki @ {commit})")
 
     if run_post_build:
-        _run_post_builders(root, vault, effective_env, log)
+        _run_post_builders(root, vault, effective_env)
 
     shutil.rmtree(root / ".astro", ignore_errors=True)
     return SyncResult(source=source, vault=vault, asset_dest=asset_dest, commit=commit, asset_count=asset_count)

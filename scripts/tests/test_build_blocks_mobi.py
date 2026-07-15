@@ -70,6 +70,30 @@ class BuildBlocksMobiTests(unittest.TestCase):
             self.assertIn("Reader block from MOBI.", doc["blocks"][1]["text"])
             self.assertFalse(converted_dir.exists())
 
+    def test_main_returns_nonzero_when_supported_extraction_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sources = Path(tmp) / "sources"
+            sources.mkdir()
+            sidecar = sources / "broken.pdf.md"
+            sidecar.write_text("---\nsource_id: BROKEN\n---\n", encoding="utf-8")
+            sidecar.with_suffix("").write_bytes(b"not a pdf")
+
+            with patch.object(build_blocks, "SOURCES", sources), patch.object(
+                build_blocks, "OUT", Path(tmp) / "blocks"
+            ), patch.object(build_blocks, "PUBLIC", False), patch.object(
+                build_blocks, "extract_pdf", side_effect=RuntimeError("broken PDF")
+            ):
+                self.assertEqual(build_blocks.main(), 1)
+
+    def test_public_full_text_skip_remains_successful(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            build_blocks, "SOURCES", Path(tmp)
+        ), patch.object(build_blocks, "PUBLIC", True), patch.object(
+            build_blocks, "ALLOW_FULL", False
+        ), patch.object(build_blocks, "extract_pdf") as extract_pdf:
+            self.assertEqual(build_blocks.main(), 0)
+            extract_pdf.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
