@@ -22,9 +22,13 @@ CLONE="$TMP/clone"
 rsync -a --exclude='.git' --exclude='.mypy_cache' --exclude='.ruff_cache' \
       --exclude='.obsidian' --exclude='node_modules' --exclude='backend/.venv' \
       --exclude='dist' --exclude='.astro' --exclude='vault' \
+      --exclude='content' \
       --exclude='public/pagefind' --exclude='public/vault-assets' \
       --exclude='backend/data' --exclude='pipeline/scripts/tests/.e2e-snapshot.*' \
       "$PROJECT_ROOT/" "$CLONE/"
+mkdir -p "$CLONE/content/wiki/entities" "$CLONE/content/wiki/topics" \
+         "$CLONE/content/wiki/_index" "$CLONE/content/sources"
+cp "$PROJECT_ROOT/ci-fixtures/content/wiki/_taxonomy.md" "$CLONE/content/wiki/_taxonomy.md"
 git -C "$CLONE/content" init -q
 git -C "$CLONE/content" config user.email e2e@test
 git -C "$CLONE/content" config user.name e2e
@@ -35,7 +39,8 @@ ok() { echo "  ✓ $1"; }
 bad() { echo "  ✗ $1"; rc=1; }
 
 run_ingest() { ( cd "$CLONE" && env -u VAULT_CONTENT_DIR TRANSCRIPT_REMOTE_CMD="$STUB_TR" \
-                  LLM_CMD="$STUB_LLM" STUB_ENTITY="media-e2e-entity" "$@" ); }
+                  LLM_CMD="$STUB_LLM" STUB_ENTITY="media-e2e-entity" \
+                  PW_INGEST_SKIP_ARGUMENT_MAP=1 "$@" ); }
 
 # ── 1. atomicity: a remote failure must leave sources/ byte-identical ──
 SRC_BEFORE="$(git -C "$CLONE/content" status --porcelain sources/ | sort)"

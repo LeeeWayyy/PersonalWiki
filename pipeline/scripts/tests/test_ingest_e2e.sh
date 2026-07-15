@@ -73,7 +73,7 @@ echo "  running $ENTRY (stub LLM)…"
 # env -u VAULT_CONTENT_DIR is a SAFETY GUARD: if the caller's environment had
 # VAULT_CONTENT_DIR set (e.g. exported by a real ingest), it would point the
 # entrypoint at the *real* vault. Force the default ($CLONE/content).
-if ( cd "$CLONE" && env -u VAULT_CONTENT_DIR LLM_CMD="$STUB" PW_INGEST_SKIP_ARGUMENT_MAP=1 "./$ENTRY_PATH" "$SRC" ) > "$TMP/out" 2>&1; then
+if ( cd "$CLONE" && env -u VAULT_CONTENT_DIR LLM_CMD="$STUB" "./$ENTRY_PATH" "$SRC" ) > "$TMP/out" 2>&1; then
   :
 else
   echo "  ✗ $ENTRY exited non-zero:"; sed 's/^/    | /' "$TMP/out" | tail -30; exit 1
@@ -89,9 +89,13 @@ HEAD_AFTER="$(git -C "$CROOT" rev-parse HEAD)"
 [[ "$HEAD_AFTER" != "$HEAD_BEFORE" ]] && ok "a commit was created" || bad "no new commit"
 
 # 2. Commit subject is `ingest: <ULID>…`.
-subj="$(git -C "$CROOT" log -1 --format=%s)"
+subj="$(git -C "$CROOT" log -1 --format=%s --grep='^ingest: ')"
 sid="$(printf '%s' "$subj" | sed -nE 's/^ingest: ([0-9A-Z]{26}).*/\1/p')"
 [[ -n "$sid" ]] && ok "commit subject is an ingest: $subj" || bad "unexpected commit subject: $subj"
+
+# 2b. Whole-source ingest also committed its derived argument map.
+map_subj="$(git -C "$CROOT" log -1 --format=%s)"
+[[ "$map_subj" == "mindmap: $sid" ]] && ok "argument map committed" || bad "missing argument-map commit: $map_subj"
 
 # 3. The stub's new entity page exists, with an injected page_id.
 PAGE="$CROOT/wiki/entities/e2e-entity.md"

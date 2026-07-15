@@ -22,9 +22,13 @@ CLONE="$TMP/clone"
 rsync -a --exclude='.git' --exclude='.mypy_cache' --exclude='.ruff_cache' \
       --exclude='.obsidian' --exclude='node_modules' --exclude='backend/.venv' \
       --exclude='dist' --exclude='.astro' --exclude='vault' \
+      --exclude='content' \
       --exclude='public/pagefind' --exclude='public/vault-assets' \
       --exclude='backend/data' --exclude='pipeline/scripts/tests/.e2e-snapshot.*' \
       "$PROJECT_ROOT/" "$CLONE/"
+mkdir -p "$CLONE/content/wiki/entities" "$CLONE/content/wiki/topics" \
+         "$CLONE/content/wiki/_index" "$CLONE/content/sources"
+cp "$PROJECT_ROOT/ci-fixtures/content/wiki/_taxonomy.md" "$CLONE/content/wiki/_taxonomy.md"
 CROOT="$CLONE/content"
 git -C "$CROOT" init -q
 git -C "$CROOT" config user.email e2e@test
@@ -37,7 +41,7 @@ run_ingest() {  # $1=STUB_ENTITY  $2.. = extra ingest args
   local entity="$1"; shift
   ( cd "$CLONE" && env -u VAULT_CONTENT_DIR \
       LLM_CMD="$STUB_LLM" TRANSCRIPT_REMOTE_CMD="$STUB_TR" EXTRACT_REMOTE_CMD="$STUB_EX" \
-      STUB_ENTITY="$entity" \
+      STUB_ENTITY="$entity" PW_INGEST_SKIP_ARGUMENT_MAP=1 \
       ./pipeline/ingest.py "$URL" --kind video "$@" )
 }
 
@@ -95,6 +99,7 @@ ri2() {  # $1=STUB_ENTITY  $2=extra env assignment ("" or STUB_NO_CHANGES=1)  $3
   local entity="$1" extra="$2"; shift 2
   ( cd "$CLONE" && env -u VAULT_CONTENT_DIR LLM_CMD="$STUB_LLM" TRANSCRIPT_REMOTE_CMD="$STUB_TR" \
       EXTRACT_REMOTE_CMD="$STUB_EX" STUB_ENTITY="$entity" ${extra:+$extra} \
+      PW_INGEST_SKIP_ARGUMENT_MAP=1 \
       ./pipeline/ingest.py "$URL2" --kind video "$@" )
 }
 echo "  run 3: ingest $URL2 (transcript) → C …"

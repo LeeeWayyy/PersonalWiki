@@ -19,9 +19,13 @@ CLONE="$TMP/clone"
 rsync -a --exclude='.git' --exclude='.mypy_cache' --exclude='.ruff_cache' \
       --exclude='.obsidian' --exclude='node_modules' --exclude='backend/.venv' \
       --exclude='dist' --exclude='.astro' --exclude='vault' \
+      --exclude='content' \
       --exclude='public/pagefind' --exclude='public/vault-assets' \
       --exclude='backend/data' --exclude='pipeline/scripts/tests/.e2e-snapshot.*' \
       "$PROJECT_ROOT/" "$CLONE/"
+mkdir -p "$CLONE/content/wiki/entities" "$CLONE/content/wiki/topics" \
+         "$CLONE/content/wiki/_index" "$CLONE/content/sources"
+cp "$PROJECT_ROOT/ci-fixtures/content/wiki/_taxonomy.md" "$CLONE/content/wiki/_taxonomy.md"
 CROOT="$CLONE/content"
 git -C "$CROOT" init -q
 git -C "$CROOT" config user.email e2e@test
@@ -34,7 +38,7 @@ run_ingest() {  # $1=STUB_ENTITY  $2.. = extra ingest args
   local entity="$1"; shift
   ( cd "$CLONE" && env -u VAULT_CONTENT_DIR \
       LLM_CMD="$STUB_LLM" EXTRACT_REMOTE_CMD="$STUB_EXTRACT" STUB_IMAGE_POSTID="" \
-      STUB_ENTITY="$entity" STUB_CARD_ANCHOR="card-1" \
+      STUB_ENTITY="$entity" STUB_CARD_ANCHOR="card-1" PW_INGEST_SKIP_ARGUMENT_MAP=1 \
       ./pipeline/ingest.py "/tmp/e2e-export.zip" --kind image_note --post-id P1 --platform rednote "$@" )
 }
 
@@ -75,6 +79,7 @@ tail -3 "$CROOT/.wiki/log.md" | grep -qF "supersedes ${sidA}" && ok "log records
 if ( cd "$CLONE" && env -u VAULT_CONTENT_DIR \
         LLM_CMD="$STUB_LLM" EXTRACT_REMOTE_CMD="$STUB_EXTRACT" STUB_IMAGE_POSTID="" \
         STUB_IMAGE_CARDS=3 STUB_ENTITY="noteX" STUB_CARD_ANCHOR="card-1" \
+        PW_INGEST_SKIP_ARGUMENT_MAP=1 \
         ./pipeline/ingest.py "/tmp/e2e-export.zip" --kind image_note --post-id PNEW --platform rednote --reocr \
    ) > "$TMP/out3" 2>&1; then
   bad "--reocr with no prior source should die, not mint fresh"

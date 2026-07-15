@@ -20,9 +20,13 @@ CLONE="$TMP/clone"
 rsync -a --exclude='.git' --exclude='.mypy_cache' --exclude='.ruff_cache' \
       --exclude='.obsidian' --exclude='node_modules' --exclude='backend/.venv' \
       --exclude='dist' --exclude='.astro' --exclude='vault' \
+      --exclude='content' \
       --exclude='public/pagefind' --exclude='public/vault-assets' \
       --exclude='backend/data' --exclude='pipeline/scripts/tests/.e2e-snapshot.*' \
       "$PROJECT_ROOT/" "$CLONE/"
+mkdir -p "$CLONE/content/wiki/entities" "$CLONE/content/wiki/topics" \
+         "$CLONE/content/wiki/_index" "$CLONE/content/sources"
+cp "$PROJECT_ROOT/ci-fixtures/content/wiki/_taxonomy.md" "$CLONE/content/wiki/_taxonomy.md"
 CROOT="$CLONE/content"
 mkdir -p "$CROOT/wiki/entities" "$CROOT/wiki/topics" "$CROOT/wiki/_index"
 if [[ ! -f "$CROOT/wiki/_taxonomy.md" ]]; then
@@ -61,6 +65,7 @@ echo "  running ingest.py --kind image_note (stub extract-remote + stub LLM)…"
 if ( cd "$CLONE" && env -u VAULT_CONTENT_DIR \
         LLM_CMD="$STUB_LLM" EXTRACT_REMOTE_CMD="$STUB_EXTRACT" STUB_IMAGE_POSTID="" \
         STUB_ENTITY="rednote-note" STUB_CARD_ANCHOR="card-1" \
+        PW_INGEST_SKIP_ARGUMENT_MAP=1 \
         ./pipeline/ingest.py "/tmp/e2e-export.zip" --kind image_note --post-id P1 --platform rednote \
    ) > "$TMP/out" 2>&1; then
   :

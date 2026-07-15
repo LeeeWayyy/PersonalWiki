@@ -9,6 +9,7 @@ Reads the prompt on stdin and emits a canned response so the full ingest
 pipeline can be exercised end-to-end with NO live LLM:
 
   - Chapter analyzer prompt  → validated chapter-intelligence JSON.
+  - Argument-map prompt      → validated map JSON.
   - Main ingest prompt       → a unified diff CREATING a new entity page
                                that cites the run's real source_id (parsed
                                out of the prompt's SOURCE_META block), so
@@ -129,6 +130,36 @@ if "## SENTENCES" in prompt and "## WORDS" in prompt:
             {"pattern": "〜です", "explanation": "Polite copula.",
              "example_jp": "本です。", "s": 1 if sentences else 0},
         ],
+    }
+    print(json.dumps(obj, ensure_ascii=False))
+    sys.exit(0)
+
+# Whole-source ingest generates a derived argument map after committing the
+# source. Keep that post-commit path inside the same deterministic E2E contract.
+if "You map the ARGUMENT of a book" in prompt:
+    labels = [
+        json.loads(raw)
+        for raw in re.findall(
+            r'"section_label"\s*:\s*("(?:\\.|[^"\\])*")', prompt
+        )
+    ]
+    chapter = labels[0] if labels else ""
+    obj = {
+        "central_question": f"Why does {entity} matter?",
+        "thesis": f"{entity} is the central reusable concept.",
+        "chapters": ([{
+            "label": chapter,
+            "question": f"Why does {entity} matter?",
+            "claim": f"{entity} is reusable.",
+            "builds_on": None,
+        }] if chapter else []),
+        "nodes": [{
+            "id": "n1",
+            "kind": "claim",
+            "label": f"{entity} is a reusable concept.",
+            "chapter": chapter,
+        }],
+        "edges": [],
     }
     print(json.dumps(obj, ensure_ascii=False))
     sys.exit(0)
