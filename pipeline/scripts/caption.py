@@ -11,7 +11,7 @@ every image entry that's neither captioned nor marked terminally
 failed:
   1. Run a pre-LLM heuristic for "obviously decorative" images
      (cover/logo/qr/spacer/tiny). Decorative → mark, skip LLM.
-  2. Otherwise call a vision-capable CLI (gemini or codex)
+  2. Otherwise call a vision-capable CLI (agy or codex)
      to produce a 1–3 sentence caption.
   3. If the model output is the literal token `DECORATIVE`, mark the
      entry decorative and skip persisting a caption.
@@ -22,7 +22,7 @@ so a crash mid-loop leaves the manifest consistent for re-runs.
 
 Usage:
     scripts/caption.py <manifest-path-or-assets-dir>
-                       [--backend gemini|codex]
+                       [--backend agy|codex]
                        [--model MODEL]   # caption model, independent of the
                                          # ingest model (PW_LLM_MODEL)
                        [--source-lang Chinese|English|...]
@@ -37,7 +37,7 @@ is codex), so there is one tool to authenticate. Override with CAPTION_BACKEND.
 
 Env vars (override CLI defaults):
     CAPTION_BACKEND, CAPTION_MODEL, CAPTION_LANG, CAPTION_LIMIT, CAPTION_JOBS
-    GEMINI_BIN (gemini backend only; path to the CLI)
+    PW_AGY_BIN (agy backend only; path to the CLI)
 
 Captioning is the slow part of an image-heavy ingest (one vision call per
 non-decorative image). Calls run in a thread pool (--jobs, default 4) since each
@@ -63,6 +63,7 @@ from pathlib import Path
 # Local helper module (sibling file).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from asset_manifest import ImageEntry, read_manifest, write_manifest  # noqa: E402
+from llm_client import cli_env  # noqa: E402
 
 PROMPT_TEMPLATE = """\
 Describe this figure in 1-3 sentences for a knowledge-base index.
@@ -79,21 +80,25 @@ Rules:
 - Output language: {lang}.
 """
 
-DEFAULT_BACKEND = "gemini"
+DEFAULT_BACKEND = "agy"
 DEFAULT_MODELS = {
-    "gemini": "gemini-2.5-flash",
+    "agy": "gemini-2.5-flash",
     "codex": "gpt-5-mini",
 }
+
+
+def _normalize_backend(backend: str) -> str:
+    return "agy" if backend == "gemini" else backend
 
 
 def _default_backend() -> str:
     """Caption with the same CLI the pipeline's LLM uses, so there is a single
     tool to authenticate and manage. An explicit CAPTION_BACKEND always wins;
     otherwise use codex whenever llm_client resolves the LLM to codex (via
-    PW_LLM_PROVIDER=codex or a legacy llm-codex.sh LLM_CMD), else gemini."""
+    PW_LLM_PROVIDER=codex or a legacy llm-codex.sh LLM_CMD), else agy."""
     explicit = os.environ.get("CAPTION_BACKEND")
     if explicit:
-        return explicit
+        return _normalize_backend(explicit)
     try:
         import llm_client
         if llm_client.codex_requested() or llm_client.provider() == "codex":
@@ -104,7 +109,9 @@ def _default_backend() -> str:
 
 
 def _backend_bin(backend: str) -> str:
-    return os.environ.get("GEMINI_BIN", "gemini") if backend == "gemini" else backend
+    if _normalize_backend(backend) == "agy":
+        return os.environ.get("PW_AGY_BIN") or os.environ.get("GEMINI_BIN") or "agy"
+    return os.environ.get("PW_CODEX_BIN", "codex")
 
 # Filename patterns that strongly suggest a decorative image (cover,
 # copyright, TOC, logo, QR). Includes Chinese / Japanese terms common
@@ -123,7 +130,7 @@ def main() -> int:
                     help="Path to a `_manifest.md` or to its containing "
                          "<source>.assets/ directory.")
     ap.add_argument("--backend", default=_default_backend(),
-                    choices=("gemini", "codex"))
+                    choices=("agy", "gemini", "codex"))
     ap.add_argument("--model", default=os.environ.get("CAPTION_MODEL"))
     ap.add_argument("--source-lang", default=os.environ.get("CAPTION_LANG",
                                                             "match the source "
@@ -163,7 +170,7 @@ def main() -> int:
         print(f"caption: no entries in manifest at {assets_dir}", file=sys.stderr)
         return 0
 
-    backend = args.backend
+    backend = _normalize_backend(args.backend)
     model = args.model or DEFAULT_MODELS[backend]
     model_label = model or "default"
     binary = _backend_bin(backend)
@@ -364,27 +371,23 @@ def _classify_error(stderr: str, exit_code: int) -> str:
 
 def _dispatch(backend: str, model: str, prompt: str, image: Path) -> str:
     """Call the configured vision CLI. Returns stdout string."""
-    if backend == "gemini":
-        return _dispatch_gemini(model, prompt, image)
+    if _normalize_backend(backend) == "agy":
+        return _dispatch_agy(model, prompt, image)
     if backend == "codex":
         return _dispatch_codex(model, prompt, image)
     raise ValueError(f"unknown backend: {backend}")
 
 
-def _dispatch_gemini(model: str, prompt: str, image: Path) -> str:
-    """Gemini CLI: prompt is argv (`-p`), image attached via `@<path>`.
-
-    Asset paths are guaranteed space-free by §3.1 naming conventions
-    (slug-sanitized dir + `<sha12>.<ext>` filename). If a path with
-    spaces ever sneaks through, refuse rather than guess at escaping.
-    """
-    abs_path = str(image)
-    if " " in abs_path:
-        raise RuntimeError(f"unexpected space in asset path: {abs_path}")
-    # GEMINI_BIN supports a renamed or non-PATH installation.
-    cmd = [_backend_bin("gemini"), "-m", model, "-p", f"{prompt} @{abs_path}"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=True,
-                          timeout=120)
+def _dispatch_agy(model: str, prompt: str, image: Path) -> str:
+    """Agy print mode: attach the image by path and send the prompt on stdin."""
+    cmd = [
+        _backend_bin("agy"), "--print", "--mode", "plan", "--sandbox",
+        "--model", model,
+    ]
+    proc = subprocess.run(
+        cmd, input=f"{prompt} @{image}", capture_output=True, text=True,
+        check=True, timeout=120, env=cli_env("agy"),
+    )
     return proc.stdout
 
 
@@ -393,13 +396,14 @@ def _dispatch_codex(model: str | None, prompt: str, image: Path) -> str:
 
     Mirrors the text LLM path sandbox/color flags. The caller passes a mini
     default unless CAPTION_MODEL/--model overrides it."""
-    cmd = ["codex", "exec", "--skip-git-repo-check",
+    cmd = [_backend_bin("codex"), "exec", "--skip-git-repo-check",
+           "--ignore-user-config", "--ignore-rules", "--disable", "shell_tool",
            "--sandbox", "read-only", "--color", "never"]
     if model:
         cmd += ["-m", model]
     cmd += ["-i", str(image), "-"]
     proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                          check=True, timeout=180)
+                          check=True, timeout=180, env=cli_env("codex"))
     return proc.stdout
 
 

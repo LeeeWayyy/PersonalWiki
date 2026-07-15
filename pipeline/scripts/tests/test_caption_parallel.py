@@ -35,45 +35,45 @@ class ApplyCaptionResultTests(unittest.TestCase):
 
     def test_ok_sets_vision_source(self):
         e = self._entry()
-        s = caption._apply_caption_result(e, "A red box.", None, "gemini", "flash", "2026-01-01")
+        s = caption._apply_caption_result(e, "A red box.", None, "agy", "flash", "2026-01-01")
         self.assertEqual(e.caption, "A red box.")
         self.assertEqual(e.caption_source, "vision")
         self.assertFalse(e.decorative)
-        self.assertEqual(e.caption_model, "gemini:flash")
+        self.assertEqual(e.caption_model, "agy:flash")
         self.assertIn("ok", s)
 
     def test_decorative_token(self):
         e = self._entry()
-        caption._apply_caption_result(e, "DECORATIVE", None, "gemini", "flash", "2026-01-01")
+        caption._apply_caption_result(e, "DECORATIVE", None, "agy", "flash", "2026-01-01")
         self.assertTrue(e.decorative)
         self.assertIsNone(e.caption)
         self.assertIsNone(e.caption_source)
 
     def test_empty_output_is_transient(self):
         e = self._entry()
-        caption._apply_caption_result(e, "   ", None, "gemini", "flash", "2026-01-01")
+        caption._apply_caption_result(e, "   ", None, "agy", "flash", "2026-01-01")
         self.assertIsNone(e.caption)
         self.assertEqual(e.caption_error_kind, "transient")
 
     def test_called_process_error_classified(self):
         e = self._entry()
-        exc = caption.subprocess.CalledProcessError(1, "gemini", stderr="rate limit hit")
-        caption._apply_caption_result(e, None, exc, "gemini", "flash", "2026-01-01")
+        exc = caption.subprocess.CalledProcessError(1, "agy", stderr="rate limit hit")
+        caption._apply_caption_result(e, None, exc, "agy", "flash", "2026-01-01")
         self.assertIsNone(e.caption)
         self.assertIsNone(e.caption_source)
         self.assertEqual(e.caption_error_kind, "transient")   # "rate limit" → transient
 
     def test_timeout_error_is_transient(self):
         e = self._entry()
-        exc = caption.subprocess.TimeoutExpired("gemini", 180)
-        caption._apply_caption_result(e, None, exc, "gemini", "flash", "2026-01-01")
+        exc = caption.subprocess.TimeoutExpired("agy", 180)
+        caption._apply_caption_result(e, None, exc, "agy", "flash", "2026-01-01")
         self.assertEqual(e.caption_error_kind, "transient")
         self.assertIsNone(e.caption_source)
 
 
 class ParallelDispatchTests(unittest.TestCase):
     def _run(self, assets_dir, jobs, dispatch):
-        argv = ["caption.py", str(assets_dir), "--backend", "gemini", "--jobs", str(jobs)]
+        argv = ["caption.py", str(assets_dir), "--backend", "agy", "--jobs", str(jobs)]
         with patch.object(caption, "_dispatch", dispatch), \
              patch.object(caption.shutil, "which", return_value="/usr/bin/true"), \
              patch.object(sys, "argv", argv), \
@@ -117,7 +117,7 @@ class ParallelDispatchTests(unittest.TestCase):
                     calls["n"] += 1
                 return "cap"
 
-            argv = ["caption.py", str(assets), "--backend", "gemini",
+            argv = ["caption.py", str(assets), "--backend", "agy",
                     "--jobs", "4", "--limit", "2"]
             with patch.object(caption, "_dispatch", dispatch), \
                  patch.object(caption.shutil, "which", return_value="/usr/bin/true"), \
