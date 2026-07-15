@@ -281,15 +281,16 @@ def preflight(options: dict | None = None) -> tuple[bool, str, list[str]]:
         return False, f"ingest preflight returned invalid JSON: {exc}", []
 
 
-def _build_argv(target: str, options: dict) -> list[str]:
+def _build_argv(target: str, options: dict, transcript_out: str | None = None) -> list[str]:
     kind = (options or {}).get("kind", "auto")
     # A media URL under lang must be transcribed, not web-scraped. Route it
     # through fetch-transcript.py (ASR → .transcript.json → ingest.py). It writes
     # its intermediates to a temp dir so nothing lands in the content repo; the
     # audio blob it produces is copied into the gitignored lang/sources/.media/.
     if kind == "lang" and urlparse(target).scheme:
-        out_dir = tempfile.mkdtemp(prefix="pw-transcript-")
-        return [sys.executable, str(FETCH_TRANSCRIPT_SCRIPT), target, "--out", out_dir]
+        if not transcript_out:
+            raise ValueError("lang URL ingest requires a transcript output directory")
+        return [sys.executable, str(FETCH_TRANSCRIPT_SCRIPT), target, "--out", transcript_out]
 
     argv = shlex.split(INGEST_CMD)
     if kind == "lang":
@@ -477,6 +478,7 @@ async def shutdown_jobs() -> None:
 
 async def run_job(job: Job, target: str, options: dict):
     job_handler: _JobLogHandler | None = None
+    transcript_tmp: tempfile.TemporaryDirectory | None = None
     try:
         async with LOCK:
             job_handler = _JobLogHandler(job)
@@ -524,7 +526,9 @@ async def run_job(job: Job, target: str, options: dict):
                 job.finish_terminal("done", {"status": "done", "stub": True})
                 return
 
-            argv = _build_argv(target, options)
+            if (options or {}).get("kind") == "lang" and urlparse(target).scheme:
+                transcript_tmp = tempfile.TemporaryDirectory(prefix="pw-transcript-")
+            argv = _build_argv(target, options, transcript_tmp.name if transcript_tmp else None)
             job.emit("$ " + " ".join(shlex.quote(a) for a in argv))
             launch_argv = _idle_sleep_guarded_argv(argv)
             if launch_argv is not argv:
@@ -630,6 +634,16 @@ async def run_job(job: Job, target: str, options: dict):
     finally:
         if job_handler is not None:
             LOGGER.removeHandler(job_handler)
+        if transcript_tmp is not None:
+            try:
+                transcript_tmp.cleanup()
+            except Exception as e:  # noqa
+                LOGGER.warning(
+                    "failed to remove transcript scratch dir job_id=%s path=%s: %s",
+                    job.id,
+                    transcript_tmp.name,
+                    e,
+                )
         if job.status in TERMINAL_STATUSES:
             await asyncio.to_thread(_cleanup_staged_target, target, job.id)
 

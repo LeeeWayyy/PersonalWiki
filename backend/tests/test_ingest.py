@@ -54,17 +54,23 @@ def test_build_argv_leaves_document_chaptering_to_ingest():
     assert argv("/stage/book.epub", kind="wiki")[-1] == "/stage/book.epub"
 
 
-def test_build_argv_routes_lang_url_through_fetch_transcript():
+def test_build_argv_routes_lang_url_through_fetch_transcript(tmp_path):
     from app import ingest_runner as ir
 
     # A media URL under lang must be transcribed, not web-scraped: route to
     # fetch-transcript.py (ASR → .transcript.json → ingest.py), never ingest.py
     # directly on the URL (which would scrape the page as HTML).
-    url_argv = ir._build_argv("https://youtube.com/watch?v=x", {"kind": "lang"})
+    transcript_out = str(tmp_path / "transcript")
+    url_argv = ir._build_argv(
+        "https://youtube.com/watch?v=x",
+        {"kind": "lang"},
+        transcript_out,
+    )
     assert url_argv[0] == sys.executable
     assert url_argv[1].endswith("fetch-transcript.py")
     assert url_argv[2] == "https://youtube.com/watch?v=x"
     assert "--out" in url_argv
+    assert url_argv[-1] == transcript_out
     assert "--profile" not in url_argv  # not the scrape path
 
     # A local transcript file (what fetch-transcript feeds back) still goes
@@ -404,6 +410,47 @@ def test_run_job_passes_run_id_uses_threads_and_removes_stage_upload(tmp_path, m
     assert "run-id=runidjob" in (tmp_path / "logs" / "runidjob.log").read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(("exit_code", "status"), [(0, "done"), (7, "error")])
+def test_lang_url_scratch_is_removed_after_process_exit(tmp_path, monkeypatch, exit_code, status):
+    from app import ingest_runner as ir
+
+    content = tmp_path / "content"
+    content.mkdir()
+    script = tmp_path / "fetch.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
+        "(out / 'artifact').write_text('temporary')\n"
+        f"raise SystemExit({exit_code})\n",
+        encoding="utf-8",
+    )
+    real_temporary_directory = ir.tempfile.TemporaryDirectory
+    scratch_paths = []
+
+    def temporary_directory(*, prefix):
+        temporary = real_temporary_directory(prefix=prefix, dir=tmp_path)
+        scratch_paths.append(Path(temporary.name))
+        return temporary
+
+    async def run():
+        monkeypatch.setattr(ir, "CONTENT_DIR", content)
+        monkeypatch.setattr(ir, "FETCH_TRANSCRIPT_SCRIPT", script)
+        monkeypatch.setattr(ir.tempfile, "TemporaryDirectory", temporary_directory)
+        monkeypatch.setattr(ir, "REBUILD_CMD", "")
+        monkeypatch.setattr(ir, "STUB", False)
+        monkeypatch.setattr(ir, "JOB_LOG_DIR", tmp_path / "logs")
+        monkeypatch.setattr(ir, "ensure_content_git", lambda _content: (True, ""))
+        monkeypatch.setattr(ir, "preflight", lambda _options: (True, "clean", []))
+        job = ir.Job(f"scratch{exit_code}")
+        await ir.run_job(job, "https://example.com/media", {"kind": "lang"})
+        return job
+
+    job = asyncio.run(run())
+
+    assert job.status == status
+    assert scratch_paths and not scratch_paths[0].exists()
+
+
 def test_idle_sleep_guard_wraps_only_on_macos_with_caffeinate(monkeypatch):
     from app import ingest_runner as ir
 
@@ -474,10 +521,18 @@ def test_run_job_cancel_after_process_assignment_kills_ingest(tmp_path, monkeypa
     script = tmp_path / "sleep.py"
     script.write_text("import time\nprint('started', flush=True)\ntime.sleep(30)\n", encoding="utf-8")
     launched = {}
+    real_temporary_directory = ir.tempfile.TemporaryDirectory
+    scratch_paths = []
+
+    def temporary_directory(*, prefix):
+        temporary = real_temporary_directory(prefix=prefix, dir=tmp_path)
+        scratch_paths.append(Path(temporary.name))
+        return temporary
 
     async def run():
         monkeypatch.setattr(ir, "CONTENT_DIR", content)
-        monkeypatch.setattr(ir, "INGEST_CMD", f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+        monkeypatch.setattr(ir, "FETCH_TRANSCRIPT_SCRIPT", script)
+        monkeypatch.setattr(ir.tempfile, "TemporaryDirectory", temporary_directory)
         monkeypatch.setattr(ir, "REBUILD_CMD", "")
         monkeypatch.setattr(ir, "STUB", False)
         monkeypatch.setattr(ir, "ensure_content_git", lambda _content: (True, ""))
@@ -493,7 +548,7 @@ def test_run_job_cancel_after_process_assignment_kills_ingest(tmp_path, monkeypa
 
         monkeypatch.setattr(ir.asyncio, "create_subprocess_exec", create_and_cancel)
         job = ir.Job("cancelracejob")
-        await ir.run_job(job, str(tmp_path / "target.txt"), {"kind": "auto"})
+        await ir.run_job(job, "https://example.com/media", {"kind": "lang"})
         return job
 
     job = asyncio.run(run())
@@ -502,6 +557,7 @@ def test_run_job_cancel_after_process_assignment_kills_ingest(tmp_path, monkeypa
     assert job.result == {"status": "canceled"}
     assert launched["limit"] == 2**20
     assert launched["proc"].returncode is not None
+    assert scratch_paths and not scratch_paths[0].exists()
     assert job.visible_lines()[-2:] == ["canceled by request", "__END__"]
 
 
