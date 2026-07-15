@@ -29,11 +29,6 @@ def _cache_payload(row) -> dict:
     }
 
 
-def _llm_cache_meta(prompt_version: str) -> tuple[str, str | None, str | None]:
-    ident = llm_client.identity()
-    return prompt_version, ident["provider"], ident["model"]
-
-
 def _translation_cache_get(h: str):
     conn = db.connect()
     try:
@@ -71,7 +66,9 @@ def _translation_cache_put(
 async def _cached_completion(*, text: str, context: str, lang: str,
                              prompt_version: str, prompt: str,
                              hash_parts: tuple[str, ...], unavailable: str) -> tuple[str, bool, dict]:
-    h = _cache_hash(*hash_parts, text)
+    identity = llm_client.identity()
+    provider, model = identity["provider"], identity["model"]
+    h = _cache_hash(*hash_parts, provider or "", model or "", text)
     cached = await asyncio.to_thread(_translation_cache_get, h)
     if cached:
         return cached["translation"], True, _cache_payload(cached)
@@ -84,7 +81,6 @@ async def _cached_completion(*, text: str, context: str, lang: str,
         LOGGER.exception("%s LLM call failed lang=%s chars=%d", context, lang, len(text))
         raise HTTPException(502, f"LLM call failed: {exc}") from exc
     output = (raw or "").strip()
-    prompt_version, provider, model = _llm_cache_meta(prompt_version)
     if output:
         await asyncio.to_thread(
             _translation_cache_put, h=h, context=context, lang=lang,

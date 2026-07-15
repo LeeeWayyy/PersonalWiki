@@ -18,8 +18,8 @@ code remains a separate runtime boundary.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -206,10 +206,20 @@ def extract_json(raw: str) -> dict:
     raise ValueError("no parseable JSON object in LLM output")
 
 
+def _execution_cache_key() -> str:
+    payload = json.dumps(
+        llm_client.execution_identity(), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
 def cache_path(cache_dir: Path, prompt_version: str, source_id: str, sha: str,
                suffix: str) -> Path:
-    """Cache filename keyed by source id + sha + chapter `suffix` + prompt version."""
-    return cache_dir / f"{source_id}.{(sha or '0')[:12]}.{suffix}.{prompt_version}.json"
+    """Cache filename keyed by source, prompt, and producing LLM identity."""
+    return cache_dir / (
+        f"{source_id}.{(sha or '0')[:12]}.{suffix}.{prompt_version}."
+        f"{_execution_cache_key()}.json"
+    )
 
 
 def load_cache(cache_dir: Path, prompt_version: str, source_id: str, sha: str,
@@ -238,7 +248,10 @@ def flat_cache_path(cache_dir: Path, prompt_version: str, source_id: str,
     This preserves the historical mindmap cache shape:
     `<source_id>.<sha12>.<prompt_version>.json`.
     """
-    return cache_dir / f"{source_id}.{(sha or '0')[:12]}.{prompt_version}.json"
+    return cache_dir / (
+        f"{source_id}.{(sha or '0')[:12]}.{prompt_version}."
+        f"{_execution_cache_key()}.json"
+    )
 
 
 def load_flat_cache(cache_dir: Path, prompt_version: str, source_id: str,
@@ -304,8 +317,8 @@ def demo() -> None:
     assert extract_json('prefix {"a": 1} suffix') == {"a": 1}
     assert extract_json('```json\n{"b": 2}\n```') == {"b": 2}
 
-    assert flat_cache_path(Path(".cache"), "v1", "S", "abcdef1234567890").as_posix() == \
-        ".cache/S.abcdef123456.v1.json"
+    path = flat_cache_path(Path(".cache"), "v1", "S", "abcdef1234567890")
+    assert path.name.startswith("S.abcdef123456.v1.") and path.suffix == ".json"
 
     z = render_human_zone(None, "study-zone")
     assert "study-zone" in z and z.startswith("<!-- human-zone -->")
