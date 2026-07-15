@@ -33,6 +33,22 @@ CODEX_ARGS = ("exec", "--skip-git-repo-check", "--color", "never")
 API_PROVIDERS = {"api", "openai"}
 CODEX_PROVIDERS = {"codex"}
 _STDOUT_DONE = object()
+_CLI_ENV_KEYS = {
+    "HOME", "PATH", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE",
+    "TERM", "NO_COLOR", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY",
+    "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
+}
+_CLI_PROVIDER_ENV_KEYS = {
+    "codex": {"CODEX_HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL"},
+    "claude": {
+        "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    },
+    "agy": {
+        "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+    },
+}
 
 
 def _env(name: str, default: str = "") -> str:
@@ -92,6 +108,12 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in TRUTHY
+
+
+def cli_env(provider_name: str) -> dict[str, str]:
+    """Minimal environment for built-in agent CLIs; never expose app secrets."""
+    allowed = _CLI_ENV_KEYS | _CLI_PROVIDER_ENV_KEYS.get(provider_name, set())
+    return {key: os.environ[key] for key in allowed if key in os.environ}
 
 
 def codex_requested() -> bool:
@@ -239,7 +261,7 @@ def _codex_automation_profile() -> dict[str, object]:
     profile: dict[str, object] = {
         "ignore_user_config": True,
         "ignore_rules": _env_bool("PW_CODEX_IGNORE_RULES", True),
-        "disable_shell": _env_bool("PW_CODEX_DISABLE_SHELL", False),
+        "disable_shell": _env_bool("PW_CODEX_DISABLE_SHELL", True),
     }
     if not profile["ignore_rules"]:
         rules_dir = _codex_home() / "rules"
@@ -482,7 +504,7 @@ def _run_codex(base_argv: list[str], prompt: str, timeout: int, cwd: str) -> str
         with open(err_file, "w") as errf:
             proc = subprocess.Popen(
                 argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
-                cwd=cwd, start_new_session=True)
+                cwd=cwd, env=cli_env("codex"), start_new_session=True)
         assert proc.stdout is not None
         stdin_thread = threading.Thread(
             target=write_stdin,

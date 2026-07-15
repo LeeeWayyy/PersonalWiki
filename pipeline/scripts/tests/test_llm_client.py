@@ -59,6 +59,18 @@ def _fake_codex(emit_events: bool = False) -> str:
     )
 
 
+def _env_echo_codex() -> str:
+    return (
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "argv = sys.argv[1:]\n"
+        "out = argv[argv.index('-o') + 1]\n"
+        "keys = ('PW_AUTH_TOKEN', 'TRANSCRIPT_REMOTE_TOKEN', 'PW_LLM_API_KEY', "
+        "'OPENAI_API_KEY', 'CODEX_HOME')\n"
+        "open(out, 'w').write(json.dumps({key: os.environ.get(key) for key in keys}))\n"
+    )
+
+
 def _silent_codex() -> str:
     return "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
 
@@ -247,7 +259,7 @@ class LlmClientTests(unittest.TestCase):
             changed = {
                 **base,
                 "PW_CODEX_IGNORE_RULES": "0",
-                "PW_CODEX_DISABLE_SHELL": "1",
+                "PW_CODEX_DISABLE_SHELL": "0",
             }
             with patch.dict(os.environ, changed, clear=True):
                 second = llm_client.execution_identity("model")
@@ -396,12 +408,35 @@ class LlmClientTests(unittest.TestCase):
                 out = llm_client.complete_command("hello", timeout=5)
             self.assertIn("--ignore-user-config", out)
             self.assertIn("--ignore-rules", out)
+            self.assertIn("--disable shell_tool", out)
             self.assertIn('model_reasoning_effort="medium"', out)
             self.assertIn('model_verbosity="low"', out)
             self.assertNotIn(" -m ", out)
             self.assertIn("-o ", out)
             self.assertIn(" -", out)
             self.assertIn("STDIN=hello", out)
+
+    def test_codex_subprocess_only_receives_provider_auth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            write_executable(bin_dir / "codex", _env_echo_codex())
+            env = {
+                "PW_LLM_PROVIDER": "codex",
+                "PW_AUTH_TOKEN": "app-secret",
+                "TRANSCRIPT_REMOTE_TOKEN": "transcript-secret",
+                "PW_LLM_API_KEY": "fallback-secret",
+                "OPENAI_API_KEY": "provider-secret",
+                "CODEX_HOME": str(Path(tmp) / "codex-home"),
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                seen = json.loads(llm_client.complete_command("hello", timeout=5))
+            self.assertIsNone(seen["PW_AUTH_TOKEN"])
+            self.assertIsNone(seen["TRANSCRIPT_REMOTE_TOKEN"])
+            self.assertIsNone(seen["PW_LLM_API_KEY"])
+            self.assertEqual(seen["OPENAI_API_KEY"], "provider-secret")
+            self.assertEqual(seen["CODEX_HOME"], env["CODEX_HOME"])
 
     def test_codex_uses_pw_llm_model_when_set(self):
         with tempfile.TemporaryDirectory() as tmp:
