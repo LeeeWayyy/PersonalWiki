@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -119,6 +120,8 @@ def _safe_extract_tar(archive_file, dest: Path) -> None:
             member_path = Path(member.name)
             if member_path.is_absolute() or ".." in member_path.parts:
                 raise SyncError(f"sync: unsafe archive path: {member.name}")
+            if not (member.isdir() or member.isfile()):
+                raise SyncError(f"sync: unsafe archive entry: {member.name}")
         archive.extractall(dest)
 
 
@@ -133,22 +136,40 @@ def _copy_committed_snapshot(source: Path, dest: Path) -> None:
         _safe_extract_tar(archive, dest)
 
 
-def _copy_worktree_snapshot(source: Path, dest: Path) -> None:
-    def ignore(_dir: str, names: list[str]) -> set[str]:
-        return {name for name in names if name in {".git", ".DS_Store"}}
+def _reject_unsafe_tree(source: Path, ignored_names: set[str] | None = None) -> None:
+    ignored_names = ignored_names or set()
+    for root, dirs, files in os.walk(source, followlinks=False):
+        dirs[:] = [name for name in dirs if name not in ignored_names]
+        for name in [*dirs, *(name for name in files if name not in ignored_names)]:
+            path = Path(root) / name
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                continue
+            raise SyncError(f"sync: unsafe filesystem entry: {path}")
 
-    shutil.copytree(source, dest, dirs_exist_ok=True, ignore=ignore, symlinks=True)
+
+def _copy_worktree_snapshot(source: Path, dest: Path) -> None:
+    ignored = {".git", ".DS_Store"}
+    _reject_unsafe_tree(source, ignored)
+
+    def ignore(_dir: str, names: list[str]) -> set[str]:
+        return {name for name in names if name in ignored}
+
+    shutil.copytree(source, dest, dirs_exist_ok=True, ignore=ignore)
 
 
 def _copy_asset_dirs(base: Path, asset_dest: Path, prefix: Path) -> int:
     if not base.is_dir():
         return 0
+    _reject_unsafe_tree(base)
     count = 0
     for source_dir in sorted(p for p in base.rglob("*.assets") if p.is_dir()):
         rel = source_dir.relative_to(base)
         out = asset_dest / prefix / rel
         out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_dir, out, symlinks=True)
+        shutil.copytree(source_dir, out)
         count += 1
     return count
 

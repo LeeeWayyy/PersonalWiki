@@ -44,6 +44,9 @@ from pathlib import Path
 PATH_RX = re.compile(r"^wiki/(entities|topics)/[^/].*\.md$")
 TAXONOMY_PATH = "wiki/_taxonomy.md"
 QUOTED_HEADER_RX = re.compile(r'^diff --git "a/([^"]+)" "b/([^"]+)"$')
+MODE_DECL_RX = re.compile(r"^(?:old mode|new mode|new file mode|deleted file mode) ([0-9]{6})$")
+INDEX_MODE_RX = re.compile(r"^index [0-9a-f]+\.\.[0-9a-f]+ ([0-9]{6})$")
+REGULAR_GIT_MODES = {"100644", "100755"}
 
 
 def parse_header(line: str) -> tuple[str, str] | None:
@@ -174,6 +177,14 @@ def cmd_scope(diff_path: Path) -> int:
             # create/modify; a stray destructive op from a
             # malformed LLM response would otherwise pass scope and
             # then be applied by `git apply --index`.
+            mode_line = line.rstrip("\n")
+            mode_match = MODE_DECL_RX.match(mode_line) or INDEX_MODE_RX.match(mode_line)
+            if mode_match and mode_match.group(1) not in REGULAR_GIT_MODES:
+                bad.append(
+                    line.rstrip("\n")
+                    + "  (forbidden operation: symlink or non-regular Git mode)"
+                )
+                continue
             if line.startswith("deleted file mode"):
                 bad.append("  (forbidden operation: deleted file mode)")
             elif line.startswith("rename from "):
